@@ -260,8 +260,10 @@ func (m *Module) testTimeBasedPayload(
 				"Time-based injection confirmed over %d rounds (baseline %dms, last probe delayed by %dms) — %s via parameter %q",
 				timeBasedConfirmationRounds, baselineDuration.Milliseconds(), lastDelay.Milliseconds(), payload.desc, ip.Name(),
 			),
-			Severity:   severity.High,
-			Confidence: severity.Firm,
+			// Time-based inference is prone to backend-delay false positives
+			// (unlike the auth-bypass/size/boolean paths) — flag as suspect.
+			Severity:   severity.Suspect,
+			Confidence: severity.Tentative,
 			Tags:       []string{"nosqli", "injection", "mongodb", "time-based"},
 			Reference:  []string{"https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/07-Input_Validation_Testing/05.6-Testing_for_NoSQL_Injection"},
 		},

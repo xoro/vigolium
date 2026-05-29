@@ -10,7 +10,7 @@ import (
 // ErrBinaryPlatformMismatch is returned when the embedded vigolium-audit blob
 // targets a different OS/arch than the running process. This indicates a
 // release packaging bug: the wrong-platform audit binary was staged into the
-// go:embed path when vigolium was cross-compiled. See build/scripts/
+// embed path when vigolium was cross-compiled. See build/scripts/
 // stage-audit-blob.sh and the per-target goreleaser pre-hook.
 var ErrBinaryPlatformMismatch = errors.New("vigolium-audit binary platform mismatch")
 

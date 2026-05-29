@@ -188,8 +188,10 @@ func (m *Module) ScanPerHost(
 					Info: output.Info{
 						Name:        fmt.Sprintf("HTTP Request Smuggling: %s (Timeout)", probe.name),
 						Description: probe.desc,
-						Severity:    severity.High,
-						Confidence:  severity.Tentative,
+						// Timing/timeout inference is prone to backend-delay false
+						// positives — flag as suspect (matches the timing-anomaly path).
+						Severity:   severity.Suspect,
+						Confidence: severity.Tentative,
 					},
 				})
 			}

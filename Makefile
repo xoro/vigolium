@@ -164,17 +164,20 @@ test-e2e-postgres: install-gotestsum
 	@echo "$(PREFIX) Running PostgreSQL E2E tests..."
 	$(TESTCMD) $(TESTFLAGS) -tags=e2e -run TestPg_ ./test/e2e/...
 
-# Run canary tests - DVWA, VAmPI, Juice Shop (requires Docker, slower)
+# Run canary tests - DVWA, VAmPI, Juice Shop (requires Docker, slower).
+# The full canary suite (nuclei known-issue-scan + dynamic assessment against
+# several live targets) exceeds Go's default 10m binary timeout, so raise it
+# to match test-e2e.
 test-canary: install-gotestsum
 	@echo "$(PREFIX) Running canary tests (requires Docker)..."
-	$(TESTCMD) $(TESTFLAGS) -tags=canary ./test/e2e/...
+	$(TESTCMD) $(TESTFLAGS) -tags=canary -timeout 60m ./test/e2e/...
 
 # Run canary tests against PostgreSQL (requires 'make postgres-up' first).
 # Per-test: drops+recreates the shared PG schema for isolation.
 test-canary-postgres: export VIGOLIUM_TEST_DB_DRIVER=postgres
 test-canary-postgres: install-gotestsum
 	@echo "$(PREFIX) Running canary tests against PostgreSQL..."
-	$(TESTCMD) $(TESTFLAGS) -tags=canary ./test/e2e/...
+	$(TESTCMD) $(TESTFLAGS) -tags=canary -timeout 60m ./test/e2e/...
 
 # One-shot pre-deploy validation: spin up PG, run PG e2e + canary against it,
 # then tear down (even on test failure). Run locally before prod deploys.

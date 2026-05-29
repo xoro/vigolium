@@ -153,18 +153,22 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/ws_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/xml_saml_security"
 	"github.com/vigolium/vigolium/pkg/modules/active/xss_dom_confirm"
+	"github.com/vigolium/vigolium/pkg/modules/active/xss_stored"
 	"github.com/vigolium/vigolium/pkg/modules/active/xxe_generic"
 )
 
 // registerActiveModules registers every built-in active scanner module.
 // Split out of default_registry.go; order is preserved from the original chain.
 func registerActiveModules(r *Registry) {
-	// Active modules - XSS Light (3 specialized scanners)
+	// Active modules - XSS Light (4 specialized scanners)
 	r.RegisterActive(xsslightscanner.NewURLParamsScanner())
 	r.RegisterActive(xsslightscanner.NewPathScanner())
 	r.RegisterActive(xsslightscanner.NewParamDiscoveryScanner())
+	r.RegisterActive(xsslightscanner.NewEncodedScanner())
 	// Active modules - XSS DOM Confirm (browser-confirmed reflected + DOM)
 	r.RegisterActive(xss_dom_confirm.New())
+	// Active modules - Stored XSS (browser-confirmed persistent)
+	r.RegisterActive(xss_stored.New())
 	// Active modules - Injection
 	r.RegisterActive(reflected_ssti.New())
 	r.RegisterActive(ssti_detection.New())

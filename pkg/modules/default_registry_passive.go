@@ -27,6 +27,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/directory_listing_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/django_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/dom_xss_detect"
+	"github.com/vigolium/vigolium/pkg/modules/passive/dom_xss_taint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/drupal_api_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/drupal_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/endpoint_classifier"
@@ -105,6 +106,7 @@ import (
 func registerPassiveModules(r *Registry) {
 	// Passive modules
 	r.RegisterPassive(dom_xss_detect.New())
+	r.RegisterPassive(dom_xss_taint.New())
 	r.RegisterPassive(auth_headers_detect.New())
 	r.RegisterPassive(openredirect_params.New())
 	r.RegisterPassive(oauth_facebook_detect.New())

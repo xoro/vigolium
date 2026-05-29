@@ -396,6 +396,7 @@ func NewExecutor(
 	e.scanCtx.ParamFindings = &modkit.ParameterFindingRegistry{}
 	e.scanCtx.TechStack = modkit.NewTechRegistry()
 	e.scanCtx.TechStack.OnDetect = cfg.OnTechDetected
+	e.scanCtx.WAFStack = modkit.NewWAFRegistry()
 
 	// Wire insertion point provider for module reuse of cached IPs
 	e.scanCtx.InsertionPoints = &executorIPProvider{cache: e.caches.ipCache}

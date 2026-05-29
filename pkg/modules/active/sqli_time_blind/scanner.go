@@ -11,6 +11,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // sleepThreshold is the minimum response time differential to consider
@@ -148,6 +149,10 @@ func (m *Module) testTimingPair(
 		Info: output.Info{
 			Description: "Time-based blind SQL injection confirmed via triple verification " +
 				"(sleep/no-sleep/sleep). Database type: " + dbType,
+			// Time-based inference is prone to backend-delay false positives —
+			// flag as suspect/tentative rather than the module default.
+			Severity:   severity.Suspect,
+			Confidence: severity.Tentative,
 		},
 	}, nil
 }
