@@ -41,6 +41,7 @@ var (
 	globalDisableFetchResponse    bool
 	globalWidth                   int
 	globalSkipDependencyCheck     bool
+	globalSoftFail                bool
 
 	// Input / server / module flags (shared by scan, ingest, etc.)
 	globalInput       string
@@ -96,6 +97,7 @@ var (
 	// Stateless mode
 	globalStateless   bool
 	globalSplitByHost bool
+	globalDBIsolate   bool
 
 	// Request clustering
 	globalNoClustering bool
@@ -236,6 +238,7 @@ func init() {
 	pf.BoolVar(&globalListInputModes, "list-input-mode", false, "List all supported input modes with examples")
 	pf.BoolVarP(&globalForce, "force", "F", false, "Skip confirmation prompts")
 	pf.BoolVar(&globalSkipDependencyCheck, "skip-dependency-check", false, "Skip the first-run dependency check (chromium, nuclei templates) and stamp ~/.vigolium/initialized immediately")
+	pf.BoolVar(&globalSoftFail, "soft-fail", false, "Always exit 0, even when a command fails (error is still printed to stderr; keeps wrapping scripts/CI from being interrupted)")
 	pf.IntVar(&globalWidth, "width", 70, "Maximum column width for table output")
 
 	pf.StringVar(&globalScanUUID, "scan-uuid", "", "Pin scan UUID for this session (use to sync results across nodes; defaults to a freshly-minted UUID)")
@@ -250,6 +253,14 @@ func init() {
 
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
+		// Cobra has already printed the error to stderr. --soft-fail forces a
+		// successful exit code so wrapping scripts/CI pipelines aren't aborted
+		// by errors the operator considers expected. The persistent flag is
+		// bound during Execute()'s arg parsing, so its value is populated here
+		// for every error except a flag-parse failure (which stays non-zero).
+		if globalSoftFail {
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 }

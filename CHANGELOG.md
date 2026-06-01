@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.19-beta] - 2026-06-01
+
+### Added
+
+- Five new active modules: `ssrf-filter-bypass`, `ssrf-protocol-smuggling`, `open-redirect-confusion`, `reverse-proxy-path-confusion` (High), and `cache-poisoned-dos` / CPDoS (Medium).
+- `--db-isolate` flag (`scan`, `agent autopilot`, `agent swarm`): scan into a private temp SQLite DB and merge into `--db` at the end, so parallel scans can share one `--db` without write contention.
+- `--soft-fail` global flag: always exit 0 even on error (error still printed to stderr) for CI/scripts.
+
+### Changed
+
+- `response-header-injection`: confirmed injections served over a keep-alive connection are now flagged as likely to let an attacker poison the shared connection's response queue and deliver their responses to other users, and are raised to High.
+
 ## [v0.1.18-beta] - 2026-05-30
 
 A false-positive reduction release: high/critical active modules now re-confirm findings (replay payload vs. clean baseline) before reporting, plus discovery and crawler robustness fixes.

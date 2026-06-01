@@ -60,6 +60,7 @@ func registerNativeScanFlags(flags *pflag.FlagSet, includeAuth bool) {
 	// Stateless mode
 	flags.BoolVarP(&globalStateless, "stateless", "S", false, "Use a temporary database that is discarded after the scan (pass --output/--format to persist results)")
 	flags.BoolVar(&globalSplitByHost, "split-by-host", false, "In stateless multi-target mode (-S -T file), write a separate per-host output file (base-<host>.<ext>) instead of one unified file")
+	flags.BoolVar(&globalDBIsolate, "db-isolate", false, "Scan into a private temporary database, then merge results into --db (or the default DB) at the end — lets many parallel scans share one --db without write contention (SQLite only, not with --stateless)")
 
 	if includeAuth {
 		flags.StringSliceVar(&scanOpts.AuthFiles, "auth-file", nil,

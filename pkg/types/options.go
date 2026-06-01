@@ -216,6 +216,15 @@ type Options struct {
 	// one unified output file. No effect outside stateless + target-file scans.
 	SplitByHost bool
 
+	// DBIsolate scans into a private temporary SQLite database and merges the
+	// results into the destination --db (or the default DB) once the scan
+	// finishes, then discards the temp database. Lets many parallel scan
+	// processes target the same --db without contending on a single SQLite
+	// writer during the scan: contention collapses to a short, serialized,
+	// retrying bulk merge at the end. Requires a SQLite destination and is
+	// mutually exclusive with --stateless (which discards results entirely).
+	DBIsolate bool
+
 	// NoTechFilter disables the tech-stack allowlist gate so every module runs
 	// regardless of the host's detected stack. Set by --no-tech-filter and
 	// applied automatically when Intensity == "deep".

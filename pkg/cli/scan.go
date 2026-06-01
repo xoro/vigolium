@@ -131,6 +131,10 @@ func runScanCmd(cmd *cobra.Command, args []string) error {
 	// Stateless mode validation
 	scanOpts.Stateless = globalStateless
 	scanOpts.SplitByHost = globalSplitByHost
+	scanOpts.DBIsolate = globalDBIsolate
+	if scanOpts.DBIsolate && scanOpts.Stateless {
+		return fmt.Errorf("--db-isolate and --stateless are mutually exclusive (--stateless discards results; --db-isolate merges them into --db)")
+	}
 	if scanOpts.Stateless {
 		if globalDB != "" {
 			return fmt.Errorf("--stateless and --db are mutually exclusive")
@@ -454,6 +458,17 @@ func executeNativeScan(cmd *cobra.Command, settings *config.Settings, strategyNa
 		settings.Database.Driver = "sqlite"
 		settings.Database.SQLite.Path = statelessDBPath
 	}
+
+	// DB-isolate mode: scan into a private temporary SQLite database, then merge
+	// the results into the real --db (or default DB) once the scan finishes, so
+	// many parallel scan processes can share one --db without contending on a
+	// single SQLite writer. Registered before the DB opens so the merge runs
+	// after db.Close() (defers are LIFO), once the scratch's writes are flushed.
+	finish, dErr := dbIsolateBegin(settings, scanOpts.Silent)
+	if dErr != nil {
+		return dErr
+	}
+	defer func() { err = finish(err) }()
 
 	if err := settings.Database.Validate(); err != nil {
 		return fmt.Errorf("invalid database configuration: %w", err)
@@ -1025,6 +1040,126 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 	}
 }
 
+// dbIsolateAgentFlagUsage is the shared --db-isolate help text for the agent
+// subcommands (autopilot, swarm). scan/run use a variant that also references
+// --stateless, so it keeps its own string.
+const dbIsolateAgentFlagUsage = "Run into a private temporary database, then merge results into --db (or the default DB) at the end — lets parallel runs share one --db without write contention (SQLite only)"
+
+// dbIsolateDestPath records the real destination database that a --db-isolate
+// run merges into at the end. dbIsolateBegin repoints settings.Database and
+// globalDB at the scratch file, which erases the original destination from
+// those, so we stash it here for the config banner (printScanSummary) to show.
+var dbIsolateDestPath string
+
+// dbIsolateBegin, when --db-isolate is active, swaps the run's database to a
+// private scratch SQLite file and returns a finisher that merges the scratch
+// into the real destination (--db when set, else the configured DB) and cleans
+// it up. It repoints BOTH database-acquisition paths at the scratch:
+// settings.Database (native scan and swarm via NewDB) and the global --db value
+// (autopilot via getDB → clicommon.GetDB). When isolation is off it returns a
+// no-op finisher, so callers can unconditionally `defer finish(err)`.
+//
+// Shared by `scan`/`run`, `agent autopilot`, and `agent swarm`; register the
+// returned finisher in a defer BEFORE opening the DB so the merge runs after
+// the DB is closed (defers are LIFO).
+func dbIsolateBegin(settings *config.Settings, silent bool) (finish func(error) error, err error) {
+	noop := func(runErr error) error { return runErr }
+	if !globalDBIsolate {
+		return noop, nil
+	}
+	// Resolve the real destination: --db wins, else the configured DB.
+	destCfg := settings.Database
+	if globalDB != "" {
+		destCfg.Driver = "sqlite"
+		destCfg.SQLite.Path = globalDB
+	}
+	if destCfg.Driver != "sqlite" {
+		return nil, fmt.Errorf("--db-isolate requires a SQLite database (got driver %q)", destCfg.Driver)
+	}
+	// Stash the destination before we repoint settings/globalDB below, so the
+	// config banner can report where results will be merged.
+	dbIsolateDestPath = destCfg.SQLite.Path
+
+	tmpFile, tmpErr := os.CreateTemp("", "vigolium-isolate-*.sqlite")
+	if tmpErr != nil {
+		return nil, fmt.Errorf("failed to create temporary database: %w", tmpErr)
+	}
+	scratchPath := tmpFile.Name()
+	_ = tmpFile.Close()
+
+	settings.Database.Driver = "sqlite"
+	settings.Database.SQLite.Path = scratchPath
+	// autopilot opens via getDB() → clicommon.GetDB(globalConfig, globalDB),
+	// which ignores settings.Database, so the scratch path must be reflected in
+	// globalDB too. Harmless for the native/swarm paths (they read settings).
+	globalDB = scratchPath
+
+	return func(runErr error) error {
+		return finishDBIsolateMerge(destCfg, scratchPath, silent, runErr)
+	}, nil
+}
+
+// finishDBIsolateMerge merges the scratch database produced by a --db-isolate
+// run into the real destination database, then discards the scratch on
+// success. It is called from a defer that runs after the run's DB handle is
+// closed, so the scratch DB's writes are fully flushed before the merge reads
+// them. scanErr is the run's own error (if any): on a clean merge it is
+// returned unchanged; on a merge failure the scratch is preserved and the
+// command still exits non-zero.
+func finishDBIsolateMerge(destCfg config.DatabaseConfig, scratchPath string, silent bool, scanErr error) error {
+	ctx := context.Background()
+	destPath := database.ExpandPath(destCfg.SQLite.Path)
+
+	dest, err := database.NewDB(&destCfg)
+	if err != nil {
+		return dbIsolateMergeFailed(scratchPath, scanErr, fmt.Errorf("open destination database: %w", err))
+	}
+	defer func() { _ = dest.Close() }()
+
+	if err := dest.CreateSchema(ctx); err != nil {
+		return dbIsolateMergeFailed(scratchPath, scanErr, fmt.Errorf("prepare destination schema: %w", err))
+	}
+	// Best-effort: seed the default project/FTS so a brand-new destination is
+	// fully usable; a failure here doesn't block the merge of the result rows.
+	_ = dest.SeedDefaults(ctx)
+
+	var stats *database.MergeStats
+	mergeErr := database.WithMergeLock(destPath, 60*time.Second, func() error {
+		var e error
+		stats, e = database.MergeSQLiteFile(ctx, dest, scratchPath)
+		return e
+	})
+	if mergeErr != nil {
+		return dbIsolateMergeFailed(scratchPath, scanErr, mergeErr)
+	}
+
+	// Success: discard the scratch database and its WAL sidecars.
+	_ = os.Remove(scratchPath)
+	_ = os.Remove(scratchPath + "-wal")
+	_ = os.Remove(scratchPath + "-shm")
+	if !silent && stats != nil {
+		fmt.Fprintf(os.Stderr, "%s Merged results into %s (%d records, %d findings)\n",
+			terminal.InfoSymbol(), terminal.Cyan(destCfg.SQLite.Path), stats.RecordsMerged, stats.FindingsMerged)
+	}
+	return scanErr
+}
+
+// dbIsolateMergeFailed preserves the scratch database (so results are never
+// silently lost), logs a recovery hint pointing at it, and returns the error
+// the command should exit with: the original scan error when the scan itself
+// failed, otherwise the merge error.
+func dbIsolateMergeFailed(scratchPath string, scanErr, mergeErr error) error {
+	fmt.Fprintf(os.Stderr,
+		"%s --db-isolate merge failed: %v\n   This scan's results are preserved in the temporary database:\n     %s\n",
+		terminal.ErrorPrefix(), mergeErr, terminal.Cyan(scratchPath))
+	zap.L().Error("db-isolate merge failed; scratch database preserved",
+		zap.String("scratch", scratchPath), zap.Error(mergeErr))
+	if scanErr != nil {
+		return scanErr
+	}
+	return fmt.Errorf("db-isolate merge failed: %w", mergeErr)
+}
+
 // exportProjectScope returns the project filter for a post-scan export: empty
 // (whole DB) for stateless runs, whose temp DB holds only this scan; the run's
 // project (defaulting to DefaultProjectUUID) for persisted runs, so the export
@@ -1344,6 +1479,18 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 			statelessLine += " " + terminal.Gray("("+settings.Database.SQLite.Path+")")
 		}
 		fmt.Fprintf(os.Stderr, "  %s %s\n", terminal.Purple(terminal.SymbolInfo), statelessLine)
+	}
+	if opts.DBIsolate {
+		dest := dbIsolateDestPath
+		if dest == "" {
+			dest = "--db"
+		}
+		isolateLine := "DB isolation: scanning into a private temporary database, merged into " +
+			terminal.HiTeal(dest) + " at the end"
+		if globalVerbose && settings != nil && settings.Database.SQLite.Path != "" {
+			isolateLine += " " + terminal.Gray("(scratch: "+settings.Database.SQLite.Path+")")
+		}
+		fmt.Fprintf(os.Stderr, "  %s %s\n", terminal.Purple(terminal.SymbolInfo), isolateLine)
 	}
 	if opts.ProjectUUID != "" {
 		fmt.Fprintf(os.Stderr, "  %s Project: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ProjectUUID))

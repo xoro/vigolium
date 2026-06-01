@@ -10,8 +10,10 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
@@ -129,7 +131,10 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
-		results = append(results, m.buildResult(urlx.String(), ip.Name(), p.name, location, fuzzedRawStr, evidence))
+		// RQP-amplification consult: only enriches an already-confirmed finding —
+		// the detection flow above is untouched.
+		rqpAmplified, rqpEvidence := infra.RQPAmplification(ctx.Response())
+		results = append(results, m.buildResult(urlx.String(), ip.Name(), p.name, location, fuzzedRawStr, evidence, rqpAmplified, rqpEvidence))
 		return results, nil
 	}
 
@@ -241,21 +246,36 @@ func (m *Module) injectRawPayload(rawRequest []byte, ip httpmsg.InsertionPoint, 
 	return []byte(result)
 }
 
-func (m *Module) buildResult(url, paramName, payloadName, location, request, response string) *output.ResultEvent {
+func (m *Module) buildResult(url, paramName, payloadName, location, request, response string, rqpAmplified bool, rqpEvidence string) *output.ResultEvent {
+	extracted := []string{
+		"payload=" + payloadName,
+		"canary=" + m.canary,
+		"location=" + location,
+	}
+	desc := fmt.Sprintf("HTTP response header injection via parameter %q using %s payload. "+
+		"The injected canary %q appeared in the %s, confirming the server copies user input into response headers without sanitizing CRLF sequences.",
+		paramName, payloadName, m.canary, location)
+
+	info := output.Info{Description: desc}
+
+	// RQP amplification: a confirmed header injection that rides an HTTP/1.1
+	// keep-alive connection behind a pooling proxy can be escalated to Response
+	// Queue Poisoning — poisoning the shared connection's response queue so other
+	// users receive attacker-controlled responses. We flag the precondition and
+	// raise severity, but deliberately never run the live cross-user confirmation,
+	// which would expose another user's response.
+	if rqpAmplified {
+		extracted = append(extracted, "rqp-amplification="+rqpEvidence)
+		info.Severity = severity.High
+		info.Description = desc + fmt.Sprintf(" Escalation: the response is served over %s, so this injection is likely escalatable to Response Queue Poisoning (RQP), delivering attacker-controlled responses to other users on the shared connection. Live RQP confirmation is intentionally not attempted.", rqpEvidence)
+	}
+
 	return &output.ResultEvent{
 		URL:              url,
 		Request:          request,
 		Response:         response,
 		FuzzingParameter: paramName,
-		ExtractedResults: []string{
-			"payload=" + payloadName,
-			"canary=" + m.canary,
-			"location=" + location,
-		},
-		Info: output.Info{
-			Description: fmt.Sprintf("HTTP response header injection via parameter %q using %s payload. "+
-				"The injected canary %q appeared in the %s, confirming the server copies user input into response headers without sanitizing CRLF sequences.",
-				paramName, payloadName, m.canary, location),
-		},
+		ExtractedResults: extracted,
+		Info:             info,
 	}
 }
