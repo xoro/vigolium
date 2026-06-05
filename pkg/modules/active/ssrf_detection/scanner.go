@@ -349,17 +349,7 @@ func (m *Module) fetchBody(ctx *httpmsg.HttpRequestResponse, httpClient *http.Re
 // Incapsula, …) with a plain status gate that also catches generic WAFs the
 // detector does not recognize.
 func isBlockedResponse(resp *httputil.ResponseChain) bool {
-	if resp == nil || resp.Response() == nil {
-		return false
-	}
-	if infra.GetBlockDetectionValidator().Validate(resp) != nil {
-		return true
-	}
-	switch resp.Response().StatusCode {
-	case 401, 403, 429, 503:
-		return true
-	}
-	return false
+	return infra.IsBlockedResponse(resp)
 }
 
 // looksLikeURLParam checks if a parameter name or value suggests URL input.

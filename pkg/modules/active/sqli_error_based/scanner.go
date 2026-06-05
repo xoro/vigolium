@@ -221,17 +221,7 @@ func fetchBody(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw
 // detector (Cloudflare, Akamai, Incapsula, …) with a plain status gate that also
 // catches generic WAFs the detector does not recognize.
 func isBlockedResponse(resp *httputil.ResponseChain) bool {
-	if resp == nil || resp.Response() == nil {
-		return false
-	}
-	if infra.GetBlockDetectionValidator().Validate(resp) != nil {
-		return true
-	}
-	switch resp.Response().StatusCode {
-	case 401, 403, 429, 503:
-		return true
-	}
-	return false
+	return infra.IsBlockedResponse(resp)
 }
 
 func getResponseBodyIfNotResponsive(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) string {

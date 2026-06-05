@@ -1,0 +1,120 @@
+package infra
+
+import (
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+
+	httputil "github.com/projectdiscovery/utils/http"
+)
+
+// fillResponseChain builds a filled *httputil.ResponseChain from a status,
+// header set, and body, mirroring what the requester hands a module.
+func fillResponseChain(t *testing.T, status int, header http.Header, body string) *httputil.ResponseChain {
+	t.Helper()
+	if header == nil {
+		header = http.Header{}
+	}
+	resp := &http.Response{
+		StatusCode: status,
+		Status:     http.StatusText(status),
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	rc := httputil.NewResponseChain(resp, 0)
+	if err := rc.Fill(); err != nil {
+		t.Fatalf("fill response chain: %v", err)
+	}
+	t.Cleanup(rc.Close)
+	return rc
+}
+
+// TestValidate_ChallengeAndBlockPages exercises the shared block detector,
+// focusing on the status-independent challenge detection added to stop a WAF/CDN
+// interstitial — which an edge often serves with an ordinary 200 — from being
+// read as an application response by a body-matching module. The motivating
+// false positive was a Cloudflare challenge whose random per-request tokens
+// matched the TiDB error signature and surfaced as Critical/Certain SQLi.
+func TestValidate_ChallengeAndBlockPages(t *testing.T) {
+	v := GetBlockDetectionValidator()
+
+	tests := []struct {
+		name      string
+		status    int
+		header    http.Header
+		body      string
+		wantBlock bool
+	}{
+		{
+			name:      "clean 200 application response",
+			status:    200,
+			body:      `{"status":"ok","rows":[]}`,
+			wantBlock: false,
+		},
+		{
+			name:      "429 rate limited",
+			status:    429,
+			body:      "slow down",
+			wantBlock: true,
+		},
+		{
+			name:      "403 cloudflare captcha by server header",
+			status:    403,
+			header:    http.Header{"Server": {"cloudflare"}},
+			body:      "blocked",
+			wantBlock: true,
+		},
+		{
+			name:      "200 challenge via Cf-Mitigated header",
+			status:    200,
+			header:    http.Header{"Cf-Mitigated": {"challenge"}},
+			body:      "<html><title>Just a moment...</title></html>",
+			wantBlock: true,
+		},
+		{
+			name:      "200 challenge via cdn-cgi challenge-platform body marker",
+			status:    200,
+			body:      `<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>`,
+			wantBlock: true,
+		},
+		{
+			name:      "202 challenge via _cf_chl_opt body marker",
+			status:    202,
+			body:      `<script>window._cf_chl_opt = {cRay:'a05dba9dfb7deb9e'};</script>`,
+			wantBlock: true,
+		},
+		{
+			name:      "200 managed challenge noscript text",
+			status:    200,
+			body:      `<noscript><span>Enable JavaScript and cookies to continue</span></noscript>`,
+			wantBlock: true,
+		},
+		{
+			name:      "200 Incapsula interstitial",
+			status:    200,
+			body:      `Request unsuccessful. Incapsula incident ID: 1234-5678`,
+			wantBlock: true,
+		},
+		{
+			name:   "200 page embedding a real Turnstile widget is not a block",
+			status: 200,
+			body: `<div class="cf-turnstile" data-sitekey="0xAAA"></div>` +
+				`<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>`,
+			wantBlock: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rc := fillResponseChain(t, tt.status, tt.header, tt.body)
+			err := v.Validate(rc)
+			if (err != nil) != tt.wantBlock {
+				t.Fatalf("Validate() err = %v, wantBlock = %v", err, tt.wantBlock)
+			}
+		})
+	}
+}

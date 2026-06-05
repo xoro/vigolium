@@ -151,24 +151,93 @@ func (m *Module) ScanPerHost(
 			resp.Response().StatusCode < 300
 
 		if bypassed {
+			bypassStatus := resp.Response().StatusCode
+			resp.Close()
+			// A single 2xx after a 429 does not prove the header bypassed anything:
+			// rate-limit windows are short, so the limiter may simply have reset
+			// between probes. Re-confirm with a differential — a plain request (no
+			// bypass header) must STILL be throttled while the header request
+			// succeeds again — before reporting.
+			if !m.confirmRateLimitBypass(ctx, httpClient, header.name, header.value) {
+				continue
+			}
 			results = append(results, &output.ResultEvent{
 				URL:     target,
 				Matched: target,
 				Request: string(modifiedRaw),
 				ExtractedResults: []string{
 					fmt.Sprintf("Bypass header: %s: %s", header.name, header.value),
-					fmt.Sprintf("Response status: %d (was 429 without header)", resp.Response().StatusCode),
+					fmt.Sprintf("Response status: %d (plain request still 429)", bypassStatus),
 				},
 				Info: output.Info{
 					Name:        fmt.Sprintf("Rate Limit Bypass via %s", header.name),
 					Description: fmt.Sprintf("The server rate limiting can be bypassed by adding the %s header with value %s. This allows an attacker to circumvent rate limiting protections.", header.name, header.value),
 				},
 			})
-			resp.Close()
 			return results, nil
 		}
 		resp.Close()
 	}
 
 	return results, nil
+}
+
+// confirmRateLimitBypass re-verifies that the header genuinely bypasses the
+// limiter rather than the window having reset between probes. It requires a
+// differential: a plain request (no bypass header) must still be throttled
+// (429) AND a request carrying the header must succeed again (2xx). Both are
+// re-issued with NoClustering so each is a fresh observation. It fails closed
+// (returns false when the differential cannot be established) because a reset
+// window is the dominant false-positive cause for this check.
+func (m *Module) confirmRateLimitBypass(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	name, value string,
+) bool {
+	// 1) Without the bypass header, the limiter must still be active.
+	stillLimited := false
+	for i := 0; i < 3; i++ {
+		if st, ok := m.sendStatus(ctx, httpClient, "", ""); ok && st == 429 {
+			stillLimited = true
+			break
+		}
+	}
+	if !stillLimited {
+		return false
+	}
+	// 2) With the bypass header, the request must succeed again (reproducible).
+	st, ok := m.sendStatus(ctx, httpClient, name, value)
+	return ok && st >= 200 && st < 300
+}
+
+// sendStatus issues one request and returns its status code. When name is
+// non-empty the given header is added/replaced first. ok is false on any
+// parse/HTTP/empty-response error.
+func (m *Module) sendStatus(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	name, value string,
+) (int, bool) {
+	raw := ctx.Request().Raw()
+	if name != "" {
+		var err error
+		raw, err = httpmsg.AddOrReplaceHeader(raw, name, value)
+		if err != nil {
+			return 0, false
+		}
+	}
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return 0, false
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, false
+	}
+	return resp.Response().StatusCode, true
 }

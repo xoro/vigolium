@@ -67,6 +67,33 @@ var configFilePatterns = []string{
 	"package.json", "dockerfile",
 }
 
+// configContextAnchors are config-specific tokens that confirm a response body
+// really is a build config rather than an app/vendor bundle that merely contains
+// a config-shaped string. Deliberately specific — generic tokens like
+// "module.exports" appear in ordinary bundles and would defeat the gate.
+var configContextAnchors = []string{
+	"defineConfig", "defineNuxtConfig", "withNuxt", "nextConfig",
+	`"devDependencies"`, `"peerDependencies"`,
+}
+
+// looksLikeBuildConfig reports whether the response is plausibly an exposed
+// build-config file — by URL name or a config-specific body anchor. This stops
+// the config regexes (sourcemap:true, hostname:'*', ...) from firing on every
+// minified bundle that happens to embed a config-shaped option string.
+func looksLikeBuildConfig(pathLower, body string) bool {
+	for _, pat := range configFilePatterns {
+		if strings.Contains(pathLower, pat) {
+			return true
+		}
+	}
+	for _, anchor := range configContextAnchors {
+		if strings.Contains(body, anchor) {
+			return true
+		}
+	}
+	return false
+}
+
 // Module implements the build misconfiguration detection passive scanner.
 type Module struct {
 	modkit.BasePassiveModule
@@ -139,6 +166,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}
 
 	body := ctx.Response().BodyToString()
+
+	// Require build-config attribution before applying the config regexes. A
+	// plain app/vendor bundle that happens to contain a config-shaped string
+	// (e.g. a serialized `sourcemap:true` option deep inside a library) is not a
+	// build misconfiguration.
+	if !looksLikeBuildConfig(strings.ToLower(urlx.Path), body) {
+		return nil, nil
+	}
 
 	var results []*output.ResultEvent
 

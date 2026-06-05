@@ -45,8 +45,14 @@ var tokenPatterns = []tokenPattern{
 		cwe:      "CWE-922",
 	},
 	{
+		// The gap between the Authorization/Bearer token and the localStorage
+		// read is bounded to a short, statement-local window ([^;\n]{0,40}).
+		// Minified bundles are a single line, so an unbounded `.*` would stitch
+		// an unrelated `localStorage.getItem('theme')` to a stray `Bearer`
+		// literal hundreds of chars away and emit a false High; the bound keeps
+		// the two within one expression/statement.
 		name:     "localStorage token used in Authorization header",
-		pattern:  regexp.MustCompile(`(?:Authorization|Bearer).*localStorage\.getItem|localStorage\.getItem.*(?:Authorization|Bearer)`),
+		pattern:  regexp.MustCompile(`(?:Authorization|Bearer)[^;\n]{0,40}localStorage\.getItem|localStorage\.getItem[^;\n]{0,40}(?:Authorization|Bearer)`),
 		severity: severity.High,
 		cwe:      "CWE-922",
 	},

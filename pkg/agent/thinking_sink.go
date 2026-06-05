@@ -26,12 +26,7 @@ func openThinkingSink(opts Options) *thinkingSink {
 	if opts.SessionDir == "" {
 		return nil
 	}
-	tmpl := opts.PromptTemplate
-	if tmpl == "" {
-		tmpl = "inline"
-	}
-	// Defensive: prevent directory traversal via template name.
-	safe := strings.NewReplacer("/", "-", "\\", "-", "..", "-", " ", "-").Replace(tmpl)
+	safe := sanitizeTemplateSegment(opts.PromptTemplate)
 	path := filepath.Join(opts.SessionDir, "thinking-"+safe+".md")
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -58,4 +53,18 @@ func (s *thinkingSink) close() {
 		return
 	}
 	_ = s.f.Close()
+}
+
+// sanitizeTemplateSegment turns a prompt-template name into a filename-safe
+// segment for the per-phase artifacts keyed off it (thinking-<seg>.md,
+// transcript-<seg>.jsonl). Blank falls back to "inline"; slashes, backslashes,
+// "..", and spaces collapse to "-" so a template name can't escape the session
+// dir. Shared by the thinking sink and the transcript recorder so both name
+// their per-phase files by one rule.
+func sanitizeTemplateSegment(template string) string {
+	t := strings.TrimSpace(template)
+	if t == "" {
+		return "inline"
+	}
+	return strings.NewReplacer("/", "-", "\\", "-", "..", "-", " ", "-").Replace(t)
 }

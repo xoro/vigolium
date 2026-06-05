@@ -82,6 +82,84 @@ func TestLoggerNilWriterIsNoop(t *testing.T) {
 	}
 }
 
+func TestThinkingLaneFlushesCompactedBlock(t *testing.T) {
+	disableColor(t)
+	var tools, think bytes.Buffer
+	l := NewWith(&tools, true).WithThinkingWriter(&think)
+
+	// Reasoning deltas accumulate; nothing renders until a flush trigger.
+	l.HandleThinking(engine.Event{Type: engine.EventThinkingDelta, Delta: "**Plan**\n\n\n\nProbe the login flow"})
+	l.HandleThinking(engine.Event{Type: engine.EventThinkingDelta, Delta: " for IDOR.\n"})
+	if think.Len() != 0 {
+		t.Fatalf("thinking should not render before a flush trigger, got: %q", think.String())
+	}
+
+	// A tool-exec-start flushes the reasoning first (think → act ordering),
+	// then writes the tool line.
+	l.Handle(engine.Event{Type: engine.EventToolExecStart, ToolCallID: "c1", ToolName: "replay_request"})
+
+	got := think.String()
+	if !strings.Contains(got, "⋈ thinking") {
+		t.Errorf("expected ⋈ thinking header on the thinking writer, got: %q", got)
+	}
+	if !strings.Contains(got, "**Plan**") || !strings.Contains(got, "Probe the login flow for IDOR.") {
+		t.Errorf("expected compacted reasoning body, got: %q", got)
+	}
+	if strings.Contains(got, "\n\n\n") {
+		t.Errorf("blank-line runs should be compacted away, got: %q", got)
+	}
+	// The reasoning went to the thinking writer, not the tool-line writer.
+	if strings.Contains(tools.String(), "thinking") {
+		t.Errorf("reasoning must not land on the tool-line writer, got: %q", tools.String())
+	}
+	if !strings.Contains(tools.String(), "replay_request") {
+		t.Errorf("tool line should still render on the tool writer, got: %q", tools.String())
+	}
+
+	// Buffer was reset on flush — a second flush with no new deltas is a no-op.
+	think.Reset()
+	l.FlushThinking()
+	if think.Len() != 0 {
+		t.Errorf("second flush with empty buffer should write nothing, got: %q", think.String())
+	}
+}
+
+func TestThinkingLaneGatedOnVerbose(t *testing.T) {
+	disableColor(t)
+	var think bytes.Buffer
+	// verbose=false: reasoning is consumed but never rendered.
+	l := NewWith(&bytes.Buffer{}, false).WithThinkingWriter(&think)
+	if !l.HandleThinking(engine.Event{Type: engine.EventThinkingDelta, Delta: "secret reasoning"}) {
+		t.Fatal("HandleThinking should report the thinking delta as consumed even when not verbose")
+	}
+	l.FlushThinking()
+	if think.Len() != 0 {
+		t.Errorf("non-verbose logger must not render reasoning, got: %q", think.String())
+	}
+}
+
+func TestThinkingLaneRendersWhenToolWriterNil(t *testing.T) {
+	disableColor(t)
+	var think bytes.Buffer
+	// w (tool-line writer) is nil — mirrors a query with streaming off — but
+	// the reasoning lane is pinned to a real writer and must still render.
+	l := NewWith(nil, true).WithThinkingWriter(&think)
+	if !l.HandleThinking(engine.Event{Type: engine.EventThinkingDelta, Delta: "reasoning"}) {
+		t.Fatal("thinking delta should be consumed even with a nil tool writer")
+	}
+	l.FlushThinking()
+	if !strings.Contains(think.String(), "reasoning") {
+		t.Errorf("reasoning should render to thinkW even when w is nil, got: %q", think.String())
+	}
+}
+
+func TestHandleThinkingIgnoresNonThinkingEvents(t *testing.T) {
+	l := NewWith(&bytes.Buffer{}, true)
+	if l.HandleThinking(engine.Event{Type: engine.EventToolExecStart}) {
+		t.Error("HandleThinking should not consume a non-thinking event")
+	}
+}
+
 func TestFormatElapsed(t *testing.T) {
 	cases := []struct {
 		in   time.Duration

@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/pkg/agent"
 	"github.com/vigolium/vigolium/pkg/olium"
 )
 
@@ -67,8 +68,10 @@ func runAgentOlium(cmd *cobra.Command, args []string) error {
 	// the CLI flags. A load failure is non-fatal: flags alone still work,
 	// matching the pre-config behavior.
 	var oliumCfg config.OliumConfig
+	var sessionsDir string
 	if settings, err := config.LoadSettings(globalConfig); err == nil {
 		oliumCfg = settings.Agent.Olium
+		sessionsDir = settings.Agent.EffectiveSessionsDir()
 	}
 
 	opts := olium.Options{
@@ -90,6 +93,18 @@ func runAgentOlium(cmd *cobra.Command, args []string) error {
 		CustomModelID:      oliumCfg.CustomProvider.ModelID,
 		CustomAPIKey:       firstNonEmptyString(oliumLLMAPIKey, oliumCfg.CustomProvider.APIKey, oliumCfg.LLMAPIKey),
 		CustomExtraHeaders: oliumCfg.CustomProvider.ExtraHeadersMap(),
+	}
+
+	// Record a Pi-style JSONL transcript (transcript.jsonl) under the agent
+	// sessions dir so an interactive or -p run is debuggable after the fact,
+	// mirroring the agentic-scan session layout. Best-effort: a failure to
+	// mint the session dir simply disables recording. Applied to opts before
+	// both the headless and TUI branches so either path records.
+	if sessionsDir != "" {
+		runUUID := pinnedOrNewUUID(globalScanUUID)
+		if sessionDir, sdErr := agent.EnsureSessionDir(sessionsDir, runUUID); sdErr == nil {
+			opts.SessionDir = sessionDir
+		}
 	}
 
 	fmt.Fprint(os.Stderr, GetOliumBanner())

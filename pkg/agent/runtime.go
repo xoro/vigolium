@@ -14,8 +14,34 @@ import (
 // provider's prompt cache hits. Fork returns a child that shares the prefix but
 // runs independently — used for parallel sub-runs such as the source-analysis
 // fan-out.
+//
+// Close flushes and releases any per-session artifact (notably the Pi-style
+// JSONL transcript recorder): the recorder buffers the final assistant turn
+// until the run ends, so a session built with a RecordSpec must be Closed for
+// that turn to land. Sessions without a recorder Close to a no-op. Forks carry
+// no recorder (concurrent sub-runs would interleave one file), so closing a
+// fork is always a no-op.
 type AgentSession interface {
 	Fork() AgentSession
+	Close() error
+}
+
+// RecordSpec configures a per-run Pi-style JSONL transcript written under
+// SessionDir. The zero value (empty SessionDir) disables recording. It is
+// plain data on purpose so the AgentRuntime seam never leaks olium's
+// EventRecorder type — the adapter builds the concrete sessionlog.Recorder
+// from these fields inside buildOliumEngineWithSpec.
+type RecordSpec struct {
+	// SessionDir is the directory the transcript-*.jsonl file is written to.
+	// Empty disables recording (the common one-off CLI case).
+	SessionDir string
+	// Template is the phase/template name; it seeds the per-phase filename
+	// (transcript-<template>.jsonl) and the concurrency-dedup key so parallel
+	// same-template calls (swarm plan batches) never share a file.
+	Template string
+	// SessionID is the transcript header's session id; empty falls back to the
+	// SessionDir base name.
+	SessionID string
 }
 
 // SessionSpec configures a session built via AgentRuntime.NewSessionWithSpec for
@@ -30,6 +56,10 @@ type SessionSpec struct {
 	MaxTurns          int    // 0 = engine default
 	IncludeTools      bool   // register the builtin tool set
 	EnablePromptCache bool
+	// Record, when its SessionDir is set, attaches a Pi-style JSONL transcript
+	// recorder to the built engine so the session's turns (including model
+	// reasoning) persist for debugging. Zero value = no transcript.
+	Record RecordSpec
 }
 
 // defaultRuntime backs package-level helpers that don't carry an Engine (e.g.
@@ -46,10 +76,15 @@ type AgentRuntime interface {
 	// RunPrompt runs one prompt on a fresh session. When sourcePath is set it is
 	// appended to the system prompt so the agent knows it has filesystem access
 	// to local source. Text deltas mirror to streamWriter and reasoning deltas to
-	// thinkingWriter when those are non-nil.
-	RunPrompt(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool) (oliumRunOutput, error)
+	// thinkingWriter when those are non-nil. When rec.SessionDir is set, the
+	// fresh engine records a Pi-style JSONL transcript (flushed before return).
+	RunPrompt(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool, rec RecordSpec) (oliumRunOutput, error)
 
 	// RunOnSession runs one prompt reusing an existing session's warm prefix.
+	// Unlike RunPrompt it takes no RecordSpec: a reused session's transcript
+	// recorder (if any) is attached once when the session is built
+	// (NewSessionWithSpec with a RecordSpec) and spans all of its prompts, then
+	// flushed by AgentSession.Close().
 	RunOnSession(ctx context.Context, cfg *config.OliumConfig, sess AgentSession, prompt string, streamWriter, thinkingWriter io.Writer, verbose bool) (oliumRunOutput, error)
 
 	// NewSession builds a reusable session without running anything. Equivalent
@@ -72,8 +107,18 @@ type oliumSession struct{ eng *oengine.Engine }
 
 func (s *oliumSession) Fork() AgentSession { return &oliumSession{eng: s.eng.Fork()} }
 
-func (oliumRuntime) RunPrompt(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool) (oliumRunOutput, error) {
-	return runOliumPromptWithThinking(ctx, cfg, prompt, streamWriter, thinkingWriter, sourcePath, verbose)
+// Close flushes and closes the session's transcript recorder (if any). No-op
+// for sessions built without a RecordSpec and for forks (which carry no
+// recorder). Safe to call multiple times.
+func (s *oliumSession) Close() error {
+	if s == nil || s.eng == nil {
+		return nil
+	}
+	return s.eng.CloseRecorder()
+}
+
+func (oliumRuntime) RunPrompt(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool, rec RecordSpec) (oliumRunOutput, error) {
+	return runOliumPromptWithThinking(ctx, cfg, prompt, streamWriter, thinkingWriter, sourcePath, verbose, rec)
 }
 
 func (oliumRuntime) RunOnSession(ctx context.Context, cfg *config.OliumConfig, sess AgentSession, prompt string, streamWriter, thinkingWriter io.Writer, verbose bool) (oliumRunOutput, error) {

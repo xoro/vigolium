@@ -92,14 +92,22 @@ func (m *Module) ScanPerRequest(
 		// Found an auth header — try moving it to the first URL param name
 		paramName := ah.urlParams[0]
 
-		// Remove the auth header from the request
-		modifiedRaw, err := httpmsg.RemoveHeader(ctx.Request().Raw(), ah.header)
+		// Remove the auth header from the request. This stripped request is BOTH
+		// the base for the URL-parameter probe and the no-credential control: if
+		// the endpoint returns the same page with the credential removed entirely,
+		// access never depended on the credential, so accepting it in the URL
+		// proves nothing (the classic false positive — an unauthenticated endpoint
+		// or an SPA/CDN catch-all that 2xx-es every request).
+		strippedRaw, err := httpmsg.RemoveHeader(ctx.Request().Raw(), ah.header)
 		if err != nil {
 			return nil, nil
 		}
 
-		// Add the value as a URL parameter
-		modifiedRaw, err = httpmsg.AppendURLParameter(modifiedRaw, paramName, headerValue)
+		// No-credential control: header removed, no URL parameter added.
+		controlStatus, controlBody, controlOK := fetch(httpClient, ctx.Service(), strippedRaw)
+
+		// Add the value as a URL parameter.
+		modifiedRaw, err := httpmsg.AppendURLParameter(strippedRaw, paramName, headerValue)
 		if err != nil {
 			return nil, nil
 		}
@@ -119,6 +127,19 @@ func (m *Module) ScanPerRequest(
 		}
 
 		if resp.Response() != nil && resp.Response().StatusCode >= 200 && resp.Response().StatusCode < 300 {
+			// Confirm the URL parameter actually granted access: its response must
+			// differ from the no-credential control (different status or a
+			// genuinely dissimilar body after stripping the reflected credential).
+			// Fail open when the control could not be fetched so a transient error
+			// never silently drops a real finding.
+			if controlOK {
+				urlSig := modkit.NewResponseSignature(resp.Response().StatusCode, resp.Body().String(), headerValue)
+				controlSig := modkit.NewResponseSignature(controlStatus, controlBody, headerValue)
+				if modkit.RatioSimilar(controlSig, urlSig) {
+					resp.Close()
+					return nil, nil
+				}
+			}
 			results := []*output.ResultEvent{
 				{
 					URL:      urlx.String(),
@@ -145,4 +166,28 @@ func (m *Module) ScanPerRequest(
 	}
 
 	return nil, nil
+}
+
+// fetch issues the given raw request and returns its status code and body. ok is
+// false on any parse/HTTP/empty-response error so the caller can fail open.
+// NoClustering bypasses the requester's short-lived response cache so the
+// control probe is a genuinely fresh observation rather than a cached replay of
+// a neighbouring request.
+func fetch(client *http.Requester, service *httpmsg.Service, raw []byte) (status int, body string, ok bool) {
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return 0, "", false
+	}
+	if service != nil {
+		req = req.WithService(service)
+	}
+	resp, _, err := client.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+	if err != nil {
+		return 0, "", false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, "", false
+	}
+	return resp.Response().StatusCode, resp.Body().String(), true
 }

@@ -61,17 +61,17 @@ func TestResolveClusterCap(t *testing.T) {
 	assert.Equal(t, 5, DeparosDiscoveryConfig{DedupClusterCap: 5}.resolveClusterCap(), "positive => that value")
 }
 
-// TestCapNearIdenticalClusters_SPAFlood reproduces the navify-portal case: a
+// TestCapNearIdenticalClusters_SPAFlood reproduces the SPA-portal case: a
 // catch-all SPA answering 200 with the same ~74KB page (tiny word wobble) for
 // every path. The cap should keep only `cap` representatives.
 func TestCapNearIdenticalClusters_SPAFlood(t *testing.T) {
-	const host = "www.navifyportal.roche.com"
+	const host = "www.portal.acme.com"
 	var records []collectedRecord
 	for i := 0; i < 50; i++ {
 		// Sizes/words drift within 0.5% to mimic per-request minification noise.
 		size := int64(74100 + (i % 5)) // 74100..74104
 		words := int64(1236 - (i % 3)) // 1234..1236
-		records = append(records, rec(fmt.Sprintf("/roche_logo16/path%02d", i), host, 200, "text/html", size, words))
+		records = append(records, rec(fmt.Sprintf("/acme_logo16/path%02d", i), host, 200, "text/html", size, words))
 	}
 
 	kept, capped, codes := capNearIdenticalClusters(records, 10)

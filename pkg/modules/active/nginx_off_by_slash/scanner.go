@@ -134,6 +134,14 @@ func (m *Module) ScanPerRequest(
 				continue
 			}
 
+			// Strict drop-on-fail: re-fetch the same traversal path twice more and
+			// require it to keep returning a stable, non-wildcard 200. A one-shot
+			// 200 from a transient race / load-balancer flap / caching edge will
+			// not reproduce and is dropped.
+			if !confirmStableOffBySlash(httpClient, ctx.Service(), modifiedRaw, body, wildcard) {
+				continue
+			}
+
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + newPath,
 				Request:          string(modifiedRaw),
@@ -150,6 +158,36 @@ func (m *Module) ScanPerRequest(
 	}
 
 	return results, nil
+}
+
+// confirmStableOffBySlash re-issues the traversal request two more times and
+// reports whether the off-by-slash hit reproduces: every round must return a 200
+// that is not the wildcard shell and whose body stays textually equivalent to the
+// first hit (QuickRatio >= UpperRatioBound). It fails OPEN on an inconclusive
+// transient error so a real finding is not suppressed by a flaky re-fetch.
+func confirmStableOffBySlash(
+	httpClient *http.Requester,
+	service *httpmsg.Service,
+	modifiedRaw []byte,
+	firstBody string,
+	wildcard *modkit.WildcardEntry,
+) bool {
+	for i := 0; i < 2; i++ {
+		status, body, ok := modkit.ExecuteRaw(httpClient, service, modifiedRaw, http.Options{NoRedirects: true, NoClustering: true})
+		if !ok {
+			return true
+		}
+		if status != 200 {
+			return false
+		}
+		if wildcard.MatchesBody(status, []byte(body)) {
+			return false
+		}
+		if !modkit.BodiesSimilar(firstBody, body) {
+			return false
+		}
+	}
+	return true
 }
 
 // firstPathSegment extracts the first non-empty path segment from a URL path.

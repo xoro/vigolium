@@ -17,6 +17,28 @@ type debugPattern struct {
 	sev   severity.Severity
 	desc  string
 	tags  []string
+	// corroborate marks a weak marker (a bare path substring) that, on its own,
+	// commonly appears in benign HTML/JSON/text responses (a third-party JSON
+	// error echoing a "site-packages/" path, docs mentioning a file path). Such
+	// patterns are only reported when a strong Python error context is also
+	// present in the same response (hasPythonErrorContext).
+	corroborate bool
+}
+
+// hasPythonErrorContext reports whether the body carries an unambiguous Python
+// error/debug surface — a real traceback, the Werkzeug debugger, or a Django
+// DEBUG=True page. It is the corroborating signal required before a bare
+// path-disclosure substring is treated as a genuine leak.
+func hasPythonErrorContext(body string) bool {
+	if strings.Contains(body, "Traceback (most recent call last):") {
+		return true
+	}
+	if strings.Contains(body, "Werkzeug Debugger") {
+		return true
+	}
+	return strings.Contains(body, "Request Method:") &&
+		strings.Contains(body, "Request URL:") &&
+		strings.Contains(body, "Django Version:")
 }
 
 var debugPatterns = []debugPattern{
@@ -54,18 +76,20 @@ var debugPatterns = []debugPattern{
 		check: func(body string) bool {
 			return strings.Contains(body, `File "/`) || strings.Contains(body, `File "\\`)
 		},
-		sev:  severity.Medium,
-		desc: "Python file paths with line numbers are disclosed in the response, revealing the application's filesystem layout",
-		tags: []string{"python", "path-disclosure", "information-disclosure"},
+		sev:         severity.Medium,
+		desc:        "Python file paths with line numbers are disclosed in the response, revealing the application's filesystem layout",
+		tags:        []string{"python", "path-disclosure", "information-disclosure"},
+		corroborate: true,
 	},
 	{
 		name: "Python Dependency Path Disclosure",
 		check: func(body string) bool {
 			return strings.Contains(body, "site-packages/")
 		},
-		sev:  severity.Medium,
-		desc: "Python dependency paths (site-packages) are disclosed in the response, revealing installed packages and their versions",
-		tags: []string{"python", "path-disclosure", "information-disclosure"},
+		sev:         severity.Medium,
+		desc:        "Python dependency paths (site-packages) are disclosed in the response, revealing installed packages and their versions",
+		tags:        []string{"python", "path-disclosure", "information-disclosure"},
+		corroborate: true,
 	},
 }
 
@@ -116,6 +140,14 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	for _, dp := range debugPatterns {
 		if !dp.check(body) {
+			continue
+		}
+
+		// Strict drop-on-fail: a bare path-disclosure substring is only a real
+		// leak when the response also carries an unambiguous Python error/debug
+		// surface. Without it, the path token is almost always incidental (a
+		// third-party JSON error, docs, a reflected value) — drop it.
+		if dp.corroborate && !hasPythonErrorContext(body) {
 			continue
 		}
 

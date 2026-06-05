@@ -47,6 +47,31 @@ to a delivery-oriented layout. Large/raw workspaces such as
 agent-generated helper `scripts/` are removed after success. Failed/aborted runs
 keep raw workspaces so they can be resumed or debugged.
 
+The same pass also performs **redaction** by default (see
+[Cleanup & redaction](#cleanup--redaction) below): a recursive sweep removes
+scanner scratch (`*.sarif`, `*.bqrs`, stray `tmp/`) left inside kept
+directories, the high-risk `db-snapshot.*` dumps are dropped, and secret values
+(passwords, tokens, API keys, connection strings) in the `confirm-workspace/`
+JSON + log files are masked to `***`. Pass `--keep-secrets` to retain those, or
+`--keep-raw` to skip the whole prune. The on-demand `vigolium-audit strip <path>`
+command applies the identical strip + sweep + redact pass.
+
+## Cleanup & redaction
+
+| Surface | Junk sweep (`*.sarif`/`*.bqrs`/`tmp/`) | DB snapshots (`db-snapshot.*`) | Secret scrub (`confirm-workspace/` JSON+logs) | Raw dirs / drafts |
+| --- | --- | --- | --- | --- |
+| default (deep/confirm auto-prune, `vigolium-audit strip`) | removed | dropped | masked to `***` | removed |
+| `--keep-secrets` | removed | **kept** | **skipped** | removed |
+| `--keep-raw` (run/confirm/resume) | kept | kept | kept | kept |
+
+Redaction is scoped to `confirm-workspace/` so durable state files
+(`audit-state.json`, `file-state.json`) that downstream tooling parses are never
+rewritten. JSON values are masked by exact secret key name (`password`, `token`,
+`api_key`, `authorization`, …), preserving `null`/empty and JSON shape; log
+lines are masked for `KEY=VALUE`/`KEY: VALUE` secret assignments, inline-credential
+URLs (`scheme://user:***@host`), and well-known token shapes (JWT, `sk-…`,
+`ghp_…`, `AKIA…`, `xox…`). All operations are idempotent.
+
 ## Durable outputs
 
 These paths are the primary outputs to keep after a run:

@@ -71,13 +71,19 @@ export async function stripRawArtifacts(
   }
 }
 
-const DURABLE_STATE_FILES = new Set([
+/**
+ * Top-level state files the strip pass always preserves. Exported so the
+ * `output-structure` command can describe the canonical keep set without
+ * duplicating it.
+ */
+export const DURABLE_STATE_FILES = new Set([
   "audit-state.json",
   "file-state.json",
   "revisit-audit-state.json",
 ]);
 
-const DURABLE_DIRS = new Set([
+/** Top-level directories the strip pass always preserves. */
+export const DURABLE_DIRS = new Set([
   "attack-surface",
   "findings",
   "findings-theoretical",

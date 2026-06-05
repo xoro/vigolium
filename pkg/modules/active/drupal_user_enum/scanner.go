@@ -2,18 +2,73 @@ package drupal_user_enum
 
 import (
 	"fmt"
+	nethttp "net/http"
 	"regexp"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 var usernameRegex = regexp.MustCompile(`/users?/([a-zA-Z0-9_.-]+)`)
+
+// baselineProbeUID is a user ID far beyond any plausible real account. The
+// canonical /user/<uid> route must NOT resolve to a profile for it. We extract a
+// candidate the same way as the real probes and use it as a control: any real
+// probe that yields the same candidate is reading a generic page the site
+// returns for every /user/N (SSO wall, access-denied, error), not a per-user
+// leak, so it is dropped.
+const baselineProbeUID = 2147483646
+
+// reservedUserRoutes are Drupal's own /user/<name> sub-paths. A redirect to one
+// of these is the site's auth flow, not a leaked username, so the usernameRegex
+// capture for them must be rejected.
+var reservedUserRoutes = map[string]bool{
+	"login":    true,
+	"logout":   true,
+	"register": true,
+	"password": true,
+	"reset":    true,
+	"edit":     true,
+	"cancel":   true,
+}
+
+// errorTitleMarkers are substrings that appear in generic error / auth / status
+// page titles, never in a real Drupal username. A 200 SSO or CDN error page
+// returns the same <title> for every /user/N (the motivating false positive: a
+// CloudFront-fronted host whose /user/N all returned 200 "404 Not Found", and
+// the common Drupal "Access denied | Site" page anonymous users get). A title
+// containing any of these is not treated as an enumerated username.
+var errorTitleMarkers = []string{
+	"not found", "404", "403", "401", "500", "502", "503",
+	"forbidden", "access denied", "unauthorized", "bad request",
+	"error", "sign in", "signin", "sign-in", "log in", "login", "logout",
+	"register", "page not found", "service unavailable", "bad gateway",
+	"gateway timeout", "maintenance", "redirecting", "loading",
+	"just a moment", "attention required", "captcha", "are you a robot",
+	"session expired", "please wait", "unavailable", "not authorized",
+	"verify you are human", "checking your browser",
+}
+
+// drupalBodyMarkers are byte needles specific to a Drupal-rendered HTML page.
+// The 200/title vector is weak on its own (any page has a <title>), so it is
+// trusted only when the response actually looks like Drupal — otherwise a
+// generic 200 page from a non-Drupal host (S3/SSO/SPA) would be mined for a
+// "username".
+var drupalBodyMarkers = []string{
+	"drupal-settings-json",
+	"data-drupal-",
+	"/sites/default/files",
+	"/sites/all/",
+	"/core/misc/drupal",
+	"/core/themes/",
+	"Drupal.settings",
+}
 
 type Module struct {
 	modkit.BaseActiveModule
@@ -66,14 +121,36 @@ func (m *Module) ScanPerRequest(
 
 	var results []*output.ResultEvent
 
-	// Vector 1: /user/N enumeration
+	// Vector 1: /user/N enumeration.
+	//
+	// Baseline control: a UID far beyond any real account must not resolve to a
+	// profile. Whatever candidate it produces is the site's generic page for an
+	// unknown user; any real probe matching it is reading that same page, not a
+	// leak.
+	baseline := m.probeUserPath(ctx, httpClient, fmt.Sprintf("/user/%d", baselineProbeUID))
+
+	var rawMatches []string
+	seen := map[string]bool{}
 	var usernames []string
 	for i := 1; i <= 5; i++ {
 		path := fmt.Sprintf("/user/%d", i)
 		username := m.probeUserPath(ctx, httpClient, path)
-		if username != "" {
+		if username == "" || username == baseline {
+			continue
+		}
+		rawMatches = append(rawMatches, username)
+		if !seen[username] {
+			seen[username] = true
 			usernames = append(usernames, username)
 		}
+	}
+
+	// Uniformity guard: genuine enumeration leaks a different username per UID.
+	// Multiple UIDs collapsing to a single value means one generic page was
+	// echoed for every path (a single existing account legitimately yields one
+	// match from one probe, so this only trips on 2+ identical hits).
+	if len(rawMatches) >= 2 && len(usernames) == 1 {
+		usernames = nil
 	}
 
 	if len(usernames) > 0 {
@@ -105,6 +182,12 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
+// probeUserPath requests path and returns the username it leaks, or "" when the
+// response is not a trustworthy per-user profile signal. It gates on
+// block/SSO/challenge detection first, then accepts either a canonical redirect
+// to /users/<name> (excluding Drupal's own auth routes) or a 200 profile page —
+// the latter only when the response actually looks like Drupal and its <title>
+// is not a generic error/auth title.
 func (m *Module) probeUserPath(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, path string) string {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
@@ -130,38 +213,40 @@ func (m *Module) probeUserPath(ctx *httpmsg.HttpRequestResponse, httpClient *htt
 		return ""
 	}
 
-	// Check for redirect to /users/<username> or /user/<uid>/<username>
+	// A WAF/CDN challenge, auth gate, rate-limit, or maintenance page is the
+	// edge talking, not the application leaking a profile — skip it before
+	// extracting anything (the SSO-wall / CloudFront false-positive class).
+	if infra.IsBlockedResponse(resp) {
+		return ""
+	}
+
 	status := resp.Response().StatusCode
+
+	// Redirect vector: canonical /user/<uid> -> /users/<username>.
 	if status == 301 || status == 302 || status == 303 {
 		location := resp.Response().Header.Get("Location")
 		if matches := usernameRegex.FindStringSubmatch(location); len(matches) > 1 {
 			username := matches[1]
-			// Filter out numeric-only (still UID, not username)
-			if !isNumeric(username) {
+			// Drop UIDs (still numeric), Drupal's own auth routes, and any
+			// error/status-shaped segment.
+			if !isNumeric(username) && !isReservedUserRoute(username) && looksLikeUsername(username) {
 				return username
 			}
 		}
+		return ""
 	}
 
-	// Also check 200 responses for username in page title or breadcrumb
+	// Title vector: a 200 profile page may show "username | Site Name". Trust it
+	// only when the response is recognisably Drupal and the title is not a
+	// generic error/auth page title.
 	if status == 200 {
 		body := resp.Body().String()
-		// Drupal often shows username in <title> or <h1> on user profile pages
-		if strings.Contains(body, "<title>") {
-			// Extract title content
-			titleStart := strings.Index(body, "<title>")
-			titleEnd := strings.Index(body[titleStart:], "</title>")
-			if titleEnd > 0 {
-				title := body[titleStart+7 : titleStart+titleEnd]
-				title = strings.TrimSpace(title)
-				// Drupal title format: "username | Site Name"
-				if parts := strings.SplitN(title, " | ", 2); len(parts) >= 1 {
-					candidate := strings.TrimSpace(parts[0])
-					if candidate != "" && !isNumeric(candidate) && len(candidate) < 64 {
-						return candidate
-					}
-				}
-			}
+		if !looksLikeDrupal(resp.Response().Header, body) {
+			return ""
+		}
+		candidate := extractTitleUsername(body)
+		if candidate != "" && !isNumeric(candidate) && looksLikeUsername(candidate) {
+			return candidate
 		}
 	}
 
@@ -193,6 +278,11 @@ func (m *Module) probeJsonAPI(ctx *httpmsg.HttpRequestResponse, httpClient *http
 		return nil
 	}
 
+	// An SSO/CDN gate can answer the JSON:API path with a 200 too — skip it.
+	if infra.IsBlockedResponse(resp) {
+		return nil
+	}
+
 	ct := strings.ToLower(resp.Response().Header.Get("Content-Type"))
 	if !strings.Contains(ct, "json") {
 		return nil
@@ -221,6 +311,60 @@ func (m *Module) probeJsonAPI(ctx *httpmsg.HttpRequestResponse, httpClient *http
 			"vector": "jsonapi",
 		},
 	}
+}
+
+// extractTitleUsername returns the leading segment of the page <title>, which on
+// a Drupal profile page is the username in "username | Site Name".
+func extractTitleUsername(body string) string {
+	titleStart := strings.Index(body, "<title>")
+	if titleStart < 0 {
+		return ""
+	}
+	rest := body[titleStart+len("<title>"):]
+	titleEnd := strings.Index(rest, "</title>")
+	if titleEnd < 0 {
+		return ""
+	}
+	title := strings.TrimSpace(rest[:titleEnd])
+	parts := strings.SplitN(title, " | ", 2)
+	return strings.TrimSpace(parts[0])
+}
+
+// looksLikeDrupal reports whether the response is recognisably a Drupal page,
+// used to corroborate the weak title vector before trusting its <title>.
+func looksLikeDrupal(header nethttp.Header, body string) bool {
+	if strings.Contains(strings.ToLower(header.Get("X-Generator")), "drupal") {
+		return true
+	}
+	if header.Get("X-Drupal-Cache") != "" || header.Get("X-Drupal-Dynamic-Cache") != "" {
+		return true
+	}
+	for _, marker := range drupalBodyMarkers {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeUsername rejects candidates that are empty, implausibly long, or
+// shaped like an error/auth/status title rather than a username.
+func looksLikeUsername(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > 60 {
+		return false
+	}
+	lower := strings.ToLower(s)
+	for _, marker := range errorTitleMarkers {
+		if strings.Contains(lower, marker) {
+			return false
+		}
+	}
+	return true
+}
+
+func isReservedUserRoute(s string) bool {
+	return reservedUserRoutes[strings.ToLower(s)]
 }
 
 func isNumeric(s string) bool {

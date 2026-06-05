@@ -47,19 +47,29 @@ const (
 // not usable — construct via New. Safe for concurrent Handle calls; the
 // per-call elapsed bookkeeping is mutex-guarded.
 //
-// Two writers are kept on purpose:
-//   - w     receives tool lifecycle lines (▶ start / ✓ end / ✗ failed) and
+// Three writers are kept on purpose:
+//   - w      receives tool lifecycle lines (▶ start / ✓ end / ✗ failed) and
 //     is typically stderr.
-//   - turnW receives the per-turn `[turn done in=… out=…]` usage line.
+//   - turnW  receives the per-turn `[turn done in=… out=…]` usage line.
 //     Routed to the same stream as the assistant text so the line
 //     prints AFTER the model's message without stdout/stderr
 //     buffering interleaving the two. Falls back to w when nil.
+//   - thinkW receives the muted `⋈ thinking` reasoning block. Defaults to w
+//     (the tool-line stream, typically stderr). Override via
+//     WithThinkingWriter when the tool-line stream is stdout (swarm) but
+//     reasoning should stay on the stderr side channel.
 type Logger struct {
 	w       io.Writer
 	turnW   io.Writer
+	thinkW  io.Writer
 	verbose bool
 	mu      sync.Mutex
 	starts  map[string]time.Time
+	// think accumulates the current turn's reasoning deltas; flushed as one
+	// compacted block before the turn's first tool card / on turn-done /
+	// when the caller calls FlushThinking ahead of assistant text. Guarded
+	// by mu so concurrent Handle calls stay safe.
+	think strings.Builder
 }
 
 // New returns a Logger that writes to w. A nil w turns Handle into a no-op,
@@ -92,7 +102,20 @@ func NewWithStreams(toolLog, turnLog io.Writer, verbose bool) *Logger {
 	if turnLog == nil {
 		turnLog = toolLog
 	}
-	return &Logger{w: toolLog, turnW: turnLog, verbose: verbose, starts: make(map[string]time.Time)}
+	return &Logger{w: toolLog, turnW: turnLog, thinkW: toolLog, verbose: verbose, starts: make(map[string]time.Time)}
+}
+
+// WithThinkingWriter overrides the writer the muted `⋈ thinking` reasoning
+// block is flushed to (default: the tool-line writer w). Use it when tool
+// lines go to stdout (e.g. swarm phases mirror assistant text + tool cards to
+// stdout) but reasoning should land on the stderr side channel so piped stdout
+// stays clean. Returns l for chaining. A nil w falls back to the tool-line
+// writer at flush time.
+func (l *Logger) WithThinkingWriter(w io.Writer) *Logger {
+	if l != nil {
+		l.thinkW = w
+	}
+	return l
 }
 
 // Handle dispatches a single engine event. Returns true when the event was
@@ -152,7 +175,78 @@ func (l *Logger) HandleTurn(ev engine.Event) bool {
 	return true
 }
 
+// HandleThinking accumulates a model reasoning delta (EventThinkingDelta) for
+// the current turn. Returns true when ev was a thinking delta so callers can
+// `continue` without their own handling — true even when verbose is off (the
+// event is still "consumed", just dropped) so the non-verbose path skips it
+// cleanly. Accumulation only happens under verbose; the buffered block is
+// emitted by the next start() / turn() / FlushThinking call as a single
+// compacted `⋈ thinking` block on thinkW.
+func (l *Logger) HandleThinking(ev engine.Event) bool {
+	if l == nil {
+		return false
+	}
+	if ev.Type != engine.EventThinkingDelta {
+		return false
+	}
+	// Accumulate only when verbose AND there's somewhere to flush — the
+	// reasoning lane is independent of the tool-line writer w (it may be nil,
+	// e.g. a query with streaming off, while thinkW is os.Stderr).
+	if l.verbose && (l.thinkW != nil || l.w != nil) {
+		l.mu.Lock()
+		l.think.WriteString(ev.Delta)
+		l.mu.Unlock()
+	}
+	return true
+}
+
+// FlushThinking emits any buffered reasoning as a compacted `⋈ thinking` block
+// and resets the buffer. Idempotent and safe to call when nothing is buffered.
+//
+// Flush contract — reasoning is flushed at exactly two kinds of trigger:
+//   - before a tool card: start() flushes automatically, so a turn's reasoning
+//     reads as the reason for the tool call that follows;
+//   - before assistant text: the caller must call FlushThinking itself, since
+//     text deltas are written straight to the caller's stream (not through the
+//     logger), so the logger can't intercept them. Callers also flush once at
+//     run/phase end to surface reasoning from a final turn that produced
+//     neither a tool card nor text.
+func (l *Logger) FlushThinking() { l.flushThinking() }
+
+// flushThinking pulls the buffered reasoning out under the lock, then renders
+// it outside the lock so I/O never blocks a concurrent Handle. No-op on empty
+// buffer or when compaction leaves nothing (e.g. all-blank reasoning).
+func (l *Logger) flushThinking() {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	body := l.think.String()
+	l.think.Reset()
+	l.mu.Unlock()
+	if body == "" {
+		return
+	}
+	body = CompactThinking(body)
+	if body == "" {
+		return
+	}
+	w := l.thinkW
+	if w == nil {
+		w = l.w
+	}
+	if w == nil {
+		return
+	}
+	header := terminal.Muted("  " + terminal.SymbolBowtie + " thinking")
+	_, _ = fmt.Fprintf(w, "\n%s\n%s\n", header, terminal.Muted(indentLines(body, "    ")))
+}
+
 func (l *Logger) start(ev engine.Event) {
+	// Reasoning for this turn precedes its tool calls; flush it first so the
+	// `⋈ thinking` block reads as the reason for the tool card that follows.
+	l.flushThinking()
+
 	l.mu.Lock()
 	l.starts[ev.ToolCallID] = time.Now()
 	l.mu.Unlock()
@@ -352,6 +446,41 @@ func summarizeErr(s string) string {
 		s = s[:117] + "…"
 	}
 	return s
+}
+
+// CompactThinking trims each line of a reasoning stream and drops every blank
+// line. "Blank" means empty after stripping Unicode whitespace, so tabs,
+// non-breaking spaces, and other IsSpace padding all collapse. Paragraph
+// breaks are intentionally not preserved: the thinking lane is faint status
+// text, and GPT-5 / Codex reasoning summaries in particular embed long runs of
+// newlines between a `**Title**` and its body that would otherwise blow the
+// block up into dead space. Returns "" when nothing survives. Shared by the
+// olium TUI's thinking block and the toollog reasoning lane so both compact
+// reasoning identically.
+func CompactThinking(s string) string {
+	if s == "" {
+		return ""
+	}
+	lines := strings.Split(s, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return strings.Join(out, "\n")
+}
+
+// indentLines prefixes every line of s with prefix. Used to inset the
+// reasoning body under its `⋈ thinking` header.
+func indentLines(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = prefix + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 // formatElapsed picks a unit appropriate to magnitude: ms below 1s, "1.2s"

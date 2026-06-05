@@ -145,6 +145,16 @@ func RatioSimilar(a, b ResponseSignature) bool {
 	return QuickRatio(a, b) >= UpperRatioBound
 }
 
+// BodiesSimilar reports whether two response bodies are textually equivalent
+// (QuickRatio >= UpperRatioBound), ignoring status — callers that also care about
+// status gate on it separately. Two empty bodies are treated as similar. It is
+// the body-only counterpart to RatioSimilar (which additionally requires an equal
+// status) and centralizes the "same page?" check shared by the re-confirmation
+// gates (jwt/csrf accepted-as-baseline, forbidden/nginx/firebase stability).
+func BodiesSimilar(a, b string) bool {
+	return QuickRatio(NewResponseSignature(0, a, ""), NewResponseSignature(0, b, "")) >= UpperRatioBound
+}
+
 // IsDifferent returns true if two signatures are meaningfully different by the
 // fast length/hash/status pre-filter (a different status, or a >100 byte / >20%
 // body-length gap). It does not consider token similarity — callers wanting the
@@ -386,6 +396,31 @@ func deltaTokenSet(raw string) map[string]int {
 // hashes, nonces — the [0-9a-f] class also covers long pure-digit runs) while
 // preserving short numeric markers like a template math result.
 var reVeryLongHexRun = regexp.MustCompile(`[0-9a-f]{16,}`)
+
+// ExecuteRaw parses a raw request, binds it to service (when non-nil), executes
+// it with the given options, and returns the response status and body. ok is
+// false on any build/transport error or a nil response. It centralizes the
+// re-confirmation fetch idiom — notably the NoClustering discipline — shared by
+// the active modules' confirmation helpers, so each call site no longer
+// re-derives (and risks forgetting) it.
+func ExecuteRaw(client *http.Requester, service *httpmsg.Service, rawReq []byte, opts http.Options) (status int, body string, ok bool) {
+	req, err := httpmsg.ParseRawRequest(string(rawReq))
+	if err != nil {
+		return 0, "", false
+	}
+	if service != nil {
+		req = req.WithService(service)
+	}
+	resp, _, err := client.Execute(req, opts)
+	if err != nil {
+		return 0, "", false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, "", false
+	}
+	return resp.Response().StatusCode, resp.Body().String(), true
+}
 
 // fetchResponse re-issues a raw request and returns its status code and full raw
 // response string (status line + headers + body, so header/Location injections

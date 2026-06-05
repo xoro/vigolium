@@ -317,6 +317,7 @@ func ParseScanIntentWithSetup(ctx context.Context, engine *Engine, prompt string
 	if err != nil {
 		return nil, fmt.Errorf("olium provider: %w", err)
 	}
+	defer func() { _ = sess.Close() }()
 
 	zap.L().Info("Running olium agent for environment setup",
 		zap.String("agenticScanUUID", agenticScanUUID),

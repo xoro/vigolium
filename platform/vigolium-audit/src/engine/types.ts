@@ -72,6 +72,14 @@ export interface RunOptions {
    */
   keepRaw?: boolean;
   /**
+   * When post-audit cleanup runs, retain DB snapshots and skip scrubbing
+   * secrets (passwords, tokens, API keys, connection strings) from the
+   * `confirm-workspace/` JSON + log files. The junk sweep (`*.sarif`,
+   * `*.bqrs`, `tmp/`) still runs. Default: redact. `--keep-raw` is a
+   * superset (it skips the whole prune, so secrets are retained too).
+   */
+  keepSecrets?: boolean;
+  /**
    * Path to a file describing areas the audit should prioritize. Free-form
    * prose; injected as a soft hint into every phase's user prompt. Hard cap
    * 32 KB. Auto-inherits from the most recent prior audit when unset.
@@ -140,6 +148,17 @@ export interface RunOptions {
    * has its own resume detection).
    */
   resume?: boolean;
+  /**
+   * `merge` mode only: two-or-more audit output folders (project dir or
+   * `vigolium-results/` dir) to consolidate before the LLM normalization pass.
+   * The deterministic pre-merge copies their findings (collision-safe) into the
+   * first `--dir` folder in place and stamps `merge_metadata` into its
+   * `audit-state.json`, then `run --mode merge` dedups/renumbers/reports.
+   * cac hands a single `--dir` through as a string; normalize to an array.
+   */
+  dir?: string | string[];
+  /** Allow a pre-merge / non-destructive op to write into a non-empty destination. */
+  force?: boolean;
 }
 
 export interface AuditContext {

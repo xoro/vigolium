@@ -223,7 +223,12 @@ var (
 			regexp.MustCompile(`(?i)(?:Code: \d+\. DB::Exception|clickhouse-server)`),
 		},
 		"TiDB": {
-			regexp.MustCompile(`(?i)(?:TiDB server|tidb_version|TiKV)`),
+			// "TiKV" is a short, context-free token that trivially appears inside
+			// long base64/hex blobs (e.g. a Cloudflare challenge page's random
+			// per-request tokens), so anchor every alternative to word boundaries:
+			// a genuine TiDB error leak surfaces these as standalone words
+			// ("TiKV server is busy"), never glued to surrounding base64 noise.
+			regexp.MustCompile(`(?i)(?:\bTiDB server\b|\btidb_version\b|\bTiKV\b)`),
 		},
 	}
 )

@@ -102,6 +102,35 @@ func TestScanPerHost_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a backend with no rate limiting must not yield a bypass finding")
 }
 
+// TestScanPerHost_NoFalsePositive_WindowReset reproduces the rate-limit-window
+// false positive: the limiter trips a single 429 (4th request) to make the
+// module enter its bypass phase, but then the window "resets" and every later
+// request — with or without a spoofing header — succeeds. The apparent bypass
+// is purely the reset window, not the header. The differential re-confirmation
+// (a plain request must STILL be 429) must reject it.
+func TestScanPerHost_NoFalsePositive_WindowReset(t *testing.T) {
+	t.Parallel()
+	var counter int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// 429 exactly once to trip detection during the burst, then the limiter
+		// forgets — header-agnostic, so plain requests succeed again too.
+		if atomic.AddInt64(&counter, 1) == 4 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	client := nonClusteringRequester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/api/data"), "text/plain", "ok")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a reset rate-limit window must not be reported as a header bypass")
+}
+
 // hasSpoofHeader reports whether r carries any of the IP-spoofing headers the
 // module probes with.
 func hasSpoofHeader(r *http.Request) bool {

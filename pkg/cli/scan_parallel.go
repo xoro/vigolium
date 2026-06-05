@@ -159,8 +159,8 @@ func runStatelessTargetsParallel(cmd *cobra.Command, settings *config.Settings, 
 	// (instead of burying one copy per child in the per-target console logs)
 	// tells the operator exactly how the whole batch will run. Targets is
 	// briefly pointed at the file list so the banner's count reflects the batch,
-	// and Output at the per-host pattern so it reads "roche-vig-<host>.jsonl"
-	// (what children actually write) instead of the literal "roche-vig.jsonl"
+	// and Output at the per-host pattern so it reads "acme-vig-<host>.jsonl"
+	// (what children actually write) instead of the literal "acme-vig.jsonl"
 	// that no file ever uses under --split-by-host.
 	if !scanOpts.Silent {
 		origBannerTargets := scanOpts.Targets
@@ -741,8 +741,8 @@ func perTargetConsolePath(output string) string {
 // perHostOutputPattern turns an --output prefix into the "<prefix>-<host>"
 // display pattern used by --split-by-host, preserving any format extension. It
 // mirrors perTargetOutputPath but with a literal "<host>" placeholder so the
-// banner shows e.g. "roche-vig-<host>.jsonl" — the shape children actually write
-// — rather than the literal "roche-vig.jsonl" that no per-host file uses.
+// banner shows e.g. "acme-vig-<host>.jsonl" — the shape children actually write
+// — rather than the literal "acme-vig.jsonl" that no per-host file uses.
 func perHostOutputPattern(output string) string {
 	if output == "" {
 		return output

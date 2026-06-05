@@ -216,16 +216,24 @@ to constrain scope; empty means every CRITICAL and HIGH finding under
 
 ## `vigolium-audit run --mode merge`
 
-Usage: `vigolium-audit run --mode merge --dir <vigolium-audit-tree> --dir <vigolium-audit-tree> [...]`
+Usage: `vigolium-audit merge --dir <vigolium-audit-tree> --dir <vigolium-audit-tree> [...]`
+(or the equivalent `vigolium-audit run --mode merge --dir … --dir …`)
 
 Phase count: 7 (`M1`-`M7`)
 
-Merge is invoked after the CLI's deterministic file-merge step
-(`vigolium-audit merge`) has already combined two-or-more existing `vigolium-results/`
-result trees into the current target. The mode handles the LLM-side work:
-validating each finding, semantic dedup, auto-fixing safe issues,
-quarantining unfixable ones, renumbering by severity, and writing
-`vigolium-results/merge-report.md`.
+Merge runs in two parts. First the CLI's deterministic file-merge step
+(`premergeResults`) combines two-or-more existing `vigolium-results/` result
+trees into one — a collision-safe copy of every source's findings, a unified
+`attack-surface/`, and a `merge_metadata` stamp in `audit-state.json`. Then
+this mode handles the LLM-side work: validating each finding, semantic dedup,
+auto-fixing safe issues, quarantining unfixable ones, renumbering by severity,
+and writing `vigolium-results/merge-report.md`.
+
+Both `vigolium-audit merge --dir …` and `vigolium-audit run --mode merge --dir …`
+do both parts in a single invocation. Pass `vigolium-audit merge … --premerge-only`
+to stop after the deterministic consolidation (no tokens spent) and inspect the
+combined tree before normalizing — the follow-up is then
+`vigolium-audit run --mode merge --target <dest>`.
 
 Pre-flight verifies `vigolium-results/audit-state.json` contains a top-level
 `merge_metadata` object that the CLI dropped during the file-merge step. It

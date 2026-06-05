@@ -110,7 +110,7 @@ func (m *Module) ScanPerRequest(
 	}
 
 	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p); result != nil {
+		if result := m.probeEndpoint(ctx, httpClient, scanCtx, p); result != nil {
 			results = append(results, result)
 		}
 	}
@@ -121,6 +121,7 @@ func (m *Module) ScanPerRequest(
 func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	p probe,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), p.method)
@@ -178,6 +179,15 @@ func (m *Module) probeEndpoint(
 		}
 	}
 	if !matched {
+		return nil
+	}
+
+	// Strict drop-on-fail: reject markers that are merely part of the host's
+	// catch-all / SPA shell (the same 200 body served for a random path). Genuine
+	// Django debug pages are 404/500 responses whose status differs from the
+	// (2xx) wildcard shell, so they are never matched by this gate.
+	location := resp.Response().Header.Get("Location")
+	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, resp.Response().StatusCode, []byte(body), location) {
 		return nil
 	}
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/olium"
 	oengine "github.com/vigolium/vigolium/pkg/olium/engine"
 	"github.com/vigolium/vigolium/pkg/olium/provider"
+	"github.com/vigolium/vigolium/pkg/olium/sessionlog"
 	"github.com/vigolium/vigolium/pkg/olium/stream"
 	"github.com/vigolium/vigolium/pkg/olium/tool"
 	"github.com/vigolium/vigolium/pkg/olium/toollog"
@@ -65,21 +68,17 @@ func acquireProviderSlot(ctx context.Context, cfg *config.OliumConfig) (release 
 // (reasoning content from o1 / Claude thinking) to thinkingWriter — pass nil
 // to discard. sourcePath, when set, is appended to the system prompt so the
 // agent knows it has filesystem access to local source code.
-func runOliumPromptWithThinking(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool) (oliumRunOutput, error) {
-	eng, err := buildOliumEngine(cfg, sourcePath)
+func runOliumPromptWithThinking(ctx context.Context, cfg *config.OliumConfig, prompt string, streamWriter, thinkingWriter io.Writer, sourcePath string, verbose bool, rec RecordSpec) (oliumRunOutput, error) {
+	eng, err := buildOliumEngineWithSpec(cfg, SessionSpec{SourcePath: sourcePath, IncludeTools: true, Record: rec})
 	if err != nil {
 		return oliumRunOutput{}, err
 	}
+	// Fresh-per-call path: this engine isn't reused, so flush + close its
+	// transcript recorder here (no-op when rec.SessionDir was empty). The
+	// recorder buffers the final assistant turn until close, so without this
+	// the last turn never lands in the transcript.
+	defer func() { _ = eng.CloseRecorder() }()
 	return runOliumOnEngineWithThinking(ctx, cfg, eng, prompt, streamWriter, thinkingWriter, verbose)
-}
-
-// buildOliumEngine constructs an oengine.Engine from olium config without
-// running anything. Useful when the same engine is reused for multiple
-// prompts (e.g., source-analysis explore -> 3 forked format calls) so the
-// conversation prefix stays warm in provider history. It is the standard,
-// tool-enabled session — a thin wrapper over buildOliumEngineWithSpec.
-func buildOliumEngine(cfg *config.OliumConfig, sourcePath string) (*oengine.Engine, error) {
-	return buildOliumEngineWithSpec(cfg, SessionSpec{SourcePath: sourcePath, IncludeTools: true})
 }
 
 // buildOliumEngineWithSpec is the general engine constructor behind the
@@ -133,7 +132,57 @@ func buildOliumEngineWithSpec(cfg *config.OliumConfig, spec SessionSpec) (*oengi
 		ecfg.Tools = reg
 	}
 
+	// Attach a Pi-style JSONL transcript recorder when a session dir is wired.
+	// Mirrors autopilot's transcript so swarm/query phases also persist their
+	// turns — including model reasoning — for post-hoc debugging. A recorder
+	// construction failure is non-fatal: the run proceeds without a transcript.
+	if spec.Record.SessionDir != "" {
+		name := uniqueTranscriptName(spec.Record.SessionDir, spec.Record.Template)
+		sessID := spec.Record.SessionID
+		if sessID == "" {
+			sessID = filepath.Base(spec.Record.SessionDir)
+		}
+		cwd, _ := os.Getwd()
+		if rec, rerr := sessionlog.New(filepath.Join(spec.Record.SessionDir, name), sessionlog.Meta{
+			SessionID: sessID,
+			Provider:  prov.Name(),
+			Model:     model,
+			Cwd:       cwd,
+		}); rerr == nil {
+			ecfg.Recorder = rec
+		}
+	}
+
 	return oengine.New(ecfg), nil
+}
+
+// transcriptSeq tracks how many recorders have been opened per
+// (sessionDir, template) within this process, so concurrent same-template
+// calls (swarm plan batches run up to BatchConcurrency goroutines deep) get
+// distinct files instead of interleaving large tool-result lines into one.
+var (
+	transcriptSeqMu sync.Mutex
+	transcriptSeq   = map[string]int{}
+)
+
+// uniqueTranscriptName returns the per-phase transcript basename for a session
+// dir + template. The first use of a (dir, template) pair in this process gets
+// the clean name (transcript-<template>.jsonl); the 2nd, 3rd, … get
+// transcript-<template>-2.jsonl etc. Keying on dir keeps separate runs (each
+// its own session dir) clean — only true collisions within one run are
+// suffixed. An empty template falls back to "inline", matching the thinking
+// sink's naming.
+func uniqueTranscriptName(sessionDir, template string) string {
+	safe := sanitizeTemplateSegment(template)
+	key := sessionDir + "\x00" + safe
+	transcriptSeqMu.Lock()
+	n := transcriptSeq[key]
+	transcriptSeq[key]++
+	transcriptSeqMu.Unlock()
+	if n == 0 {
+		return "transcript-" + safe + ".jsonl"
+	}
+	return fmt.Sprintf("transcript-%s-%d.jsonl", safe, n+1)
 }
 
 // runOliumOnEngineWithThinking is the full-fidelity version that also
@@ -163,22 +212,34 @@ func runOliumOnEngineWithThinking(ctx context.Context, cfg *config.OliumConfig, 
 	// Surface tool exec start/end on streamWriter so swarm phases match the
 	// autopilot/headless format. Per-turn usage is *not* echoed here — swarm
 	// drives many short phases and a [turn done ...] line per phase is too
-	// noisy. Adapter still tallies usage from the same event below.
-	tlog := toollog.NewWith(streamWriter, verbose)
+	// noisy. Adapter still tallies usage from the same event below. The
+	// reasoning lane is pinned to stderr (not streamWriter, which is stdout
+	// for swarm/query) so piped stdout stays clean; it's gated on --verbose
+	// inside the logger.
+	tlog := toollog.NewWith(streamWriter, verbose).WithThinkingWriter(os.Stderr)
 	ch := eng.Run(ctx, prompt)
 	for ev := range ch {
 		if tlog.HandleTool(ev) {
 			continue
 		}
+		if tlog.HandleThinking(ev) {
+			// Also persist raw reasoning to the per-template thinking file
+			// (transcript artifact) when one is wired; the logger only renders
+			// the live, compacted stderr lane.
+			if thinkingWriter != nil {
+				_, _ = io.WriteString(thinkingWriter, ev.Delta)
+			}
+			continue
+		}
 		switch ev.Type {
 		case oengine.EventTextDelta:
+			// Flush buffered reasoning before this turn's assistant text so the
+			// operator reads think → answer (a text-only phase never hits a
+			// tool card to trigger the flush).
+			tlog.FlushThinking()
 			captured.WriteString(ev.Delta)
 			if streamWriter != nil {
 				_, _ = io.WriteString(streamWriter, ev.Delta)
-			}
-		case oengine.EventThinkingDelta:
-			if thinkingWriter != nil {
-				_, _ = io.WriteString(thinkingWriter, ev.Delta)
 			}
 		case oengine.EventTurnDone:
 			if ev.Usage != nil {
@@ -186,9 +247,13 @@ func runOliumOnEngineWithThinking(ctx context.Context, cfg *config.OliumConfig, 
 				usage.OutputTokens += ev.Usage.Output
 			}
 		case oengine.EventError:
+			tlog.FlushThinking()
 			return oliumRunOutput{Text: captured.String(), Usage: usage}, fmt.Errorf("olium: %w", classifyOliumError(ev.Err))
 		}
 	}
+	// Flush reasoning from a final turn that produced no assistant text and no
+	// tool card (otherwise it'd be silently dropped at phase end).
+	tlog.FlushThinking()
 	return oliumRunOutput{Text: captured.String(), Usage: usage}, nil
 }
 

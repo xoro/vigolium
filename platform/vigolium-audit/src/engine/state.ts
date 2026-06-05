@@ -5,8 +5,48 @@ import { z } from "zod";
 import { atomicWrite, sha256OfFile, sweepStaleTempFiles } from "./util.js";
 import type { AuditContext, AuditMode, AuditRecord, AuditState, PhaseStatus } from "./types.js";
 
+/**
+ * Agent-driven (interactive harness) runs write `audit-state.json` themselves and
+ * occasionally drift from our canonical status vocabulary — most commonly
+ * `"completed"` for a phase the schema calls `"complete"`. Coalesce the known
+ * synonyms (and any casing) on read so a merge / resume / status over an
+ * agent-written file doesn't hard-fail on a cosmetic mismatch. This mirrors the
+ * existing tolerance in this schema (the `mode:"full"→"deep"` migration and the
+ * `branch` / `completed_at` defaulting). Re-saving the parsed state then persists
+ * the canonical form, self-healing the file. Unknown tokens fall through
+ * unchanged and still fail the enum loudly, so genuinely corrupt files are caught.
+ */
+const STATUS_SYNONYMS: Record<string, string> = {
+  completed: "complete",
+  done: "complete",
+  success: "complete",
+  succeeded: "complete",
+  passed: "complete",
+  "in-progress": "in_progress",
+  inprogress: "in_progress",
+  running: "in_progress",
+  started: "in_progress",
+  failure: "failed",
+  errored: "failed",
+  error: "failed",
+  skip: "skipped",
+  skip_and_continue: "skipped",
+  queued: "pending",
+  not_started: "pending",
+  "not-started": "pending",
+  cancelled: "aborted",
+  canceled: "aborted",
+  abort: "aborted",
+};
+
+function normalizeStatus(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const key = value.trim().toLowerCase();
+  return STATUS_SYNONYMS[key] ?? key;
+}
+
 const PhaseRecordSchema = z.object({
-  status: z.enum(["pending", "in_progress", "complete", "failed", "skipped"]),
+  status: z.preprocess(normalizeStatus, z.enum(["pending", "in_progress", "complete", "failed", "skipped"])),
   started_at: z.string().optional(),
   completed_at: z.string().optional(),
   failed_at: z.string().optional(),
@@ -28,7 +68,7 @@ const AuditRecordSchema = z.object({
   // In-progress audits legitimately have no completion timestamp yet; tolerate
   // missing values from agent-written state and normalize to null.
   completed_at: z.string().nullable().default(null),
-  status: z.enum(["in_progress", "complete", "failed", "aborted"]),
+  status: z.preprocess(normalizeStatus, z.enum(["in_progress", "complete", "failed", "aborted"])),
   phases: z.record(z.string(), PhaseRecordSchema).default({}),
   usage: z
     .object({

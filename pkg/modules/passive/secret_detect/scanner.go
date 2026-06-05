@@ -206,7 +206,7 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 			Host:             entry.host,
 			URL:              entry.url,
 			Matched:          entry.url,
-			ExtractedResults: []string{redactSnippet(f.Snippet())},
+			ExtractedResults: []string{f.Snippet()},
 			Metadata: map[string]any{
 				"rule_id":   f.RuleID(),
 				"rule_name": f.RuleName(),
@@ -239,17 +239,6 @@ func (m *Module) getScanner() (*kingfisher.Scanner, error) {
 		}
 	})
 	return m.scanner, m.scannerErr
-}
-
-// redactSnippet shows first 8 and last 4 characters, masking the rest.
-func redactSnippet(s string) string { return RedactSnippet(s) }
-
-// RedactSnippet shows first 8 and last 4 characters, masking the rest.
-func RedactSnippet(s string) string {
-	if len(s) <= 16 {
-		return strings.Repeat("*", len(s))
-	}
-	return s[:8] + strings.Repeat("*", len(s)-12) + s[len(s)-4:]
 }
 
 // isTextBasedMIME checks if the MIME type indicates text-based content.

@@ -167,20 +167,20 @@ func analyzeToken(token string) []string {
 		return nil
 	}
 
-	redacted := redactJWT(token)
+	tokenStr := token
 	var issues []string
 
 	// Check alg:none
 	if alg, ok := header["alg"]; ok {
 		if algStr, ok := alg.(string); ok && strings.EqualFold(algStr, "none") {
-			issues = append(issues, fmt.Sprintf("CRITICAL: alg=none (no signature verification) [%s]", redacted))
+			issues = append(issues, fmt.Sprintf("CRITICAL: alg=none (no signature verification) [%s]", tokenStr))
 		}
 	}
 
 	// Check missing exp
 	exp, hasExp := payload["exp"]
 	if !hasExp {
-		issues = append(issues, fmt.Sprintf("Missing 'exp' claim (token never expires) [%s]", redacted))
+		issues = append(issues, fmt.Sprintf("Missing 'exp' claim (token never expires) [%s]", tokenStr))
 	}
 
 	// Check long-lived token
@@ -192,10 +192,10 @@ func analyzeToken(token string) []string {
 			if hasIat {
 				iatFloat, iatOk := toFloat64(iat)
 				if iatOk && (expFloat-iatFloat) > longLivedSeconds {
-					issues = append(issues, fmt.Sprintf("Long-lived token: exp-iat=%.0fs (>24h) [%s]", expFloat-iatFloat, redacted))
+					issues = append(issues, fmt.Sprintf("Long-lived token: exp-iat=%.0fs (>24h) [%s]", expFloat-iatFloat, tokenStr))
 				}
 			} else if (expFloat - now) > longLivedSeconds {
-				issues = append(issues, fmt.Sprintf("Long-lived token: exp-now=%.0fs (>24h) [%s]", expFloat-now, redacted))
+				issues = append(issues, fmt.Sprintf("Long-lived token: exp-now=%.0fs (>24h) [%s]", expFloat-now, tokenStr))
 			}
 		}
 	}
@@ -203,29 +203,29 @@ func analyzeToken(token string) []string {
 	// Check privileged claims
 	if admin, ok := payload["admin"]; ok {
 		if b, ok := admin.(bool); ok && b {
-			issues = append(issues, fmt.Sprintf("Privileged claim: admin=true [%s]", redacted))
+			issues = append(issues, fmt.Sprintf("Privileged claim: admin=true [%s]", tokenStr))
 		}
 	}
 	if isAdmin, ok := payload["is_admin"]; ok {
 		if b, ok := isAdmin.(bool); ok && b {
-			issues = append(issues, fmt.Sprintf("Privileged claim: is_admin=true [%s]", redacted))
+			issues = append(issues, fmt.Sprintf("Privileged claim: is_admin=true [%s]", tokenStr))
 		}
 	}
 	if role, ok := payload["role"]; ok {
 		if roleStr, ok := role.(string); ok {
 			lower := strings.ToLower(roleStr)
 			if strings.Contains(lower, "admin") || strings.Contains(lower, "superuser") {
-				issues = append(issues, fmt.Sprintf("Privileged claim: role=%s [%s]", roleStr, redacted))
+				issues = append(issues, fmt.Sprintf("Privileged claim: role=%s [%s]", roleStr, tokenStr))
 			}
 		}
 	}
 
 	// Check missing iss/aud
 	if _, ok := payload["iss"]; !ok {
-		issues = append(issues, fmt.Sprintf("Missing 'iss' claim [%s]", redacted))
+		issues = append(issues, fmt.Sprintf("Missing 'iss' claim [%s]", tokenStr))
 	}
 	if _, ok := payload["aud"]; !ok {
-		issues = append(issues, fmt.Sprintf("Missing 'aud' claim [%s]", redacted))
+		issues = append(issues, fmt.Sprintf("Missing 'aud' claim [%s]", tokenStr))
 	}
 
 	return issues
@@ -258,17 +258,4 @@ func toFloat64(v any) (float64, bool) {
 		return f, err == nil
 	}
 	return 0, false
-}
-
-// redactJWT shows the header and first 8 chars of payload, masking the rest.
-func redactJWT(token string) string {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return strings.Repeat("*", len(token))
-	}
-	payload := parts[1]
-	if len(payload) > 8 {
-		payload = payload[:8] + "..."
-	}
-	return parts[0] + "." + payload + ".[sig]"
 }

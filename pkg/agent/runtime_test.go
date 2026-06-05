@@ -20,7 +20,7 @@ type fakeRuntime struct {
 	output         string
 }
 
-func (f *fakeRuntime) RunPrompt(_ context.Context, _ *config.OliumConfig, _ string, _, _ io.Writer, _ string, _ bool) (oliumRunOutput, error) {
+func (f *fakeRuntime) RunPrompt(_ context.Context, _ *config.OliumConfig, _ string, _, _ io.Writer, _ string, _ bool, _ RecordSpec) (oliumRunOutput, error) {
 	f.runPromptCalls.Add(1)
 	return oliumRunOutput{Text: f.output}, nil
 }
@@ -42,6 +42,7 @@ func (f *fakeRuntime) NewSessionWithSpec(_ *config.OliumConfig, _ SessionSpec) (
 type fakeSession struct{}
 
 func (fakeSession) Fork() AgentSession { return fakeSession{} }
+func (fakeSession) Close() error       { return nil }
 
 // TestEngineDispatchesThroughInjectedRuntime proves the engine depends on the
 // AgentRuntime interface rather than the concrete olium engine: a fake runtime

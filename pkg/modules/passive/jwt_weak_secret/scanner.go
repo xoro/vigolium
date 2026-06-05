@@ -102,8 +102,8 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 				Request:  string(ctx.Request().Raw()),
 				ExtractedResults: []string{
 					fmt.Sprintf("Algorithm: %s", alg),
-					fmt.Sprintf("Weak secret: %s", redactSecret(weakSecret)),
-					fmt.Sprintf("JWT: %s", redactJWT(token)),
+					fmt.Sprintf("Weak secret: %s", weakSecret),
+					fmt.Sprintf("JWT: %s", token),
 				},
 				Info: output.Info{
 					Name:        "JWT Signed with Weak Secret",
@@ -124,8 +124,8 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 				Request:  string(ctx.Request().Raw()),
 				ExtractedResults: []string{
 					fmt.Sprintf("Algorithm: %s", declaredAlg),
-					fmt.Sprintf("Plaintext signature: %s", redactSecret(plaintext)),
-					fmt.Sprintf("JWT: %s", redactJWT(token)),
+					fmt.Sprintf("Plaintext signature: %s", plaintext),
+					fmt.Sprintf("JWT: %s", token),
 				},
 				Info: output.Info{
 					Name:        "JWT Has Non-Cryptographic Signature",
@@ -395,25 +395,4 @@ func isJWT(s string) bool {
 		}
 	}
 	return true
-}
-
-// redactSecret shows first 2 and last 2 characters, masking the rest.
-func redactSecret(s string) string {
-	if len(s) <= 6 {
-		return strings.Repeat("*", len(s))
-	}
-	return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
-}
-
-// redactJWT shows the header and first 8 chars of payload, masking the rest.
-func redactJWT(token string) string {
-	parts := strings.SplitN(token, ".", 3)
-	if len(parts) != 3 {
-		return strings.Repeat("*", len(token))
-	}
-	payload := parts[1]
-	if len(payload) > 8 {
-		payload = payload[:8] + "..."
-	}
-	return parts[0] + "." + payload + ".[signature]"
 }

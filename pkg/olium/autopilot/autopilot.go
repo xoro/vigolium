@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/olium"
 	"github.com/vigolium/vigolium/pkg/olium/engine"
 	"github.com/vigolium/vigolium/pkg/olium/provider"
+	"github.com/vigolium/vigolium/pkg/olium/sessionlog"
 	"github.com/vigolium/vigolium/pkg/olium/skill"
 	"github.com/vigolium/vigolium/pkg/olium/tool"
 	"github.com/vigolium/vigolium/pkg/olium/toollog"
@@ -417,7 +419,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		tools.Register(skill.NewLoadTool(skills))
 	}
 
-	eng := engine.New(engine.Config{
+	ecfg := engine.Config{
 		Provider: opts.Provider,
 		Tools:    tools,
 		Skills:   skills,
@@ -454,7 +456,32 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		// to do almost always halt on the first nudge — one round of waste.
 		NudgeOnEmptyToolCalls: 2,
 		NudgeOnEmptyMessage:   autopilotEmptyTurnNudge,
-	})
+	}
+
+	// Persist a Pi-style JSONL transcript beside the other session artifacts
+	// (runtime.log, scratchpad, tool-results/) for post-hoc debugging. Only
+	// attach when we have a session dir; a recorder construction failure is
+	// non-fatal — the scan proceeds without a transcript.
+	if opts.SessionDir != "" {
+		provName := ""
+		if opts.Provider != nil {
+			provName = opts.Provider.Name()
+		}
+		cwd, _ := os.Getwd()
+		if rec, rerr := sessionlog.New(filepath.Join(opts.SessionDir, "transcript.jsonl"), sessionlog.Meta{
+			SessionID: filepath.Base(opts.SessionDir),
+			Provider:  provName,
+			Model:     opts.Model,
+			Cwd:       cwd,
+		}); rerr == nil {
+			ecfg.Recorder = rec
+		}
+	}
+
+	eng := engine.New(ecfg)
+	// Flush + close the transcript when the run ends. No-op when no recorder
+	// was attached.
+	defer func() { _ = eng.CloseRecorder() }()
 
 	initial := buildInitialPrompt(opts)
 
@@ -561,6 +588,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			// here, so claude-code's FINDING/HALT blocks that the parser
 			// consumes don't count as visible narration.
 			tlog.HandleTool(ev)
+			// Reasoning deltas accumulate in the logger and flush as one muted
+			// `⋈ thinking` block on the tool log (stderr) — before the turn's
+			// first tool card (via start()) or, for a pure planning turn,
+			// before the assistant narration prints below. Gated on --verbose
+			// inside the logger; a no-op otherwise.
+			tlog.HandleThinking(ev)
 			if ev.Type == engine.EventTurnDone {
 				if ev.Usage != nil {
 					usage.in += int64(ev.Usage.Input)
@@ -594,6 +627,10 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 				}
 				if delta != "" {
 					if !hadTextThisTurn {
+						// Flush any buffered reasoning before the narration so
+						// the operator reads think → answer (this turn had no
+						// tool card to trigger the flush via start()).
+						tlog.FlushThinking()
 						// First visible text in this turn — frame the
 						// narration with a header so it reads like the
 						// `▶ tool` lines (planning is just another step).
@@ -724,6 +761,11 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		nextPrompt = formatCoverageGapPrompt(probeRes.NewSignatures)
 		reentries++
 	}
+
+	// Flush any reasoning buffered by a final turn that produced neither a
+	// tool card nor narration (rare, but otherwise it would be silently
+	// dropped at run end).
+	tlog.FlushThinking()
 
 	// Flush any held sentinel tail. Normally Feed consumes everything but
 	// a model that ends mid-block (no <<<VIG:END>>>) would leave bytes

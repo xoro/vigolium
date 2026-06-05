@@ -189,6 +189,14 @@ func (m *Module) testForwardedHost(
 		return nil
 	}
 
+	// Strict drop-on-fail: confirm the X-Forwarded-Host value genuinely flows
+	// into the output (a real input→output reflection), not a one-shot echo or a
+	// coincidental static string. A fresh random host must reflect every round.
+	// Fails OPEN only on an inconclusive probe error.
+	if confirmed, err := m.confirmForwardedHostReflection(ctx, httpClient); err == nil && !confirmed {
+		return nil
+	}
+
 	return &output.ResultEvent{
 		URL:                targetURL,
 		Request:            string(modifiedRaw),
@@ -266,6 +274,14 @@ func (m *Module) testForwardedProto(
 	}
 
 	if finding == "" {
+		return nil
+	}
+
+	// Strict drop-on-fail: a single baseline-vs-probe status flip is unreliable
+	// (transient flap, load-balancer routing). Confirm the split is reproducible
+	// AND attributable to the "https" VALUE specifically — a benign X-Forwarded-
+	// Proto value must behave like the no-header baseline, not like the probe.
+	if !m.confirmForwardedProtoChange(ctx, httpClient, baselineStatus, probeStatus) {
 		return nil
 	}
 
@@ -391,6 +407,81 @@ func (m *Module) testForwardedFor(
 	return nil
 }
 
+// confirmForwardedHostReflection confirms the X-Forwarded-Host value genuinely
+// flows into the response (Location header or body) by sending a fresh random
+// host each round and requiring it to reflect every time. A page that merely
+// contains a fixed string, or echoes the header only once, will not track the
+// changing canary. Returns ConfirmReflection's (confirmed, err); callers treat a
+// non-nil err as inconclusive and keep the finding.
+func (m *Module) confirmForwardedHostReflection(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) (bool, error) {
+	return modkit.ConfirmReflection(2, func(canary string) (bool, error) {
+		host := "vgo" + canary + ".example"
+		raw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
+		if err != nil {
+			return false, err
+		}
+		raw, err = httpmsg.SetPath(raw, "/")
+		if err != nil {
+			return false, err
+		}
+		raw, err = httpmsg.AddOrReplaceHeader(raw, "X-Forwarded-Host", host)
+		if err != nil {
+			return false, err
+		}
+		req, err := httpmsg.ParseRawRequest(string(raw))
+		if err != nil {
+			return false, err
+		}
+		req = req.WithService(ctx.Service())
+		resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+		if err != nil {
+			return false, err
+		}
+		defer resp.Close()
+		if resp.Response() == nil {
+			return false, nil
+		}
+		loc := resp.Response().Header.Get("Location")
+		return strings.Contains(loc, host) || strings.Contains(resp.Body().String(), host), nil
+	})
+}
+
+// confirmForwardedProtoChange confirms an X-Forwarded-Proto status change is
+// reproducible AND attributable to the "https" value rather than mere header
+// presence or transient flapping. Across two rounds the no-header baseline must
+// keep returning baselineStatus and the "https" probe must keep returning
+// probeStatus; then a benign value ("http") must NOT reproduce the changed
+// status. Fails OPEN on an inconclusive fetch error.
+func (m *Module) confirmForwardedProtoChange(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	baselineStatus, probeStatus int,
+) bool {
+	for range 2 {
+		_, bs, ok := m.headerFetch(ctx, httpClient, "X-Forwarded-Proto", "")
+		if !ok {
+			return true // inconclusive
+		}
+		if bs != baselineStatus {
+			return false // baseline not stable → change not attributable
+		}
+		_, ps, ok := m.headerFetch(ctx, httpClient, "X-Forwarded-Proto", "https")
+		if !ok {
+			return true
+		}
+		if ps != probeStatus {
+			return false // probe not reproducible
+		}
+	}
+	// Negative control: a benign proto value must behave like the no-header
+	// baseline. If "http" also yields the changed status, the effect is from
+	// header presence/instability, not the "https" value.
+	if _, cs, ok := m.headerFetch(ctx, httpClient, "X-Forwarded-Proto", "http"); ok && cs == probeStatus && probeStatus != baselineStatus {
+		return false
+	}
+	return true
+}
+
 // confirmForwardedForSizeShift decides whether the spoofed X-Forwarded-For header
 // is responsible for a response-size change, rather than ordinary per-request
 // jitter. It fetches a fresh no-header control (to learn the page's natural
@@ -443,10 +534,10 @@ func (m *Module) confirmForwardedForSizeShift(
 func (m *Module) confirmForwardedForBypass(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) bool {
 	const rounds = 2
 	for range rounds {
-		if _, controlStatus, ok := m.doFetch(ctx, httpClient, false); !ok || !isAccessDenied(controlStatus) {
+		if _, controlStatus, ok := m.headerFetch(ctx, httpClient, "", ""); !ok || !isAccessDenied(controlStatus) {
 			return false // not denied WITHOUT the header → the block isn't header-attributable
 		}
-		if _, probeStatus, ok := m.doFetch(ctx, httpClient, true); !ok || probeStatus < 200 || probeStatus >= 300 {
+		if _, probeStatus, ok := m.headerFetch(ctx, httpClient, "X-Forwarded-For", injectedIP); !ok || probeStatus < 200 || probeStatus >= 300 {
 			return false // not allowed WITH the header → not a reproducible bypass
 		}
 	}
@@ -458,18 +549,28 @@ func (m *Module) confirmForwardedForBypass(ctx *httpmsg.HttpRequestResponse, htt
 // transport error, a nil response, or a WAF/denied status — none of which can
 // serve as a clean size sample.
 func (m *Module) fetchBodyLen(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, withSpoofedIP bool) (int, bool) {
-	bodyLen, status, ok := m.doFetch(ctx, httpClient, withSpoofedIP)
+	value := ""
+	if withSpoofedIP {
+		value = injectedIP
+	}
+	bodyLen, status, ok := m.headerFetch(ctx, httpClient, "X-Forwarded-For", value)
 	if !ok || isAccessDenied(status) {
 		return 0, false
 	}
 	return bodyLen, true
 }
 
-// doFetch issues a GET / (optionally carrying the spoofed X-Forwarded-For header),
-// bypassing the response cache so it truly hits the wire, and returns the body
-// length and status code. ok is false only on a build/parse/transport error or a
-// nil response — an access-denied status is a valid observation the caller judges.
-func (m *Module) doFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, withSpoofedIP bool) (bodyLen, status int, ok bool) {
+// headerFetch issues a GET / optionally carrying a single request header
+// (name=="" or value=="" sends no extra header), bypassing the response cache so
+// it truly hits the wire, and returns the response body length and status code.
+// ok is false only on a build/transport error or a nil response — an
+// access-denied status is a valid observation the caller judges.
+//
+// NoClustering: the requester replays a cached response for an identical request
+// (500ms TTL). A replayed baseline/probe would collapse the measured natural
+// variance to zero and make a transient block look reproducible — defeating the
+// confirmation gates. These fetches must really hit the wire.
+func (m *Module) headerFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, name, value string) (bodyLen, status int, ok bool) {
 	raw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return 0, 0, false
@@ -478,28 +579,15 @@ func (m *Module) doFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requ
 	if err != nil {
 		return 0, 0, false
 	}
-	if withSpoofedIP {
-		raw, err = httpmsg.AddOrReplaceHeader(raw, "X-Forwarded-For", injectedIP)
+	if name != "" && value != "" {
+		raw, err = httpmsg.AddOrReplaceHeader(raw, name, value)
 		if err != nil {
 			return 0, 0, false
 		}
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
+	st, body, ok := modkit.ExecuteRaw(httpClient, ctx.Service(), raw, http.Options{NoClustering: true})
+	if !ok {
 		return 0, 0, false
 	}
-	req = req.WithService(ctx.Service())
-	// NoClustering: the requester replays a cached response for an identical
-	// request (500ms TTL). A replayed baseline/probe would collapse the measured
-	// natural variance to zero and make a transient block look reproducible —
-	// defeating both confirmation gates. These fetches must really hit the wire.
-	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
-	if err != nil {
-		return 0, 0, false
-	}
-	defer resp.Close()
-	if resp.Response() == nil {
-		return 0, 0, false
-	}
-	return len(resp.Body().String()), resp.Response().StatusCode, true
+	return len(body), st, true
 }

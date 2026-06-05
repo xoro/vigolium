@@ -4,10 +4,14 @@ package olium
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	oliumresources "github.com/vigolium/vigolium/internal/resources/olium"
 	"github.com/vigolium/vigolium/pkg/olium/engine"
 	"github.com/vigolium/vigolium/pkg/olium/provider"
+	"github.com/vigolium/vigolium/pkg/olium/sessionlog"
 	"github.com/vigolium/vigolium/pkg/olium/skill"
 	"github.com/vigolium/vigolium/pkg/olium/tool"
 	"github.com/vigolium/vigolium/pkg/olium/tui"
@@ -104,6 +108,39 @@ type Options struct {
 	// InitialPrompt seeds the TUI with a first message, auto-sent on
 	// startup. Ignored in RunHeadless (which uses HeadlessOptions.Prompt).
 	InitialPrompt string
+
+	// SessionDir, when non-empty, is an existing directory into which the
+	// run writes a Pi-style JSONL session transcript (transcript.jsonl) for
+	// debugging. The CLI resolves it under agent.sessions_dir; library
+	// callers may leave it empty to disable recording entirely. The runner
+	// only writes into the directory — it does not create the per-run dir
+	// (that's the CLI's job, mirroring the agentic-scan session layout).
+	SessionDir string
+}
+
+// newSessionRecorder builds a Pi-style transcript recorder for an interactive
+// or headless run when opts.SessionDir is set. It returns a true nil
+// interface (never a typed nil) when recording is disabled or construction
+// fails, so assigning the result to engine.Config.Recorder is always safe — a
+// best-effort debug transcript must never block launching the agent.
+func newSessionRecorder(opts Options, providerName, model string) engine.EventRecorder {
+	if strings.TrimSpace(opts.SessionDir) == "" {
+		return nil
+	}
+	cwd, _ := os.Getwd()
+	rec, err := sessionlog.New(filepath.Join(opts.SessionDir, "transcript.jsonl"), sessionlog.Meta{
+		// Align the session id with the run dir name (matching autopilot) so
+		// the transcript's id ties back to its on-disk location.
+		SessionID:     filepath.Base(opts.SessionDir),
+		Provider:      providerName,
+		Model:         model,
+		ThinkingLevel: opts.ReasoningEffort,
+		Cwd:           cwd,
+	})
+	if err != nil {
+		return nil
+	}
+	return rec
 }
 
 // RunTUI launches the interactive TUI.
@@ -135,7 +172,11 @@ func RunTUI(opts Options) error {
 		Skills:   skills,
 		Model:    resolvedModel,
 		System:   opts.SystemPrompt,
+		Recorder: newSessionRecorder(opts, providerName, resolvedModel),
 	})
+	// Flush + close the transcript when the interactive session ends. No-op
+	// when no recorder was attached.
+	defer func() { _ = eng.CloseRecorder() }()
 
 	return tui.Run(tui.Config{
 		Engine:        eng,
@@ -175,6 +216,7 @@ func buildHeadlessEngine(opts Options) (*engine.Engine, string, string, error) {
 		Skills:   skills,
 		Model:    model,
 		System:   opts.SystemPrompt,
+		Recorder: newSessionRecorder(opts, name, model),
 	}), name, model, nil
 }
 

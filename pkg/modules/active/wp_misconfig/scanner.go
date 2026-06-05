@@ -72,11 +72,46 @@ func (m *Module) ScanPerRequest(
 
 	var results []*output.ResultEvent
 	for _, probe := range wpProbes {
-		if result := m.probeFile(ctx, httpClient, probe, fp); result != nil {
+		if result := m.probeFile(ctx, httpClient, scanCtx, probe, fp); result != nil {
 			results = append(results, result)
 		}
 	}
 	return results, nil
+}
+
+// wpCronEmptyIsSpecific reports whether a 200-with-empty-body response is
+// specific to wp-cron.php rather than a blanket behaviour the host exhibits for
+// any .php path (PHP disabled, a catch-all returning a blank 200, etc.). It
+// fetches a random nonexistent .php path; if that ALSO returns a 200 with an
+// empty/whitespace body, the empty-200 signal is meaningless and wp-cron must
+// not be reported. Fails OPEN on an inconclusive transient error.
+func (m *Module) wpCronEmptyIsSpecific(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) bool {
+	randomPath := "/vgm-wpcron-" + utils.RandomString(8) + ".php"
+	raw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
+	if err != nil {
+		return true
+	}
+	raw, err = httpmsg.SetPath(raw, randomPath)
+	if err != nil {
+		return true
+	}
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return true
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+	if err != nil {
+		return true
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return true
+	}
+	if resp.Response().StatusCode == 200 && len(strings.TrimSpace(resp.Body().String())) == 0 {
+		return false // blanket empty-200 for any .php path → not specific to wp-cron
+	}
+	return true
 }
 
 func (m *Module) fingerprint404(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) *notFoundFingerprint {
@@ -111,6 +146,7 @@ func (m *Module) fingerprint404(ctx *httpmsg.HttpRequestResponse, httpClient *ht
 func (m *Module) probeFile(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	probe wpProbe,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
@@ -176,9 +212,12 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	// Special case: wp-cron.php returns 200 with empty body when functional
+	// Special case: wp-cron.php returns 200 with empty body when functional.
+	// Strict drop-on-fail: only report when the empty-200 is SPECIFIC to
+	// wp-cron.php (a random .php path does not also return an empty 200), so a
+	// host that blanket-returns blank 200s for any .php path is not flagged.
 	if probe.path == "/wp-cron.php" {
-		if len(strings.TrimSpace(body)) == 0 {
+		if len(strings.TrimSpace(body)) == 0 && m.wpCronEmptyIsSpecific(ctx, httpClient) {
 			urlx, _ := ctx.URL()
 			targetURL := urlx.Scheme + "://" + urlx.Host + probe.path
 			return &output.ResultEvent{
@@ -209,6 +248,13 @@ func (m *Module) probeFile(
 		}
 	}
 	if len(matchedMarkers) == 0 {
+		return nil
+	}
+
+	// Soft-404 / SPA-shell gate: reject a marker match that is just the host's
+	// wildcard shell (same 200 body served for a random path).
+	location := resp.Response().Header.Get("Location")
+	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, status, []byte(body), location) {
 		return nil
 	}
 

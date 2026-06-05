@@ -46,11 +46,15 @@ var paginationPatterns = []paginationPattern{
 }
 
 // contextPatterns help confirm this is actually a paginated API response.
+// Deliberately excludes the bare `"next"`/`"previous"` tokens: those are common
+// navigation labels (menus, GraphQL relay edges, carousels) and a stray one
+// alongside a generic `"count"` produced false positives. The pagination-
+// specific variants (`"next_page"`, `"next_cursor"`, ...) are kept.
 var contextPatterns = []string{
 	`"page"`, `"per_page"`, `"perPage"`, `"page_size"`, `"pageSize"`,
 	`"limit"`, `"offset"`, `"cursor"`, `"next_page"`, `"nextPage"`,
 	`"next_cursor"`, `"nextCursor"`, `"has_more"`, `"hasMore"`,
-	`"has_next"`, `"hasNext"`, `"previous"`, `"next"`,
+	`"has_next"`, `"hasNext"`,
 }
 
 // Module implements the API Pagination Leak passive scanner.
@@ -124,15 +128,20 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	// Require at least one context pattern to confirm this is a paginated response
-	hasContext := false
+	// Require at least TWO distinct context patterns to confirm this is genuinely
+	// a paginated response. A single generic count field plus one loose token
+	// (e.g. a lone `"limit"` or `"cursor"`) is too weak — real pagination
+	// envelopes carry multiple markers (page + per_page, limit + offset, ...).
+	contextHits := 0
 	for _, cp := range contextPatterns {
 		if strings.Contains(body, cp) {
-			hasContext = true
-			break
+			contextHits++
+			if contextHits >= 2 {
+				break
+			}
 		}
 	}
-	if !hasContext {
+	if contextHits < 2 {
 		return nil, nil
 	}
 

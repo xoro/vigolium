@@ -148,37 +148,64 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	body := ctx.Response().BodyToString()
 
-	var results []*output.ResultEvent
-
+	// Collect every matched server-only pattern first.
+	type hit struct {
+		pat   leakPattern
+		match string
+	}
+	var hits []hit
 	for _, pat := range leakPatterns {
-		match := pat.re.FindString(body)
-		if match == "" {
+		if match := pat.re.FindString(body); match != "" {
+			hits = append(hits, hit{pat: pat, match: match})
+		}
+	}
+	if len(hits) == 0 {
+		return nil, nil
+	}
+
+	// Strict drop-on-fail: a single weak pattern (a Prisma/Drizzle/knex import, a
+	// localhost URL, a crypto-module reference) frequently appears as an incidental
+	// string literal inside a minified vendor bundle and is not, on its own,
+	// evidence of a server/client boundary violation. Require corroboration: at
+	// least two DISTINCT server-only signals in the same bundle. The sole
+	// exception is a database connection string with embedded credentials, which
+	// is unambiguous on its own.
+	corroborated := len(hits) >= 2
+
+	var results []*output.ResultEvent
+	for _, h := range hits {
+		if !corroborated && !isSelfConfident(h.pat.name) {
 			continue
 		}
-
 		results = append(results, &output.ResultEvent{
 			ModuleID: ModuleID,
 			Host:     urlx.Host,
 			URL:      urlx.String(),
 			Matched:  urlx.String(),
 			ExtractedResults: []string{
-				fmt.Sprintf("Leak: %s", pat.name),
-				fmt.Sprintf("Matched: %s", modkit.Truncate(match, 120)),
+				fmt.Sprintf("Leak: %s", h.pat.name),
+				fmt.Sprintf("Matched: %s", modkit.Truncate(h.match, 120)),
 			},
 			Info: output.Info{
-				Name:        fmt.Sprintf("Server Code Leak: %s", pat.name),
-				Description: pat.desc,
-				Severity:    pat.severity,
+				Name:        fmt.Sprintf("Server Code Leak: %s", h.pat.name),
+				Description: h.pat.desc,
+				Severity:    h.pat.severity,
 				Confidence:  severity.Tentative,
 				Tags:        []string{"server-only", "boundary-violation", "nextjs", "information-disclosure"},
 				Reference:   []string{"https://cwe.mitre.org/data/definitions/200.html"},
 			},
 			Metadata: map[string]any{
 				"cwe":     "CWE-200",
-				"pattern": pat.name,
+				"pattern": h.pat.name,
 			},
 		})
 	}
 
 	return results, nil
+}
+
+// isSelfConfident reports whether a pattern is unambiguous enough to report on
+// its own (without a second corroborating server-only signal in the bundle).
+func isSelfConfident(name string) bool {
+	return name == "Database Connection String"
 }

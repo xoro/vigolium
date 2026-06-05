@@ -68,19 +68,19 @@ func (m *Module) ScanPerRequest(
 		return results, nil
 	}
 
-	pathBypassResults, err := bypassPath(urlx, ctx, httpClient)
+	pathBypassResults, err := bypassPath(urlx, ctx, httpClient, scanCtx)
 	if err == nil && len(pathBypassResults) > 0 {
 		results = append(results, pathBypassResults...)
 		return results, nil
 	}
 
-	headerBypassResults, err := bypassHeaders(urlx, ctx, httpClient)
+	headerBypassResults, err := bypassHeaders(urlx, ctx, httpClient, scanCtx)
 	if err == nil && len(headerBypassResults) > 0 {
 		results = append(results, headerBypassResults...)
 		return results, nil
 	}
 
-	methodBypassResults, err := bypassMethod(urlx, ctx, httpClient)
+	methodBypassResults, err := bypassMethod(urlx, ctx, httpClient, scanCtx)
 	if err == nil && len(methodBypassResults) > 0 {
 		results = append(results, methodBypassResults...)
 		return results, nil
@@ -89,7 +89,7 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
-func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) ([]*output.ResultEvent, error) {
+func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, scanCtx *modkit.ScanContext) ([]*output.ResultEvent, error) {
 	var results []*output.ResultEvent
 	path := urlx.EscapedPath()
 	pathPayloads := []string{
@@ -140,6 +140,21 @@ func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient 
 			continue
 		}
 		if resp.Response().StatusCode == 200 {
+			// A 200 alone is not a bypass: a server that answers every path with a
+			// 200 catch-all/SPA shell would make every mutated payload "succeed". Only
+			// report when the 200 body is distinguishable from the host's wildcard
+			// response to a random path (fails open on probe error).
+			body := resp.Body().String()
+			location := resp.Response().Header.Get("Location")
+			if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(body), location) {
+				resp.Close()
+				continue
+			}
+			// Reproducibility gate: a transient 200 is not a bypass.
+			if !confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, body) {
+				resp.Close()
+				continue
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + payload,
@@ -164,6 +179,7 @@ func bypassHeaders(
 	urlx *urlutil.URL,
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 ) ([]*output.ResultEvent, error) {
 	var results []*output.ResultEvent
 
@@ -219,6 +235,19 @@ func bypassHeaders(
 			continue
 		}
 		if resp.Response().StatusCode == 200 {
+			// Same wildcard/catch-all guard as the path bypass: a 200 that merely
+			// matches the host's random-path shell is not a genuine bypass.
+			body := resp.Body().String()
+			location := resp.Response().Header.Get("Location")
+			if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(body), location) {
+				resp.Close()
+				continue
+			}
+			// Reproducibility gate: a transient 200 is not a bypass.
+			if !confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, body) {
+				resp.Close()
+				continue
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + newPath,
@@ -253,6 +282,7 @@ func bypassMethod(
 	urlx *urlutil.URL,
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 ) ([]*output.ResultEvent, error) {
 	var results []*output.ResultEvent
 
@@ -278,6 +308,20 @@ func bypassMethod(
 		}
 
 		if resp.Response() != nil && isMethodBypassStatus(method, resp.Response().StatusCode, resp.FullResponseString()) {
+			// A catch-all host that 2xx-es every request would make every method a
+			// "bypass"; require the response to be distinguishable from the host's
+			// wildcard shell.
+			body := resp.Body().String()
+			location := resp.Response().Header.Get("Location")
+			if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, resp.Response().StatusCode, []byte(body), location) {
+				resp.Close()
+				continue
+			}
+			// Reproducibility gate: a transient 2xx for the method is not a bypass.
+			if !confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, resp.Response().StatusCode, body) {
+				resp.Close()
+				continue
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.String(),
@@ -322,7 +366,11 @@ func bypassMethod(
 
 		if resp.Response() != nil && resp.Response().StatusCode == 200 {
 			body := resp.FullResponseString()
-			if !strings.Contains(strings.ToLower(body), "method not allowed") {
+			respBody := resp.Body().String()
+			location := resp.Response().Header.Get("Location")
+			if !strings.Contains(strings.ToLower(body), "method not allowed") &&
+				modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(respBody), location) &&
+				confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, respBody) {
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.String(),
 					Request:          string(modifiedRaw),
@@ -380,6 +428,30 @@ func isMethodBypassStatus(method string, statusCode int, body string) bool {
 	}
 
 	return true
+}
+
+// confirmStableBypass re-issues the same mutated request once more and reports
+// whether the bypass reproduces: the re-fetch must return the SAME status and a
+// body that is textually stable (QuickRatio >= UpperRatioBound) versus the first
+// hit. A one-shot 200 from a load-balancer flap, a race, or a caching edge will
+// not reproduce and is dropped. It fails OPEN (returns true) only on an
+// inconclusive transient error (parse/network failure on the confirm fetch) so a
+// real bypass is never suppressed by a flaky second request.
+func confirmStableBypass(
+	httpClient *http.Requester,
+	service *httpmsg.Service,
+	modifiedRaw []byte,
+	wantStatus int,
+	firstBody string,
+) bool {
+	status, body, ok := modkit.ExecuteRaw(httpClient, service, modifiedRaw, http.Options{NoRedirects: true, NoClustering: true})
+	if !ok {
+		return true // inconclusive transient error — don't suppress
+	}
+	if status != wantStatus {
+		return false // bypass did not reproduce → drop
+	}
+	return modkit.BodiesSimilar(firstBody, body)
 }
 
 // markAndShouldContinue marks the host as checked and returns true if it should continue

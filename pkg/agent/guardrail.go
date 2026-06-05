@@ -78,6 +78,7 @@ func ClassifyPromptSafety(ctx context.Context, settings *config.Settings, userPr
 		zap.L().Warn("guardrail: provider resolve failed, allowing prompt", zap.Error(err))
 		return GuardrailVerdict{Allowed: true, Reason: "guardrail unavailable: " + err.Error()}
 	}
+	defer func() { _ = sess.Close() }()
 
 	callCtx, cancel := context.WithTimeout(ctx, guardrailCallTimeout)
 	defer cancel()

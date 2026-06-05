@@ -66,6 +66,21 @@ func TestScanPerRequest_AuthHeaderFromStorage(t *testing.T) {
 	require.NotEmpty(t, results)
 }
 
+// TestScanPerRequest_NoStrayBearerStitch is a regression for the High-severity
+// pattern: an unrelated localStorage.getItem('theme') must NOT be stitched to a
+// stray "Bearer" literal elsewhere on the same minified line. Statements are
+// semicolon-separated, so the bounded gap should prevent a match.
+func TestScanPerRequest_NoStrayBearerStitch(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `var s="Bearer token format";initApp();renderHeader();applyTheme();var th=localStorage.getItem("theme");`
+	ctx := makeHTTPCtx("/bundle.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 // TestScanPerRequest_NoStorage drives benign JS with no token storage and
 // expects no findings.
 func TestScanPerRequest_NoStorage(t *testing.T) {

@@ -12,7 +12,7 @@ import { compact, parseIntEnv, round2, sleepInterruptible } from "./util.js";
 import { adapterEventHasQuotaLimit, adapterEventHasRetryableError, isTransientError, valueContainsQuotaLimit } from "../adapters/claude-events.js";
 import { CheckpointStore } from "./checkpoint.js";
 import { detectDraftOwner, startFindingsWatcher, summarizeFindings } from "./findings.js";
-import { stripRawArtifacts } from "./strip-artifacts.js";
+import { finalizeOutput } from "./redact-artifacts.js";
 import { composeUserPrompt, parseToolsField } from "./prompts.js";
 
 export interface OrchestratorOptions {
@@ -69,6 +69,12 @@ export interface OrchestratorOptions {
    * resume or debug.
    */
   stripRaw?: boolean;
+  /**
+   * When the post-`complete` strip runs, retain DB snapshots and skip
+   * scrubbing secrets from `confirm-workspace/` JSON + logs. The junk sweep
+   * still runs. Default: redact. See `RunOptions.keepSecrets`.
+   */
+  keepSecrets?: boolean;
   /**
    * User-supplied focus prose (already loaded from --focus-file). Injected
    * as a soft hint into every phase's user prompt and persisted into the
@@ -400,12 +406,15 @@ export class Orchestrator {
     // the audit-state.json write, the findings summary, or the auditEnd event.
     // Skipped on failed/aborted runs so users can resume or debug raw output.
     if (status === "complete" && this.opts.stripRaw) {
-      await stripRawArtifacts(resultsDir, {
+      await finalizeOutput(resultsDir, {
         // Lite's historical --strip-raw behavior promotes raw drafts because
         // lite may never materialize full finding directories. Deep/balanced
         // drafts are intermediate debate artifacts and must not be promoted.
         promoteDrafts: this.opts.mode === "lite",
         keepConfirmWorkspace: this.opts.mode === "confirm",
+        // Sweep scanner scratch and (unless opted out) redact confirm-workspace
+        // secrets as part of the same final pass.
+        ...(this.opts.keepSecrets ? { keepSecrets: true } : {}),
       });
     }
 

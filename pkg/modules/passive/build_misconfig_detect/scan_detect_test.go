@@ -67,6 +67,20 @@ func TestScanPerRequest_DevStart(t *testing.T) {
 	require.NotEmpty(t, results)
 }
 
+// TestScanPerRequest_NonConfigBundle is a regression: a regular app bundle (not
+// a config file by URL or anchor) that embeds a config-shaped string must NOT be
+// flagged — attribution is required before the config regexes run.
+func TestScanPerRequest_NonConfigBundle(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `var opts={sourcemap:true,images:{hostname:"**"}};render(opts);`
+	ctx := makeHTTPCtx("/assets/index-uYP.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 // TestScanPerRequest_Clean verifies a benign JS config produces no findings.
 func TestScanPerRequest_Clean(t *testing.T) {
 	t.Parallel()

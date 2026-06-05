@@ -70,6 +70,34 @@ func TestScanPerRequest_DeserError(t *testing.T) {
 	require.NotEmpty(t, results)
 }
 
+// TestScanPerRequest_JSAssetReverseDNS is a regression for the FP class where a
+// minified JS bundle (served text/javascript) full of reverse-DNS identifiers
+// like "io.foo"/"com.app.title" tripped the Java-class-ref needle into a Medium.
+func TestScanPerRequest_JSAssetReverseDNS(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `var a={"com.app.title":"x","io.module.name":"y"};function NN(){return a}`
+	ctx := makeHTTPCtx("text/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// TestScanPerRequest_BareClassRefNoDiscriminator ensures a JSON body with a
+// Java-package-shaped string but NO @class/@type discriminator does not fire —
+// a bare class reference is not evidence of polymorphic deserialization.
+func TestScanPerRequest_BareClassRefNoDiscriminator(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `{"plugin":"com.example.SomeThing","enabled":true}`
+	ctx := makeHTTPCtx("application/json", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 // TestScanPerRequest_Benign drives a plain JSON response with no Jackson/Java
 // indicators and expects no findings.
 func TestScanPerRequest_Benign(t *testing.T) {

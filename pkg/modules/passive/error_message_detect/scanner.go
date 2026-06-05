@@ -204,10 +204,12 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	// Skip binary content
-	ct := strings.ToLower(ctx.Response().Header("Content-Type"))
-	if strings.Contains(ct, "image/") || strings.Contains(ct, "audio/") ||
-		strings.Contains(ct, "video/") || strings.Contains(ct, "octet-stream") {
+	// Skip static assets and binary payloads. Error/SQL/stack-trace strings
+	// ("TypeError:", "java.lang.", "Unknown column", ...) appear verbatim inside
+	// minified JS bundles and error-handling libraries; a match there is source
+	// code, not a live error. The URL-extension guard above misses bundles served
+	// at extensionless/SSO routes, so gate on the actual Content-Type too.
+	if modkit.IsStaticAssetContentType(ctx.Response().Header("Content-Type")) {
 		return nil, nil
 	}
 

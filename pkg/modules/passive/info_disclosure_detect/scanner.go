@@ -3,7 +3,6 @@ package info_disclosure_detect
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -88,10 +87,12 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	// Check body
 	body := ctx.Response().BodyToString()
 	if body != "" {
-		// Skip binary content
-		ct := strings.ToLower(ctx.Response().Header("Content-Type"))
-		if !strings.Contains(ct, "image/") && !strings.Contains(ct, "audio/") &&
-			!strings.Contains(ct, "video/") && !strings.Contains(ct, "octet-stream") {
+		// Skip static assets and binary payloads. Internal IPs, "stack trace"
+		// tokens, and "DEBUG" strings appear all over minified JS/CSS bundles
+		// (dev hosts, example IPs, library error text); a body match there is not
+		// a real disclosure. URL-extension gating misses extensionless JS, so
+		// gate on the actual Content-Type. Header checks above still run.
+		if !modkit.IsStaticAssetContentType(ctx.Response().Header("Content-Type")) {
 			for _, check := range bodyChecks {
 				if match := check.pattern.FindString(body); match != "" {
 					findings = append(findings, fmt.Sprintf("%s: %s", check.name, truncate(match, 100)))

@@ -33,6 +33,20 @@ func makeHTTPCtx(path, contentType, body string) *httpmsg.HttpRequestResponse {
 	return httpmsg.NewHttpRequestResponse(req, resp)
 }
 
+// TestScanPerRequest_JSBundleNotFlagged is a regression for the FP class where
+// error/stack-trace tokens baked into a minified JS bundle (served as
+// text/javascript at an extensionless route, so the URL-extension guard misses
+// it) were reported as live errors. The Content-Type gate must skip them.
+func TestScanPerRequest_JSBundleNotFlagged(t *testing.T) {
+	m := New()
+	body := `function h(e){if(e instanceof TypeError){throw new ReferenceError("java.lang.x")}}var sql="You have an error in your SQL syntax";`
+	ctx := makeHTTPCtx("/assets/index-uYP", "text/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 func TestScanPerRequest_DebugPage(t *testing.T) {
 	m := New()
 	ctx := makeHTTPCtx("/test", "text/html", `<html><body>Traceback (most recent call last): File "app.py" DEBUG = True</body></html>`)

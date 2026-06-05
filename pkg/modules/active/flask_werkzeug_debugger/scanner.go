@@ -100,7 +100,7 @@ func (m *Module) ScanPerRequest(
 
 	var results []*output.ResultEvent
 	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p); result != nil {
+		if result := m.probeEndpoint(ctx, httpClient, scanCtx, p); result != nil {
 			results = append(results, result)
 		}
 	}
@@ -111,6 +111,7 @@ func (m *Module) ScanPerRequest(
 func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	p probe,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), p.method)
@@ -160,6 +161,15 @@ func (m *Module) probeEndpoint(
 		}
 	}
 	if len(matchedMarkers) == 0 {
+		return nil
+	}
+
+	// Strict drop-on-fail: reject a debugger marker that is merely part of the
+	// host's catch-all / SPA shell (the same 200 body served for a random path).
+	// Real Werkzeug detections come from a 500 error page, whose status differs
+	// from the (2xx) wildcard shell, so they are never matched by this gate.
+	location := resp.Response().Header.Get("Location")
+	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, resp.Response().StatusCode, []byte(body), location) {
 		return nil
 	}
 

@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 )
@@ -132,6 +133,14 @@ func (m *Module) ScanPerInsertionPoint(
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return results, nil
 			}
+			continue
+		}
+
+		// A WAF/CDN challenge, auth gate, or rate-limit page is not the app
+		// surfacing a deserialization error — skip it so its body can't trip the
+		// signature (the SSO/Cloudflare-challenge false-positive class).
+		if infra.IsBlockedResponse(resp) {
+			resp.Close()
 			continue
 		}
 

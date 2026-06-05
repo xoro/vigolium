@@ -10,6 +10,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
@@ -160,6 +161,14 @@ func (m *Module) testPayload(
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
 		return nil, err
+	}
+
+	// A WAF/CDN challenge, auth gate, or rate-limit page is not the app
+	// responding to the operator payload — skip it so its body/size/status can't
+	// trip any detection path (the SSO/Cloudflare-challenge false-positive class).
+	if infra.IsBlockedResponse(resp) {
+		resp.Close()
+		return nil, nil
 	}
 
 	body := resp.Body().String()

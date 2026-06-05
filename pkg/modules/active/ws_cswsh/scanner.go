@@ -7,10 +7,10 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	vighttp "github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
-	"net/http"
 )
 
 var wsHeaders = []struct{ name, value string }{
@@ -180,5 +180,9 @@ func (m *Module) tryUpgrade(
 	}
 	defer resp.Close()
 
-	return resp.Response().StatusCode == http.StatusSwitchingProtocols
+	// Require a genuine WebSocket handshake (101 + Upgrade: websocket +
+	// Sec-WebSocket-Accept), not a bare 101 status: a proxy/catch-all that
+	// returns 101 without speaking WebSocket would otherwise make the Step-1
+	// support check — and every malicious-origin probe — a false positive.
+	return infra.IsWebSocketHandshake(resp)
 }

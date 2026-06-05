@@ -66,3 +66,17 @@ func TestScanPerRequest_Benign(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// TestScanPerRequest_StaticJSAssetWithPing is a regression for a false positive
+// where a minified SSO login JS bundle (text/javascript) containing a bare
+// "ping" token was reported as an MCP server. Static assets must be ignored.
+func TestScanPerRequest_StaticJSAssetWithPing(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `function NN(e,t){for(var n=0;n<t.length;n++){e.ping("2.0")}}var m="ping";`
+	ctx := makeHTTPCtx("/assets/index-uYP-oJTH.js", "Content-Type: text/javascript\r\n", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}

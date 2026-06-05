@@ -158,14 +158,7 @@ func (m *Module) ScanPerInsertionPoint(
 // vendor-aware block detector (Cloudflare, Akamai, Incapsula, ...) with a plain
 // status gate that also catches generic WAFs the detector does not recognize.
 func isBlockedResponse(resp *httputil.ResponseChain) bool {
-	if infra.GetBlockDetectionValidator().Validate(resp) != nil {
-		return true
-	}
-	switch resp.Response().StatusCode {
-	case 401, 403, 429, 503:
-		return true
-	}
-	return false
+	return infra.IsBlockedResponse(resp)
 }
 
 // checkNoSQLError checks if response contains NoSQL error patterns not in original.

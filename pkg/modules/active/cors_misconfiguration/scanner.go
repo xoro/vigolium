@@ -18,8 +18,16 @@ type corsProbe struct {
 	origin     string              // literal origin to send, or "" if originFunc is used
 	originFunc func(string) string // computes origin from target host (for subdomain bypass)
 	check      func(acao, acac string) bool
-	sev        severity.Severity
-	desc       string
+	// canaryOrigin, when set, marks a reflection-class probe (the server echoes
+	// the sent origin verbatim in ACAO). It builds a fresh, randomized origin
+	// that still satisfies the probe's (broken) matching rule, so the strict
+	// confirmation can prove the server reflects an attacker-chosen origin it
+	// could not have had in any static allowlist. When nil, the signal is a
+	// fixed value (null / wildcard) and confirmation falls back to a
+	// reproducibility check instead.
+	canaryOrigin func(host, canary string) string
+	sev          severity.Severity
+	desc         string
 }
 
 var probes = []corsProbe{
@@ -29,8 +37,9 @@ var probes = []corsProbe{
 		check: func(acao, _ string) bool {
 			return acao == "https://evil.example.com"
 		},
-		sev:  severity.Low,
-		desc: "The server reflects arbitrary Origin values in Access-Control-Allow-Origin, allowing any site to read cross-origin responses.",
+		canaryOrigin: func(_, canary string) string { return "https://" + canary + ".example.com" },
+		sev:          severity.Low,
+		desc:         "The server reflects arbitrary Origin values in Access-Control-Allow-Origin, allowing any site to read cross-origin responses.",
 	},
 	{
 		name:   "Null Origin",
@@ -59,8 +68,9 @@ var probes = []corsProbe{
 			// acao must match the injected origin; checked by caller with the actual sent origin
 			return acao != ""
 		},
-		sev:  severity.Low,
-		desc: "The server trusts subdomains of the target host as allowed origins. An attacker controlling any subdomain (e.g. via subdomain takeover) can read cross-origin responses.",
+		canaryOrigin: func(host, canary string) string { return "https://" + canary + "." + host },
+		sev:          severity.Low,
+		desc:         "The server trusts subdomains of the target host as allowed origins. An attacker controlling any subdomain (e.g. via subdomain takeover) can read cross-origin responses.",
 	},
 	{
 		name: "Prefix Bypass",
@@ -70,8 +80,9 @@ var probes = []corsProbe{
 		check: func(acao, _ string) bool {
 			return acao != ""
 		},
-		sev:  severity.Low,
-		desc: "The server uses incorrect prefix matching for origin validation. An attacker can register a domain prefixed with the target host to bypass CORS restrictions.",
+		canaryOrigin: func(host, canary string) string { return "https://" + canary + "-" + host },
+		sev:          severity.Low,
+		desc:         "The server uses incorrect prefix matching for origin validation. An attacker can register a domain prefixed with the target host to bypass CORS restrictions.",
 	},
 	{
 		name: "Suffix Bypass",
@@ -81,8 +92,9 @@ var probes = []corsProbe{
 		check: func(acao, _ string) bool {
 			return acao != ""
 		},
-		sev:  severity.Low,
-		desc: "The server uses incorrect suffix matching for origin validation. An attacker can use a subdomain of their own domain that ends with the target hostname to bypass CORS restrictions.",
+		canaryOrigin: func(host, canary string) string { return "https://" + host + "." + canary + ".com" },
+		sev:          severity.Low,
+		desc:         "The server uses incorrect suffix matching for origin validation. An attacker can use a subdomain of their own domain that ends with the target hostname to bypass CORS restrictions.",
 	},
 	{
 		name: "Port-Based Bypass",
@@ -101,8 +113,9 @@ var probes = []corsProbe{
 		check: func(acao, _ string) bool {
 			return acao == "http://evil.example.com"
 		},
-		sev:  severity.Low,
-		desc: "The server reflects HTTP-scheme origins in ACAO, enabling mixed-content cross-origin attacks.",
+		canaryOrigin: func(_, canary string) string { return "http://" + canary + ".example.com" },
+		sev:          severity.Low,
+		desc:         "The server reflects HTTP-scheme origins in ACAO, enabling mixed-content cross-origin attacks.",
 	},
 }
 
@@ -188,40 +201,54 @@ func (m *Module) ScanPerHost(
 	return results, nil
 }
 
-// runProbe executes a single CORS probe and returns a result if the check passes.
+// corsHeaders sends a request carrying the given Origin and returns the response
+// status and the two CORS headers. NoClustering bypasses the requester's
+// short-lived response cache so confirmation replays actually re-hit the server.
+func corsHeaders(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	origin string,
+) (status int, acao, acac string, rawReq []byte, ok bool) {
+	raw, err := httpmsg.AddOrReplaceHeader(ctx.Request().Raw(), "Origin", origin)
+	if err != nil {
+		return 0, "", "", nil, false
+	}
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return 0, "", "", raw, false
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+	if err != nil {
+		return 0, "", "", raw, false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, "", "", raw, false
+	}
+	return resp.Response().StatusCode,
+		resp.Response().Header.Get("Access-Control-Allow-Origin"),
+		resp.Response().Header.Get("Access-Control-Allow-Credentials"),
+		raw,
+		true
+}
+
+// runProbe executes a single CORS probe and returns a result if the check passes
+// AND survives strict confirmation: the matched response must be a real (2xx)
+// response, and the permissive ACAO must be confirmed either by a fresh-canary
+// reflection (for reflection-class probes) or by a reproducibility re-check (for
+// fixed-value probes). This drops error-page reflections and transient/jittery
+// proxy headers — the dominant single-header false positives.
 func (m *Module) runProbe(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	probe corsProbe,
 	origin string,
 ) (*output.ResultEvent, error) {
-	// Set the Origin header on the raw request
-	modifiedRaw, err := httpmsg.AddOrReplaceHeader(ctx.Request().Raw(), "Origin", origin)
-	if err != nil {
-		return nil, err
-	}
-
-	// Parse the modified request
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
-
-	// Execute the request
-	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Close()
-
-	if resp.Response() == nil {
+	status, acao, acac, modifiedRaw, ok := corsHeaders(ctx, httpClient, origin)
+	if !ok {
 		return nil, nil
 	}
-
-	// Read CORS headers
-	acao := resp.Response().Header.Get("Access-Control-Allow-Origin")
-	acac := resp.Response().Header.Get("Access-Control-Allow-Credentials")
 
 	// For subdomain bypass, the check function needs the actual sent origin
 	passes := false
@@ -234,6 +261,43 @@ func (m *Module) runProbe(
 
 	if !passes {
 		return nil, nil
+	}
+
+	// Status gate: a permissive ACAO on a non-2xx error/redirect response is not
+	// a usable cross-origin read; drop it.
+	if status < 200 || status >= 300 {
+		return nil, nil
+	}
+
+	// Strict confirmation.
+	if probe.canaryOrigin != nil {
+		// Reflection-class: the server must echo a freshly-randomized origin that
+		// still satisfies the probe's rule, proving it reflects an attacker-chosen
+		// origin rather than matching a fixed allowlist. Fail OPEN on an
+		// inconclusive fetch error (already matched once); drop only on a clean
+		// non-reflection.
+		host := ctx.Service().Host()
+		confirmed, err := modkit.ConfirmReflection(2, func(canary string) (bool, error) {
+			o := probe.canaryOrigin(host, canary)
+			st, a, _, _, fok := corsHeaders(ctx, httpClient, o)
+			if !fok {
+				return false, fmt.Errorf("cors confirm fetch failed")
+			}
+			return st >= 200 && st < 300 && a == o, nil
+		})
+		if err == nil && !confirmed {
+			return nil, nil
+		}
+	} else {
+		// Fixed-value (null / wildcard+creds): re-issue the same origin and require
+		// the signal to reproduce identically. Drop only on a clean, completed
+		// re-check that no longer matches.
+		if st2, a2, c2, _, ok2 := corsHeaders(ctx, httpClient, origin); ok2 {
+			reproduces := st2 >= 200 && st2 < 300 && a2 == acao && c2 == acac
+			if !reproduces {
+				return nil, nil
+			}
+		}
 	}
 
 	target := ctx.Target()

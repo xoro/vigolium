@@ -202,6 +202,14 @@ func (m *Module) testRedirectURIManipulation(
 
 		if statusCode == 302 || statusCode == 301 || statusCode == 303 || statusCode == 307 {
 			if strings.Contains(location, "evil.example.com") {
+				// Strict drop-on-fail: confirm the server redirects to an
+				// ATTACKER-CHOSEN host, not a coincidental/hardcoded string. A fresh
+				// random domain (via the same technique) must appear in Location every
+				// round. Fails open only on an inconclusive probe error.
+				if !m.confirmRedirectReflection(ctx, httpClient, rawReq, payload.value) {
+					resp.Close()
+					continue
+				}
 				respBody := resp.FullResponseString()
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.String(),
@@ -321,6 +329,13 @@ func (m *Module) testResponseTypeDowngrade(
 		!strings.Contains(bodyLower, "unsupported_response_type") &&
 		!strings.Contains(bodyLower, "invalid_request") &&
 		!strings.Contains(bodyLower, "error") {
+		// Strict drop-on-fail: a "token accepted" signal is only meaningful if the
+		// endpoint actually validates response_type. Confirm an obviously invalid
+		// response_type is REJECTED; if it is accepted too, the endpoint ignores
+		// the parameter and this is not a genuine implicit-flow downgrade.
+		if !m.responseTypeRejectsInvalid(ctx, httpClient, rawReq) {
+			return nil, nil
+		}
 		return &output.ResultEvent{
 			URL:              urlx.String(),
 			Matched:          urlx.String(),
@@ -339,6 +354,90 @@ func (m *Module) testResponseTypeDowngrade(
 	}
 
 	return nil, nil
+}
+
+// confirmRedirectReflection confirms the OAuth endpoint redirects to an
+// attacker-CHOSEN host by re-running the same redirect_uri technique with a fresh
+// random domain each round and requiring a 3xx whose Location carries that fresh
+// domain. Returns true to keep the finding (confirmed, or an inconclusive probe
+// error), false to drop a clean non-reflection.
+func (m *Module) confirmRedirectReflection(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	rawReq []byte,
+	payloadValue string,
+) bool {
+	confirmed, err := modkit.ConfirmReflection(2, func(canary string) (bool, error) {
+		freshHost := "vgo" + canary + ".example.com"
+		value := strings.ReplaceAll(payloadValue, "evil.example.com", freshHost)
+		params, e := httpmsg.GetURLParametersMap(rawReq)
+		if e != nil {
+			return false, e
+		}
+		params["redirect_uri"] = value
+		raw, e := httpmsg.SetURLParametersMap(rawReq, params)
+		if e != nil {
+			return false, e
+		}
+		req, e := httpmsg.ParseRawRequest(string(raw))
+		if e != nil {
+			return false, e
+		}
+		req = req.WithService(ctx.Service())
+		resp, _, e := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+		if e != nil {
+			return false, e
+		}
+		defer resp.Close()
+		if resp.Response() == nil {
+			return false, nil
+		}
+		st := resp.Response().StatusCode
+		loc := resp.Response().Header.Get("Location")
+		return st >= 300 && st < 400 && strings.Contains(loc, freshHost), nil
+	})
+	return err != nil || confirmed
+}
+
+// responseTypeRejectsInvalid reports whether the endpoint REJECTS an obviously
+// invalid response_type value — proving it actually validates the parameter. If
+// the invalid value is accepted under the same criteria as the token downgrade,
+// the endpoint ignores response_type and the downgrade is not real. Fails OPEN
+// (returns true) on an inconclusive probe error.
+func (m *Module) responseTypeRejectsInvalid(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	rawReq []byte,
+) bool {
+	params, err := httpmsg.GetURLParametersMap(rawReq)
+	if err != nil {
+		return true
+	}
+	params["response_type"] = "vigolium_invalid_rt"
+	raw, err := httpmsg.SetURLParametersMap(rawReq, params)
+	if err != nil {
+		return true
+	}
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return true
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
+	if err != nil {
+		return true
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return true
+	}
+	st := resp.Response().StatusCode
+	bodyLower := strings.ToLower(resp.FullResponseString())
+	accepted := (st == 200 || st == 301 || st == 302 || st == 303 || st == 307) &&
+		!strings.Contains(bodyLower, "unsupported_response_type") &&
+		!strings.Contains(bodyLower, "invalid_request") &&
+		!strings.Contains(bodyLower, "error")
+	return !accepted
 }
 
 // isOAuthEndpoint checks if the request is for an OAuth/OIDC endpoint based on path and query parameters.

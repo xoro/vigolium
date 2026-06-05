@@ -53,3 +53,44 @@ func TestCheckBodyContainsErrorMsg_SequelizeSQLite(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckBodyContainsErrorMsg_TiDBBoundaries pins the tightened TiDB patterns:
+// the short "TiKV" token must still match a genuine error leak but must NOT match
+// when it is glued inside a base64/hex blob (e.g. a Cloudflare challenge page's
+// random per-request tokens), which is the noise that drove the original false
+// positive.
+func TestCheckBodyContainsErrorMsg_TiDBBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantHit bool
+	}{
+		{
+			name:    "genuine TiKV error leak matches",
+			body:    `ERROR 9005 (HY000): Region is unavailable: TiKV server is busy`,
+			wantHit: true,
+		},
+		{
+			name:    "TiDB server phrase matches",
+			body:    `{"error":"TiDB server timeout, please retry"}`,
+			wantHit: true,
+		},
+		{
+			name:    "TiKV glued inside a base64 blob does not match",
+			body:    `md: 'p1B_grnutDRoRTiKV6QwS.iHHlCgBWTBsSTzYs.id2UyL3g'`,
+			wantHit: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbName, _, hit := checkBodyContainsErrorMsg(tt.body)
+			if hit != tt.wantHit {
+				t.Errorf("hit = %v, want %v (db=%q)", hit, tt.wantHit, dbName)
+			}
+			if hit && dbName != "TiDB" {
+				t.Errorf("dbName = %q, want %q", dbName, "TiDB")
+			}
+		})
+	}
+}

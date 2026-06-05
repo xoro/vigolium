@@ -33,6 +33,9 @@ func RunHeadless(ctx context.Context, opts HeadlessOptions) error {
 	if err != nil {
 		return err
 	}
+	// Flush + close the JSONL transcript when the one-shot run ends. No-op
+	// when opts.SessionDir was empty (no recorder attached).
+	defer func() { _ = eng.CloseRecorder() }()
 
 	// Under -v/--verbose (or --debug), print which provider+model is actually
 	// resolved before any output streams. Answers "what model are you running"

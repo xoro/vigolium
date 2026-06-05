@@ -57,10 +57,12 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	var findings []finding
 
-	// Check response body for magic hashes
+	// Check response body for magic hashes. Skip static assets / binary payloads:
+	// minified JS bundles, sourcemaps and asset manifests are full of MD5/SHA1
+	// fingerprints and "0e..."-shaped strings that are not live crypto weaknesses.
+	// URL-extension gating misses extensionless JS, so gate on Content-Type too.
 	body := ctx.Response().BodyToString()
-	ct := strings.ToLower(ctx.Response().Header("Content-Type"))
-	if body != "" && !isBinaryContentType(ct) {
+	if body != "" && !modkit.IsStaticAssetContentType(ctx.Response().Header("Content-Type")) {
 		findings = append(findings, checkMagicHash(body)...)
 		findings = append(findings, checkWeakHashes(body)...)
 		findings = append(findings, checkPaddingOracle(body)...)
@@ -282,13 +284,6 @@ func parseCookieNameValue(header string) (string, string) {
 		return "", ""
 	}
 	return strings.TrimSpace(nameValue[0]), strings.TrimSpace(nameValue[1])
-}
-
-func isBinaryContentType(ct string) bool {
-	return strings.Contains(ct, "image/") ||
-		strings.Contains(ct, "audio/") ||
-		strings.Contains(ct, "video/") ||
-		strings.Contains(ct, "octet-stream")
 }
 
 func truncate(s string, maxLen int) string {

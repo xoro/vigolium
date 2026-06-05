@@ -157,9 +157,25 @@ List only the security-critical decision flows most likely to matter in Phases 4
 
 ---
 
+## Component Inventory
+
+*Phase 1 — cve-scout. Full machine-readable inventory in `vigolium-results/attack-surface/sbom.json`.*
+
+General "SBOM"-style catalog of **every software component the target directly relies on** — not just lockfile packages. Categories: `runtime`, `package`, `framework`, `datastore`, `external-service`, `container-os`, `build-ci`, `binary`, `vendored`.
+
+| Component | Category | Version | Purpose | Security-relevant? |
+|-----------|----------|---------|---------|--------------------|
+| <name> | <category> | <version / unknown> | <what it does> | <yes / no> |
+
+**Counts:** total <N> — <per-category breakdown, e.g. runtime: 2, package: 41, framework: 3, datastore: 2, external-service: 5, container-os: 4, build-ci: 6, binary: 3, vendored: 1>
+
+**Coverage gaps:** <categories not enumerable — e.g. no Dockerfile, versions inferred from ranges>
+
+---
+
 ## Key Dependencies
 
-*Phase 3 — threat-modeler*
+*Phase 3 — threat-modeler. Curated security-relevant subset of the Component Inventory above (seeded from `sbom.json`).*
 
 | Dependency | Version | Purpose | Notes |
 |-----------|---------|---------|-------|
@@ -270,7 +286,7 @@ extraction is scoped correctly. Leave blank if no DFD slices were identified.
 
 ### Supply Chain Risk Summary
 
-*From `supply-chain-risk-auditor` skill.*
+*From `supply-chain-risk-auditor` skill, evaluating the `security_relevant` components from the Component Inventory (`sbom.json`).*
 
 | Dependency | Risk level | Reason | Reachable? |
 |-----------|-----------|--------|-----------|

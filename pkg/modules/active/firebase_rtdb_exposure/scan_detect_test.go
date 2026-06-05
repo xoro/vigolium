@@ -88,3 +88,31 @@ func TestSecretPatterns(t *testing.T) {
 		assert.Truef(t, found, "no secret pattern named %q (renamed or removed?)", name)
 	}
 }
+
+// TestLooksLikeRTDBData covers the strict structural gate that decides whether a
+// 200 from a Firebase host is genuine, non-trivial database data.
+func TestLooksLikeRTDBData(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"real object tree", `{"users":{"u1":{"name":"a"}}}`, true},
+		{"non-empty array", `[{"id":1},{"id":2}]`, true},
+		{"empty object", `{}`, false},
+		{"empty array", `[]`, false},
+		{"null", `null`, false},
+		{"blank", `   `, false},
+		{"error envelope", `{"error":"Permission denied"}`, false},
+		{"html error page with 200", `<!DOCTYPE html><html><body>Not Found</body></html>`, false},
+		{"bare scalar string", `"hello"`, false},
+		{"bare scalar bool", `true`, false},
+		{"bare scalar number", `42`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, looksLikeRTDBData(tc.body))
+		})
+	}
+}

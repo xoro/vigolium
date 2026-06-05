@@ -51,3 +51,26 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res, "a non-debug 404 page must not yield a finding")
 }
+
+// TestScanPerRequest_NoFalsePositive_SPAShell reproduces a catch-all/SPA host
+// that returns the SAME 200 shell — embedding Django-looking strings — for every
+// path including the random wildcard probe. The soft-404 gate must reject it.
+func TestScanPerRequest_NoFalsePositive_SPAShell(t *testing.T) {
+	t.Parallel()
+	const shell = "<!doctype html><html><body><h1>Django App</h1>" +
+		"<pre>Request Method: GET Request URL: / Django Version: 4.2</pre>" +
+		"<div id=root></div></body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK) // same 200 shell for every path & method
+		_, _ = w.Write([]byte(shell))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 200 catch-all shell echoing Django strings must not be reported")
+}

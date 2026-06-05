@@ -807,7 +807,7 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 					Host:             record.Hostname,
 					URL:              record.URL,
 					Matched:          record.URL,
-					ExtractedResults: []string{secret_detect.RedactSnippet(f.Snippet())},
+					ExtractedResults: []string{f.Snippet()},
 					Metadata: map[string]any{
 						"rule_id":   f.RuleID(),
 						"rule_name": f.RuleName(),

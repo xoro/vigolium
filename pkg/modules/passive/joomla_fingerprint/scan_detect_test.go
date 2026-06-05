@@ -64,6 +64,20 @@ func TestScanPerRequest_Joomla4WithExtensions(t *testing.T) {
 	assert.Contains(t, exts, "com_content")
 }
 
+// TestScanPerRequest_WeakSignalsOnly is a regression: generic "/administrator/"
+// and "/api/index.php" references without any Joomla-specific signal must NOT
+// attribute Joomla on their own (they exist on countless non-Joomla sites).
+func TestScanPerRequest_WeakSignalsOnly(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `<html><a href="/administrator/login">Admin</a><a href="/api/index.php">API</a></html>`
+	ctx := makeHTTPCtx("/", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 // TestScanPerRequest_NotJoomla drives a benign HTML response with no Joomla
 // signals and expects no findings.
 func TestScanPerRequest_NotJoomla(t *testing.T) {

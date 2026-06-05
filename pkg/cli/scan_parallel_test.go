@@ -40,7 +40,7 @@ func TestChildScanArgsStripsRewrittenFlags(t *testing.T) {
 	cmd := newParallelTestCmd()
 	require.NoError(t, cmd.ParseFlags([]string{
 		"-S", "-T", "targets.txt", "-P", "4", "--split-by-host",
-		"-o", "roche-vig", "--format", "jsonl,html", "-c", "30",
+		"-o", "acme-vig", "--format", "jsonl,html", "-c", "30",
 	}))
 
 	got := childScanArgs(cmd)
@@ -179,8 +179,8 @@ func TestWithIndexSuffix(t *testing.T) {
 		idx  int
 		want string
 	}{
-		{"with extension", "roche-vig-x.com.jsonl", 1, "roche-vig-x.com-002.jsonl"},
-		{"no extension", "roche-vig-x.com", 0, "roche-vig-x.com-001"},
+		{"with extension", "acme-vig-x.com.jsonl", 1, "acme-vig-x.com-002.jsonl"},
+		{"no extension", "acme-vig-x.com", 0, "acme-vig-x.com-001"},
 		{"html extension", "out-app.html", 4, "out-app-005.html"},
 	}
 	for _, tt := range tests {
@@ -193,7 +193,7 @@ func TestWithIndexSuffix(t *testing.T) {
 // perHostOutputPattern shows --output as the per-host pattern with the format
 // extension preserved.
 func TestPerHostOutputPattern(t *testing.T) {
-	assert.Equal(t, "roche-vig-<host>", perHostOutputPattern("roche-vig"))
+	assert.Equal(t, "acme-vig-<host>", perHostOutputPattern("acme-vig"))
 	assert.Equal(t, "out-<host>.jsonl", perHostOutputPattern("out.jsonl"))
 	assert.Equal(t, "scan-<host>.html", perHostOutputPattern("scan.html"))
 	assert.Equal(t, "", perHostOutputPattern(""))
@@ -202,7 +202,7 @@ func TestPerHostOutputPattern(t *testing.T) {
 // perTargetConsolePath derives a sibling .console.log from a resolved output
 // path, stripping any known format extension first.
 func TestPerTargetConsolePath(t *testing.T) {
-	assert.Equal(t, "roche-vig-app.example.com.console.log", perTargetConsolePath("roche-vig-app.example.com.jsonl"))
+	assert.Equal(t, "acme-vig-app.example.com.console.log", perTargetConsolePath("acme-vig-app.example.com.jsonl"))
 	assert.Equal(t, "out.console.log", perTargetConsolePath("out.html"))
 	assert.Equal(t, "noext.console.log", perTargetConsolePath("noext"))
 }

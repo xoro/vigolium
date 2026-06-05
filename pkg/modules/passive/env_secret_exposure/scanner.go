@@ -123,6 +123,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 	}
 
 	body := ctx.Response().BodyToString()
+	ct := strings.ToLower(ctx.Response().Header("Content-Type"))
 
 	var results []*output.ResultEvent
 
@@ -136,14 +137,15 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		extracted := make([]string, 0, len(matches))
 		seen := make(map[string]struct{})
 		for _, match := range matches {
-			// Use the full match (match[0]) but redact the secret value
+			// Show the full match (match[0]) including the secret value — the
+			// point of the finding is to surface the leaked secret to the user.
 			full := match[0]
 			key := utils.Sha1(full)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
-			extracted = append(extracted, redactValue(modkit.Truncate(full, 120)))
+			extracted = append(extracted, modkit.Truncate(full, 120))
 		}
 
 		results = append(results, &output.ResultEvent{
@@ -167,57 +169,74 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		})
 	}
 
-	// Check for .env file content served directly
-	dotenvMatches := dotenvLinePattern.FindAllString(body, 50)
-	if len(dotenvMatches) > 0 {
-		var secretLines []string
-		for _, line := range dotenvMatches {
-			for _, indicator := range dotenvSecretIndicators {
-				if strings.Contains(line, indicator) {
-					secretLines = append(secretLines, redactValue(modkit.Truncate(line, 120)))
-					break
+	// Check for .env file content served directly. This targets actual served
+	// .env/config files (text/plain, .env URLs), NOT JS bundles — a minified
+	// bundle that happens to contain an uppercase KEY=value line is not a leaked
+	// .env file. Framework-prefixed patterns above still scan JS. The generic
+	// indicators ("password=", "secret=") are also too weak to flag a High
+	// without a substantive value behind the assignment.
+	if !modkit.IsJSOrTSContentType(ct) {
+		dotenvMatches := dotenvLinePattern.FindAllString(body, 50)
+		if len(dotenvMatches) > 0 {
+			var secretLines []string
+			for _, line := range dotenvMatches {
+				if !dotenvValueIsSubstantive(line) {
+					continue
 				}
+				for _, indicator := range dotenvSecretIndicators {
+					if strings.Contains(line, indicator) {
+						secretLines = append(secretLines, modkit.Truncate(line, 120))
+						break
+					}
+				}
+			}
+
+			if len(secretLines) > 0 {
+				results = append(results, &output.ResultEvent{
+					ModuleID:         ModuleID,
+					Host:             urlx.Host,
+					URL:              urlx.String(),
+					Matched:          urlx.String(),
+					ExtractedResults: secretLines,
+					Info: output.Info{
+						Name:        "Env File Secret Exposure",
+						Description: fmt.Sprintf("Found %d secret line(s) in .env file content at %s (CWE-200)", len(secretLines), urlx.Path),
+						Severity:    severity.High,
+						Confidence:  severity.Certain,
+						Tags:        []string{"secret", "env-exposure", "information-disclosure", "source-analysis"},
+					},
+					Metadata: map[string]any{
+						"cwe":        "CWE-200",
+						"matchCount": len(secretLines),
+					},
+				})
 			}
 		}
 
-		if len(secretLines) > 0 {
-			results = append(results, &output.ResultEvent{
-				ModuleID:         ModuleID,
-				Host:             urlx.Host,
-				URL:              urlx.String(),
-				Matched:          urlx.String(),
-				ExtractedResults: secretLines,
-				Info: output.Info{
-					Name:        "Env File Secret Exposure",
-					Description: fmt.Sprintf("Found %d secret line(s) in .env file content at %s (CWE-200)", len(secretLines), urlx.Path),
-					Severity:    severity.High,
-					Confidence:  severity.Certain,
-					Tags:        []string{"secret", "env-exposure", "information-disclosure", "source-analysis"},
-				},
-				Metadata: map[string]any{
-					"cwe":        "CWE-200",
-					"matchCount": len(secretLines),
-				},
-			})
-		}
 	}
 
 	return results, nil
 }
 
-// redactValue redacts secret values after the = or : delimiter, keeping the key visible.
-func redactValue(s string) string {
-	for _, delim := range []string{"=", ":"} {
-		idx := strings.Index(s, delim)
-		if idx != -1 && idx+1 < len(s) {
-			key := s[:idx+1]
-			val := s[idx+1:]
-			val = strings.TrimLeft(val, " '\"")
-			if len(val) > 8 {
-				return key + val[:4] + strings.Repeat("*", len(val)-8) + val[len(val)-4:]
-			}
-			return key + strings.Repeat("*", len(val))
+// dotenvValueIsSubstantive reports whether the value after the first '=' on a
+// KEY=VALUE line looks like a real secret rather than an empty or placeholder
+// stub. It mirrors the >=8-char value floor used by the framework-prefixed
+// patterns so a bare "PASSWORD=" or "SECRET=changeme" cannot raise a High.
+func dotenvValueIsSubstantive(line string) bool {
+	idx := strings.Index(line, "=")
+	if idx < 0 || idx+1 >= len(line) {
+		return false
+	}
+	val := strings.TrimSpace(line[idx+1:])
+	val = strings.Trim(val, `"'`)
+	if len(val) < 8 {
+		return false
+	}
+	lower := strings.ToLower(val)
+	for _, ph := range []string{"changeme", "your_", "yourvalue", "placeholder", "example", "xxxx", "<", "${", "****"} {
+		if strings.Contains(lower, ph) {
+			return false
 		}
 	}
-	return s
+	return true
 }

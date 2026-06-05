@@ -30,12 +30,14 @@ func makeHTTPCtx(path, contentType, body string) *httpmsg.HttpRequestResponse {
 	return httpmsg.NewHttpRequestResponse(req, resp)
 }
 
-// TestScanPerRequest_PrismaLeak drives a client bundle that imports a Prisma client,
-// which is server-only code leaked into the browser.
-func TestScanPerRequest_PrismaLeak(t *testing.T) {
+// TestScanPerRequest_CorroboratedLeak drives a client bundle that leaks TWO
+// distinct server-only signals (Prisma client + Node fs require). With
+// corroboration present, both are reported.
+func TestScanPerRequest_CorroboratedLeak(t *testing.T) {
 	t.Parallel()
 	m := New()
-	body := `import {PrismaClient} from "@prisma/client"; const db = new PrismaClient();`
+	body := `import {PrismaClient} from "@prisma/client"; const db = new PrismaClient();` +
+		` const fs = require("fs"); fs.readFileSync("/etc/secret");`
 	ctx := makeHTTPCtx("/_next/static/chunks/main.js", "application/javascript", body)
 
 	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
@@ -49,7 +51,21 @@ func TestScanPerRequest_PrismaLeak(t *testing.T) {
 			found = true
 		}
 	}
-	assert.True(t, found, "expected Prisma database client leak finding")
+	assert.True(t, found, "expected Prisma leak when corroborated by a second server-only signal")
+}
+
+// TestScanPerRequest_LoneWeakMatchDropped ensures a single weak server-only
+// pattern (a lone Prisma reference, as commonly seen as an incidental string in a
+// minified vendor bundle) is NOT reported without corroboration.
+func TestScanPerRequest_LoneWeakMatchDropped(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `import {PrismaClient} from "@prisma/client"; const db = new PrismaClient();`
+	ctx := makeHTTPCtx("/_next/static/chunks/main.js", "application/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "a lone weak server-only pattern must require corroboration")
 }
 
 // TestScanPerRequest_ConnectionString drives a bundle containing a credentialed

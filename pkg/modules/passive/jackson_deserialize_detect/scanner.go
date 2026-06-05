@@ -62,25 +62,35 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		return nil, nil
 	}
 
-	body := ctx.Response().BodyToString()
 	ct := strings.ToLower(ctx.Response().Header("Content-Type"))
+	// Static assets (minified JS bundles especially) are full of reverse-DNS
+	// identifiers like "io.foo"/"com.app.title" and stray Java-sounding strings.
+	// A deserialization indicator inside such an asset is not a live signal, so
+	// skip them outright rather than substring-matching them.
+	if modkit.IsStaticAssetContentType(ct) {
+		return nil, nil
+	}
+
+	body := ctx.Response().BodyToString()
 
 	var extracted []string
 	detected := false
 
-	// Check JSON responses for type discriminator fields
-	if strings.Contains(ct, "json") || strings.Contains(ct, "javascript") {
+	// Type-discriminator / class-ref matching only makes sense on JSON bodies.
+	// A bare Java class reference ("com.app.x") on its own is NOT evidence of
+	// polymorphic deserialization — configs and payloads are full of reverse-DNS
+	// identifiers — so it is only reported alongside an @class/@type discriminator,
+	// which is the actual signal.
+	if strings.Contains(ct, "json") {
 		if matches := typeFieldPattern.FindAllString(body, 3); len(matches) > 0 {
 			detected = true
 			for _, match := range matches {
 				extracted = append(extracted, "Type field: "+match)
 			}
-		}
-
-		if matches := javaClassPattern.FindAllString(body, 3); len(matches) > 0 {
-			detected = true
-			for _, match := range matches {
-				extracted = append(extracted, "Java class ref: "+match)
+			if classMatches := javaClassPattern.FindAllString(body, 3); len(classMatches) > 0 {
+				for _, match := range classMatches {
+					extracted = append(extracted, "Java class ref: "+match)
+				}
 			}
 		}
 	}

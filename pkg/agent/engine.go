@@ -151,9 +151,14 @@ func (e *Engine) runOnSession(ctx context.Context, opts Options, sess AgentSessi
 		var out oliumRunOutput
 		var runErr error
 		if sess != nil {
+			// Session-reuse path: the recorder (if any) is attached to the
+			// session's engine and flushed by the caller's sess.Close().
 			out, runErr = e.rt().RunOnSession(ctx, oliumCfg, sess, runPrompt, opts.StreamWriter, thinkingSink.writer(), opts.Verbose)
 		} else {
-			out, runErr = e.rt().RunPrompt(ctx, oliumCfg, runPrompt, opts.StreamWriter, thinkingSink.writer(), opts.SourcePath, opts.Verbose)
+			// Fresh-per-call path: record a per-phase transcript when a session
+			// dir is wired, named by template so concurrent phases don't clash.
+			rec := RecordSpec{SessionDir: opts.SessionDir, Template: opts.PromptTemplate}
+			out, runErr = e.rt().RunPrompt(ctx, oliumCfg, runPrompt, opts.StreamWriter, thinkingSink.writer(), opts.SourcePath, opts.Verbose, rec)
 		}
 		if runErr != nil {
 			return out, runErr
@@ -295,6 +300,7 @@ func (e *Engine) Preflight(agentName string) error {
 	if err != nil {
 		return fmt.Errorf("preflight: cannot build olium engine (check agent.olium.provider / credentials): %w", err)
 	}
+	defer func() { _ = sess.Close() }()
 
 	out, err := e.rt().RunOnSession(pingCtx, &cfg, sess, "Reply with the single word OK.", nil, nil, false)
 	if err != nil {
@@ -405,13 +411,26 @@ func (e *Engine) RunSourceAnalysisParallel(ctx context.Context, cfg SourceAnalys
 		oc := e.settings.Agent.Olium
 		oliumCfg = &oc
 	}
-	sharedSession, sharedErr := e.rt().NewSession(oliumCfg, cfg.SourcePath)
+	// Build the shared session with a transcript recorder when a session dir is
+	// wired, so the explore wave's turns (the only ones that run on the parent
+	// — the format/extension forks carry no recorder by design) persist for
+	// debugging. Closed at the end of source analysis via defer below.
+	sharedSession, sharedErr := e.rt().NewSessionWithSpec(oliumCfg, SessionSpec{
+		SourcePath:   cfg.SourcePath,
+		IncludeTools: true,
+		Record:       RecordSpec{SessionDir: cfg.SessionDir, Template: "source-analysis"},
+	})
 	if sharedErr != nil {
 		// Falls back to the per-call build path below — sub-calls use Run()
 		// instead of RunOnOliumEngine() and re-append context as before.
 		zap.L().Warn("source-analysis: failed to build shared engine, falling back to per-call engines", zap.Error(sharedErr))
 		sharedSession = nil
 	}
+	defer func() {
+		if sharedSession != nil {
+			_ = sharedSession.Close()
+		}
+	}()
 
 	// --- Wave 1: Explore (reads source code once, produces notes for routes + auth) ---
 	var exploreOutput string

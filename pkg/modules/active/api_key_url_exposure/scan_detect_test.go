@@ -78,6 +78,28 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a server that rejects URL-parameter credentials must not yield a finding")
 }
 
+// TestScanPerRequest_NoFalsePositive_Unauthenticated reproduces the core false
+// positive: an endpoint (or SPA/CDN catch-all) that returns 2xx regardless of
+// the credential. Moving the header to a URL parameter still returns 200, but so
+// does a request with the credential removed entirely — so the parameter is not
+// "accepted" as a credential. The no-credential control gate must suppress it.
+func TestScanPerRequest_NoFalsePositive_Unauthenticated(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Always succeeds — credential is irrelevant.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"data":"public"}`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seedWithAuthHeader(t, srv.URL, "Authorization", "Bearer sk-test-12345")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an endpoint that 2xx-es without any credential must not yield a finding")
+}
+
 // TestScanPerRequest_NoAuthHeaderNoFinding ensures a request without any auth
 // header is a no-op (no header to relocate).
 func TestScanPerRequest_NoAuthHeaderNoFinding(t *testing.T) {

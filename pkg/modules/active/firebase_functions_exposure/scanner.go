@@ -184,6 +184,13 @@ func (m *Module) probeFunction(
 		return nil
 	}
 
+	// Strict drop-on-fail: confirm the 200 is a stable, function-SPECIFIC
+	// response, not a transient blip or a catch-all the host returns for any path
+	// (including a nonexistent sibling function).
+	if !m.confirmFunctionExposure(httpClient, funcURL, respBody) {
+		return nil
+	}
+
 	responseStr := resp.FullResponseString()
 	if len(responseStr) > 4096 {
 		responseStr = responseStr[:4096] + "\n... (truncated)"
@@ -247,6 +254,23 @@ func (m *Module) probeErrorLeakage(
 		return nil
 	}
 
+	// Strict drop-on-fail: the error markers must be INTRODUCED by the malformed
+	// input — markers that also appear in a clean response are static boilerplate
+	// (a CDN/proxy error template), not payload-driven leakage. Fail open if the
+	// clean fetch is inconclusive.
+	if _, cleanBody, ok := getFuncResponse(httpClient, "GET", funcURL, ""); ok {
+		var introduced []string
+		for _, marker := range matchedMarkers {
+			if !strings.Contains(cleanBody, marker) {
+				introduced = append(introduced, marker)
+			}
+		}
+		if len(introduced) == 0 {
+			return nil // all markers are static, not payload-introduced
+		}
+		matchedMarkers = introduced
+	}
+
 	responseStr := resp.FullResponseString()
 	if len(responseStr) > 4096 {
 		responseStr = responseStr[:4096] + "\n... (truncated)"
@@ -270,6 +294,48 @@ func (m *Module) probeErrorLeakage(
 			"source":   sourceURL,
 		},
 	}
+}
+
+// getFuncResponse issues a request to an absolute Cloud Functions URL and returns
+// the status and body. NoClustering bypasses the response cache so confirmation
+// fetches truly hit the wire. ok is false on any error.
+func getFuncResponse(httpClient *http.Requester, method, funcURL, body string) (int, string, bool) {
+	host := extractHost(funcURL)
+	var rawReq string
+	if body == "" {
+		rawReq = fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\nAccept: application/json\r\n\r\n", method, funcURL, host)
+	} else {
+		rawReq = fmt.Sprintf("%s %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+			method, funcURL, host, len(body), body)
+	}
+	// service is nil: the raw request carries an absolute URL + Host, so it routes
+	// to the external Cloud Functions host without a service override.
+	return modkit.ExecuteRaw(httpClient, nil, []byte(rawReq), http.Options{NoClustering: true})
+}
+
+// confirmFunctionExposure confirms an unauthenticated 200 is a stable,
+// function-specific response: it must reproduce (stable 200, body textually
+// equivalent to the first hit), and a nonexistent sibling function must NOT
+// return the same 200 (which would mean the host serves a catch-all). Fails OPEN
+// on an inconclusive fetch error.
+func (m *Module) confirmFunctionExposure(httpClient *http.Requester, funcURL, firstBody string) bool {
+	st, body, ok := getFuncResponse(httpClient, "GET", funcURL, "")
+	if !ok {
+		return true // inconclusive
+	}
+	if st != 200 || !modkit.BodiesSimilar(firstBody, body) {
+		return false // not a stable, reproducible 200
+	}
+
+	nonexistentURL := funcURL + "-" + modkit.FreshCanary()
+	st2, body2, ok := getFuncResponse(httpClient, "GET", nonexistentURL, "")
+	if !ok {
+		return true // inconclusive
+	}
+	if st2 == 200 && modkit.BodiesSimilar(firstBody, body2) {
+		return false // catch-all: a nonexistent function returns the same 200
+	}
+	return true
 }
 
 func extractHost(rawURL string) string {

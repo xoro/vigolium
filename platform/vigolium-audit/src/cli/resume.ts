@@ -24,6 +24,7 @@ export interface ResumeOptions {
   apiKey?: string;
   stripRaw?: boolean;
   keepRaw?: boolean;
+  keepSecrets?: boolean;
   focusFile?: string;
   expectedBehaviorsFile?: string;
   serial?: boolean;
@@ -123,6 +124,7 @@ function buildRunOptions(args: {
   if (opts.apiKey !== undefined) runOpts.apiKey = opts.apiKey;
   if (opts.stripRaw !== undefined) runOpts.stripRaw = opts.stripRaw;
   if (opts.keepRaw !== undefined) runOpts.keepRaw = opts.keepRaw;
+  if (opts.keepSecrets !== undefined) runOpts.keepSecrets = opts.keepSecrets;
   if (opts.focusFile !== undefined) runOpts.focusFile = opts.focusFile;
   if (opts.expectedBehaviorsFile !== undefined) runOpts.expectedBehaviorsFile = opts.expectedBehaviorsFile;
   if (opts.serial !== undefined) runOpts.serial = opts.serial;

@@ -102,8 +102,12 @@ func (m *Module) ScanPerRequest(
 	baselineReqStr := string(ctx.Request().Raw())
 	baselineRespStr := string(baseline.Response.Raw())
 
-	// Skip redirect responses — not useful for cache deception
-	if baseline.StatusCode >= 300 && baseline.StatusCode < 400 {
+	// Cache deception only matters when the *authenticated, successful* response is
+	// the thing that gets cached. A non-2xx baseline carries nothing worth leaking:
+	// a 3xx is just a redirect, and a 4xx/5xx is an error page (e.g. CloudFront's
+	// "502 Bad Gateway"). CDNs cache error pages by default — so an Age header on a
+	// 5xx is ordinary error-caching, not a deception signal. Require a 2xx baseline.
+	if baseline.StatusCode < 200 || baseline.StatusCode >= 300 {
 		return nil, nil
 	}
 
@@ -173,7 +177,13 @@ func (m *Module) ScanPerRequest(
 		resp2StatusCode := resp2.Response().StatusCode
 		resp2BodyLen := len(resp2Body)
 
-		bodyMatch := resp2StatusCode == baseline.StatusCode &&
+		// The cached response must itself be a successful 2xx page. An error page
+		// (4xx/5xx) served from cache — even one whose status and length happen to
+		// match the baseline — is not sensitive content and is not cache deception.
+		resp2IsSuccess := resp2StatusCode >= 200 && resp2StatusCode < 300
+
+		bodyMatch := resp2IsSuccess &&
+			resp2StatusCode == baseline.StatusCode &&
 			resp2BodyLen > 0 &&
 			math.Abs(float64(resp2BodyLen-baseline.BodyLen))/float64(baseline.BodyLen) <= 0.10
 
@@ -182,7 +192,13 @@ func (m *Module) ScanPerRequest(
 		var cacheEvidence string
 
 		xCache := resp2.Response().Header.Get("X-Cache")
-		if strings.Contains(strings.ToUpper(xCache), "HIT") {
+		xCacheUpper := strings.ToUpper(xCache)
+		// CDNs advertise a cached error via the same X-Cache header (e.g. CloudFront's
+		// "Error from cloudfront") and still ship an Age header for it. That is
+		// error-caching, not authenticated-content caching — so an explicit error
+		// marker disqualifies the weak Age-only signal below.
+		cachedError := strings.Contains(xCacheUpper, "ERROR")
+		if strings.Contains(xCacheUpper, "HIT") {
 			cacheHit = true
 			cacheEvidence = fmt.Sprintf("X-Cache: %s", xCache)
 		}
@@ -194,7 +210,7 @@ func (m *Module) ScanPerRequest(
 		}
 
 		age := resp2.Response().Header.Get("Age")
-		if age != "" && age != "0" {
+		if !cacheHit && !cachedError && age != "" && age != "0" {
 			cacheHit = true
 			cacheEvidence = fmt.Sprintf("Age: %s", age)
 		}

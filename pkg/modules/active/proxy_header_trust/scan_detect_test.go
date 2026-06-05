@@ -224,6 +224,57 @@ func TestScanPerRequest_ForwardedForContentVariation(t *testing.T) {
 	assert.Equal(t, "medium/tentative", *got, "size-based content variation must be Medium/Tentative, not a High bypass")
 }
 
+// TestScanPerRequest_ForwardedHostStaticSentinelNoFalsePositive reproduces a
+// single-echo / coincidental-string false positive: the body always contains the
+// fixed sentinel host string but never reflects the actual X-Forwarded-Host. The
+// fresh-canary confirmation must drop it (the canary never appears).
+func TestScanPerRequest_ForwardedHostStaticSentinelNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Hardcoded mention of the sentinel host, independent of any header.
+		_, _ = fmt.Fprintf(w, "<html><body>contact %s for support</body></html>", injectedHost)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	for _, r := range res {
+		assert.NotEqual(t, "Proxy Header Trust: X-Forwarded-Host Injection", r.Info.Name,
+			"a fixed sentinel string that does not track the fresh canary must not be reported")
+	}
+}
+
+// TestScanPerRequest_ForwardedProtoTransientNoFalsePositive reproduces a transient
+// X-Forwarded-Proto status flip: only the FIRST https probe returns 418, then it
+// reverts to 200. The reproducibility gate must drop it.
+func TestScanPerRequest_ForwardedProtoTransientNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	var httpsSeen int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Forwarded-Proto") == "https" {
+			if atomic.AddInt64(&httpsSeen, 1) == 1 {
+				w.WriteHeader(http.StatusTeapot) // one-shot flip
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	for _, r := range res {
+		assert.NotEqual(t, "Proxy Header Trust: X-Forwarded-Proto Confusion", r.Info.Name,
+			"a one-shot X-Forwarded-Proto status flip must not be reported")
+	}
+}
+
 // TestScanPerRequest_AttachesBaselineEvidence asserts the differential evidence is
 // preserved: a confirmed finding carries the no-header baseline request/response as
 // a labeled AdditionalEvidence pair (while the spoofed-header probe stays the

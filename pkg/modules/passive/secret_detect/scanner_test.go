@@ -77,43 +77,6 @@ func TestCanProcess_OversizedBody(t *testing.T) {
 	assert.False(t, m.CanProcess(ctx))
 }
 
-func TestRedactSnippet(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "short string fully masked",
-			input:    "abc123",
-			expected: "******",
-		},
-		{
-			name:     "exactly 16 chars fully masked",
-			input:    "1234567890123456",
-			expected: "****************",
-		},
-		{
-			name:     "long string partially revealed",
-			input:    "AKIAIOSFODNN7EXAMPLE",
-			expected: "AKIAIOSF********MPLE",
-		},
-		{
-			name:     "empty string",
-			input:    "",
-			expected: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			result := redactSnippet(tc.input)
-			assert.Equal(t, tc.expected, result)
-			assert.Equal(t, len(tc.input), len(result), "redacted length should match original")
-		})
-	}
-}
-
 func TestIsTextBasedMIME(t *testing.T) {
 	textTypes := []string{
 		"text/html",

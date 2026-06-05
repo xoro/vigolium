@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.21-beta] - 2026-06-05
+
+A false-positive-reduction and observability release: broad confirmation-hardening across the active and passive modules, full secret disclosure in findings, and Pi-compatible JSONL transcripts for every olium agent mode.
+
+### Added
+
+- **Olium session transcripts** — every olium run (`olium`/`ol` TUI, `-p` headless, `agent autopilot`, and `agent swarm`/`query` per phase) writes a Pi-compatible JSONL conversation transcript to its session dir for debugging.
+- **Shared confirmation primitives** — static-asset Content-Type gate, WAF/CDN challenge-page detection (catching 200/202 Cloudflare/Incapsula interstitials), a genuine WebSocket-handshake check, and body-similarity / raw-replay helpers, reused across the hardening below.
+
+### Changed
+
+- **Active false-positive hardening** — ~20 High/Critical modules now drop findings that fail strict confirmation (soft-404 / wildcard / reflection / content-shape gates), and ones that confirmed on HTTP status alone now require a content/body gate, so catch-all and SPA 200s no longer trip findings.
+- **Error/marker matching** (`sqli-error-based`, `graphql-scan`, `ssrf-detection`, `ldap-injection`, `xxe-generic`, `nosqli-*`, …) skips WAF/CDN challenge, auth-gate, and rate-limit pages before matching, closing the SSO/Cloudflare-challenge false-positive class.
+- **Passive false-positive hardening** — ~12 detectors (env-secret, info-disclosure, error-message, MCP-endpoint, jackson/joomla, …) skip static-asset and binary bodies, so a token baked into a minified bundle is no longer flagged.
+- **Secrets shown in full** — target-discovered secrets are now reported unredacted (`secret-detect`, `env-secret-exposure`, `jwt-weak-secret`, `jwt-claims-detect`); only operator BYOK credentials in logs/config stay masked.
+- **vigolium-audit harness** — restructured output layout with pre-merge and artifact-redaction passes, so `agent audit` runs land cleaner, deduplicated, secret-safe output.
+
 ## [v0.1.20-beta] - 2026-06-02
 
 A detection-expansion and false-positive-reduction release: OS command-injection detection, a `-P/--parallel` multi-target fan-out, finding evidence in output, and a broad hardening pass across the active modules and shared diffscan engine.

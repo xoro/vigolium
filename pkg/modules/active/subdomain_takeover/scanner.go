@@ -2,6 +2,7 @@ package subdomain_takeover
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -13,6 +14,17 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 )
+
+// cnameResolver abstracts CNAME resolution so tests can inject a fake (real DNS
+// is unavailable and non-deterministic in unit tests).
+type cnameResolver interface {
+	LookupCNAME(host string) (string, error)
+}
+
+// netCNAMEResolver is the default stdlib-backed resolver.
+type netCNAMEResolver struct{}
+
+func (netCNAMEResolver) LookupCNAME(host string) (string, error) { return net.LookupCNAME(host) }
 
 // serviceFingerprint defines detection criteria for a deprovisioned cloud service.
 type serviceFingerprint struct {
@@ -100,7 +112,8 @@ var fingerprints = []serviceFingerprint{
 // Module implements the Subdomain Takeover active scanner.
 type Module struct {
 	modkit.BaseActiveModule
-	ds dedup.Lazy[dedup.DiskSet]
+	ds       dedup.Lazy[dedup.DiskSet]
+	resolver cnameResolver
 }
 
 // New creates a new Subdomain Takeover module.
@@ -117,10 +130,38 @@ func New() *Module {
 			modkit.ScanScopeHost,
 			modkit.AllInsertionPointTypes,
 		),
-		ds: dedup.LazyDiskSet("subdomain_takeover"),
+		ds:       dedup.LazyDiskSet("subdomain_takeover"),
+		resolver: netCNAMEResolver{},
 	}
 	m.ModuleTags = ModuleTags
 	return m
+}
+
+// cnamePointsToService resolves the host's CNAME and reports whether it points at
+// one of the service's CNAME patterns. conclusive is false on a DNS lookup error
+// (NXDOMAIN/timeout) — the caller fails open in that case so a transient DNS
+// failure never suppresses a real finding; a definitive "CNAME does not match"
+// drops the (otherwise coincidental) HTTP-fingerprint match.
+func (m *Module) cnamePointsToService(host string, servicePatterns []string) (matches, conclusive bool) {
+	r := m.resolver
+	if r == nil {
+		r = netCNAMEResolver{}
+	}
+	// Strip any :port — DNS lookups take a bare hostname.
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	cname, err := r.LookupCNAME(host)
+	if err != nil {
+		return false, false // inconclusive (NXDOMAIN / transient)
+	}
+	c := strings.TrimSuffix(strings.ToLower(cname), ".")
+	for _, p := range servicePatterns {
+		if strings.Contains(c, strings.ToLower(p)) {
+			return true, true
+		}
+	}
+	return false, true // resolved a canonical name that is not this service
 }
 
 // IncludesBaseCanProcess returns false because this module uses a custom CanProcess.
@@ -191,6 +232,16 @@ func (m *Module) ScanPerHost(
 
 		for _, marker := range fp.bodyMarkers {
 			if strings.Contains(bodyLower, strings.ToLower(marker)) {
+				// Strict drop-on-fail: an "unclaimed" HTTP fingerprint string can
+				// appear on a legitimate but offline service, or coincidentally in an
+				// unrelated error page. Confirm the host's DNS record actually points
+				// at the suspected service before claiming a takeover. Drop on a
+				// definitive CNAME mismatch; keep on confirmed match OR an
+				// inconclusive DNS error.
+				matches, conclusive := m.cnamePointsToService(host, fp.cnames)
+				if conclusive && !matches {
+					continue
+				}
 				return []*output.ResultEvent{
 					{
 						URL:      target,

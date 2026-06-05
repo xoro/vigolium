@@ -21,10 +21,18 @@ func TestNew_Metadata(t *testing.T) {
 	assert.Equal(t, ModuleTags, m.Tags())
 }
 
-// The module inspects only the HTTP upgrade status code (101 Switching
-// Protocols), never the actual WebSocket frames — so a plain httptest handler
-// that flips status based on the Origin header is a faithful stand-in for a WS
-// server with (or without) origin validation.
+// The module confirms WebSocket support by the upgrade HANDSHAKE — 101 plus
+// `Upgrade: websocket` and a `Sec-WebSocket-Accept` header — not a bare 101, so
+// the test handlers complete a realistic handshake via writeWSHandshake.
+
+// writeWSHandshake emits a complete RFC 6455 upgrade response (the accept value
+// is the canonical hash for the module's fixed Sec-WebSocket-Key).
+func writeWSHandshake(w http.ResponseWriter) {
+	w.Header().Set("Upgrade", "websocket")
+	w.Header().Set("Connection", "Upgrade")
+	w.Header().Set("Sec-WebSocket-Accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+	w.WriteHeader(http.StatusSwitchingProtocols)
+}
 
 // TestScanPerRequest_DetectsPermissiveOrigin drives the real scan method against
 // a server that accepts a WebSocket upgrade from any Origin. The module first
@@ -35,7 +43,7 @@ func TestScanPerRequest_DetectsPermissiveOrigin(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Accept any upgrade regardless of Origin.
 		if r.Header.Get("Upgrade") == "websocket" {
-			w.WriteHeader(http.StatusSwitchingProtocols)
+			writeWSHandshake(w)
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -67,7 +75,7 @@ func TestScanPerRequest_DetectsMissingOriginCheck(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		w.WriteHeader(http.StatusSwitchingProtocols)
+		writeWSHandshake(w)
 	}))
 	defer srv.Close()
 
@@ -78,6 +86,26 @@ func TestScanPerRequest_DetectsMissingOriginCheck(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected a missing-origin-check finding")
 	assert.Equal(t, "WebSocket Missing Origin Check", res[0].Info.Name)
+}
+
+// TestScanPerRequest_NoFalsePositive_Bare101 covers a reverse proxy / catch-all
+// that returns 101 for every upgrade request WITHOUT completing the WebSocket
+// handshake (no Sec-WebSocket-Accept). The status-only check used to treat this
+// as an open WebSocket; the handshake gate must now reject it so no origin
+// finding fires.
+func TestScanPerRequest_NoFalsePositive_Bare101(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusSwitchingProtocols) // bare 101, no handshake headers
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/chat")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a bare 101 without a WebSocket handshake must not be flagged")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures an endpoint that does not support

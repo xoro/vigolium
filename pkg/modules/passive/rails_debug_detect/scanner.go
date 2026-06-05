@@ -78,13 +78,22 @@ var debugPatterns = []debugPattern{
 	},
 }
 
-// pathDisclosureMarkers detects absolute filesystem paths common in Rails deployments
-var pathDisclosureMarkers = []string{
+// railsPathMarkers are absolute paths / identifiers specific to a Rails
+// deployment. On their own they are strong evidence of source-path disclosure.
+var railsPathMarkers = []string{
 	"/app/app/controllers/",
 	"/app/app/models/",
 	"/app/app/views/",
 	"/usr/local/bundle/gems/",
 	"rb_sysopen",
+}
+
+// genericPathMarkers are generic OS / Ruby error strings that frequently appear
+// in entirely benign responses (any filesystem error, a third-party JSON error
+// body). They are only treated as Rails path disclosure when corroborated by a
+// Rails-specific path marker or a matched Rails debug/exception pattern in the
+// same response — otherwise they are dropped (strict drop-on-fail).
+var genericPathMarkers = []string{
 	"No such file or directory",
 	"Errno::ENOENT",
 }
@@ -135,6 +144,11 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 
 	var results []*output.ResultEvent
 
+	// debugMatched records whether any Rails debug/exception/SQL-error pattern
+	// matched (regardless of dedup) — used to corroborate weak generic path
+	// markers below.
+	debugMatched := false
+
 	// Check debug patterns
 	for _, dp := range debugPatterns {
 		allMatch := true
@@ -150,6 +164,7 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		if !allMatch {
 			continue
 		}
+		debugMatched = true
 
 		dedupKey := host + "::" + dp.name
 		if diskSet != nil && diskSet.IsSeen(dedupKey) {
@@ -173,14 +188,25 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		})
 	}
 
-	// Check for path disclosure
+	// Check for path disclosure. Rails-specific markers stand on their own;
+	// generic OS/Ruby error strings are only reported when corroborated.
 	var disclosedPaths []string
-	for _, marker := range pathDisclosureMarkers {
+	hasRailsSpecific := false
+	for _, marker := range railsPathMarkers {
+		if strings.Contains(body, marker) {
+			disclosedPaths = append(disclosedPaths, marker)
+			hasRailsSpecific = true
+		}
+	}
+	for _, marker := range genericPathMarkers {
 		if strings.Contains(body, marker) {
 			disclosedPaths = append(disclosedPaths, marker)
 		}
 	}
-	if len(disclosedPaths) > 0 {
+	// Strict drop-on-fail: a generic error string alone ("No such file or
+	// directory", "Errno::ENOENT") is not Rails path disclosure. Require a
+	// Rails-specific path marker or a matched Rails debug/exception pattern.
+	if len(disclosedPaths) > 0 && (hasRailsSpecific || debugMatched) {
 		dedupKey := host + "::path-disclosure"
 		if diskSet == nil || !diskSet.IsSeen(dedupKey) {
 			results = append(results, &output.ResultEvent{

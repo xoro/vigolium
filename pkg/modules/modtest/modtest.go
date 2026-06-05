@@ -30,7 +30,28 @@ import (
 	httpRequester "github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/types"
+	"go.uber.org/goleak"
 )
+
+// VerifyNoLeaks runs goleak.VerifyTestMain with the standard ignore list for the
+// process-lifetime infra goroutines that Requester starts via network.Init (the
+// active mem guardian and a leveldb store) — singletons with no stop hook. Use it
+// as the whole body of a package's TestMain when that package's tests drive a
+// real Requester:
+//
+//	func TestMain(m *testing.M) { modtest.VerifyNoLeaks(m) }
+func VerifyNoLeaks(m *testing.M) {
+	goleak.VerifyTestMain(m,
+		goleak.IgnoreTopFunction("go.opencensus.io/stats/view.(*worker).start"),
+		goleak.IgnoreTopFunction("github.com/vigolium/vigolium/pkg/core/network.StartActiveMemGuardian.func1"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb.(*DB).mpoolDrain"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb.(*DB).tCompaction"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb.(*DB).mCompaction"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb.(*DB).compactionError"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb.(*session).refLoop"),
+		goleak.IgnoreAnyFunction("github.com/syndtr/goleveldb/leveldb/util.(*BufferPool).drain"),
+	)
+}
 
 // Requester returns an *http.Requester wired to the shared loopback dialer,
 // suitable for driving a module's scan method against an httptest.Server.
@@ -55,9 +76,14 @@ func Requester(t testing.TB) *httpRequester.Requester {
 		t.Fatal("modtest: network dialer is nil after Init")
 	}
 
+	limiter := hostlimit.NewHostRateLimiter(hostlimit.HostRateLimiterConfig{MaxPerHost: opts.MaxPerHost})
+	// Stop the limiter's background eviction goroutine when the test finishes so
+	// packages that assert no goroutine leaks (goleak.VerifyTestMain) stay clean.
+	t.Cleanup(func() { _ = limiter.Close() })
+
 	svc := &services.Services{
 		Options:     opts,
-		HostLimiter: hostlimit.NewHostRateLimiter(hostlimit.HostRateLimiterConfig{MaxPerHost: opts.MaxPerHost}),
+		HostLimiter: limiter,
 		HostErrors:  hosterrors.New(opts.MaxHostError, hosterrors.DefaultMaxHostsCount, nil),
 	}
 

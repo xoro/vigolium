@@ -8,6 +8,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/olium/engine"
 	"github.com/vigolium/vigolium/pkg/olium/skill"
+	"github.com/vigolium/vigolium/pkg/olium/toollog"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
 
@@ -417,27 +418,14 @@ func (m *Model) renderThinkingBlock() string {
 	return header + "\n" + styleThinking.Render(indent(body, "    "))
 }
 
-// compactThinkingBody trims each line and drops every blank line. "Blank"
-// means empty *after* stripping Unicode whitespace — so tabs, non-breaking
-// spaces, and any other IsSpace-class padding all collapse. We don't
-// preserve paragraph breaks because the thinking lane is faint/italic
-// status text, and GPT-5's reasoning summaries in particular embed huge
-// runs of newlines between title and body that otherwise blow the block
-// up into dead space.
+// compactThinkingBody delegates to the shared toollog.CompactThinking so the
+// TUI thinking block and the autopilot/swarm reasoning lane compact reasoning
+// by one identical rule: trim each line, drop every blank line. Paragraph
+// breaks are not preserved because the thinking lane is faint/italic status
+// text, and GPT-5 / Codex reasoning summaries embed huge runs of newlines
+// between title and body that otherwise blow the block into dead space.
 func compactThinkingBody(s string) string {
-	if s == "" {
-		return ""
-	}
-	lines := strings.Split(s, "\n")
-	out := make([]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		out = append(out, trimmed)
-	}
-	return strings.Join(out, "\n")
+	return toollog.CompactThinking(s)
 }
 
 // resetStreamState wipes per-turn streaming buffers so a stray partial / open

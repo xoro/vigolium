@@ -132,10 +132,14 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
-	// Get baseline status code
+	// Get baseline status code + body (the original request carried a VALID token
+	// and succeeded). The body is used to confirm a mutated-token request was
+	// processed the SAME way, not merely returned some 2xx.
 	baselineStatus := 0
+	baselineBody := ""
 	if ctx.Response() != nil {
 		baselineStatus = ctx.Response().StatusCode()
+		baselineBody = ctx.Response().BodyToString()
 	}
 
 	var results []*output.ResultEvent
@@ -161,8 +165,10 @@ func (m *Module) ScanPerRequest(
 		}
 
 		respStatus := 0
+		respBody := ""
 		if resp.Response() != nil {
 			respStatus = resp.Response().StatusCode
+			respBody = resp.Body().String()
 		}
 		resp.Close()
 
@@ -173,6 +179,14 @@ func (m *Module) ScanPerRequest(
 
 		// If response is 2xx and same class as baseline, token was not validated
 		if respStatus >= 200 && respStatus < 300 && sameStatusClass(respStatus, baselineStatus) {
+			// Strict drop-on-fail: a same-class 2xx is not enough. The mutated
+			// request must have been processed the SAME way as the valid-token
+			// baseline (textually equivalent response body), proving the token was
+			// ignored rather than the request being soft-rejected with a 200
+			// error/re-render page. Without a baseline body, fall back to status.
+			if !sameAsBaseline(respBody, baselineBody) {
+				continue
+			}
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.String(),
 				Matched:          urlx.String(),
@@ -204,4 +218,15 @@ func (m *Module) ScanPerRequest(
 // sameStatusClass checks if two status codes are in the same HTTP status class (2xx, 3xx, etc.)
 func sameStatusClass(a, b int) bool {
 	return a/100 == b/100
+}
+
+// sameAsBaseline reports whether a mutated-token response is the same processed
+// outcome as the valid-token baseline: textually equivalent bodies (QuickRatio
+// >= UpperRatioBound). When no baseline body is available it falls back to the
+// status-class match the caller already established.
+func sameAsBaseline(body, baselineBody string) bool {
+	if strings.TrimSpace(baselineBody) == "" {
+		return true
+	}
+	return modkit.BodiesSimilar(body, baselineBody)
 }

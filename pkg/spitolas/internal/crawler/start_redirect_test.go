@@ -12,14 +12,14 @@ func TestSameOrSubdomain(t *testing.T) {
 		base string
 		want bool
 	}{
-		{"identical", "ado.dtu.roche.com", "ado.dtu.roche.com", true},
-		{"subdomain of base", "ado.dtu.roche.com", "roche.com", true},
-		{"base is subdomain of host", "roche.com", "ado.dtu.roche.com", false},
-		{"sibling host", "mail.dtu.roche.com", "ado.dtu.roche.com", false},
-		{"unrelated host", "login.microsoftonline.com", "ado.dtu.roche.com", false},
-		{"suffix-but-not-subdomain", "evilroche.com", "roche.com", false},
-		{"empty host", "", "roche.com", false},
-		{"empty base", "ado.dtu.roche.com", "", false},
+		{"identical", "ado.dtu.acme.com", "ado.dtu.acme.com", true},
+		{"subdomain of base", "ado.dtu.acme.com", "acme.com", true},
+		{"base is subdomain of host", "acme.com", "ado.dtu.acme.com", false},
+		{"sibling host", "mail.dtu.acme.com", "ado.dtu.acme.com", false},
+		{"unrelated host", "login.microsoftonline.com", "ado.dtu.acme.com", false},
+		{"suffix-but-not-subdomain", "evilacme.com", "acme.com", false},
+		{"empty host", "", "acme.com", false},
+		{"empty base", "ado.dtu.acme.com", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

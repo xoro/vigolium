@@ -7,6 +7,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -137,6 +138,14 @@ func (m *Module) ScanPerRequest(
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
+			continue
+		}
+
+		// A WAF/CDN challenge, auth gate, or rate-limit page is not the app
+		// reflecting the injected host — skip it so its body/headers can't trip
+		// the marker (the SSO/Cloudflare-challenge false-positive class).
+		if infra.IsBlockedResponse(resp) {
+			resp.Close()
 			continue
 		}
 

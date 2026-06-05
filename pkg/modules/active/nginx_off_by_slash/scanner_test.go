@@ -6,12 +6,15 @@ import (
 	urlutil "github.com/projectdiscovery/utils/url"
 	"github.com/stretchr/testify/assert"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
+	"github.com/vigolium/vigolium/pkg/modules/modtest"
 	"github.com/vigolium/vigolium/pkg/types/severity"
-	"go.uber.org/goleak"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	// The end-to-end scan tests drive a real requester via modtest, which starts
+	// process-lifetime infra goroutines; ignore those so leak detection still
+	// covers this module's own code.
+	modtest.VerifyNoLeaks(m)
 }
 
 func TestNew(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/utils"
@@ -183,7 +184,10 @@ func (m *Module) sendUpgrade(
 		return false, nil
 	}
 
-	return resp.Response().StatusCode == 101, nil
+	// Require a genuine handshake (101 + Upgrade: websocket + Sec-WebSocket-Accept),
+	// not a bare 101 — a proxy/catch-all that returns 101 without speaking
+	// WebSocket would otherwise make every origin probe a false positive.
+	return infra.IsWebSocketHandshake(resp), nil
 }
 
 // sendUpgradeNoOrigin sends a WebSocket upgrade request without an Origin header.
@@ -231,5 +235,5 @@ func (m *Module) sendUpgradeNoOrigin(
 		return false, nil
 	}
 
-	return resp.Response().StatusCode == 101, nil
+	return infra.IsWebSocketHandshake(resp), nil
 }

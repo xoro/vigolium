@@ -3,6 +3,7 @@ import { cac } from "cac";
 import chalk from "chalk";
 import pkg from "../package.json" with { type: "json" };
 import { AUTHOR, BUILD_DATE, COMMIT_HASH, DOCS, WEBSITE } from "./build-info.js";
+import type { AgentPlatform } from "./engine/types.js";
 
 const TAGLINE =
   "vigolium-audit is an autonomous source-code security audit agent. It drives Claude or Codex through a multi-agent pipeline — gathering advisories, surfacing candidates, proposing attack paths, debating exploitability, and killing false positives — to surface high-confidence, exploitable findings in your repository.";
@@ -18,11 +19,21 @@ const cli = cac("vigolium-audit");
 //   --json:  NDJSON / single-object JSON on stdout, logs on stderr.
 //   --debug: verbose event surface (raw tool calls/results, thinking blocks,
 //            full error stacks, child-process stderr passthrough).
+//   --agent: agent platform; consumed by run/confirm/resume/merge, accepted
+//            (and harmlessly ignored) by deterministic commands like strip.
 cli.option("--json", "Output machine-readable NDJSON on stdout (replaces the human log)");
 cli.option("--debug", "Verbose event surface for troubleshooting");
 cli.option("--streaming", "Animate agent message text as a typewriter (default: on; pass --no-streaming to disable)", {
   default: true,
 });
+// No cac default here: the "claude" fallback is applied in code (run.ts /
+// dry-run.ts via `opts.agent ?? "claude"`), which keeps the
+// `opts.agent !== undefined` "did the user pass it?" sentinel meaningful for
+// confirm/resume forwarding.
+cli.option(
+  "--agent <agent>",
+  "Agent platform (claude|codex). Defaults to claude where it applies; ignored by deterministic commands (strip/status/list/...) and by `merge --premerge-only`.",
+);
 
 // --- examples (shown under `vigolium-audit --help`) -----------------------------------
 // Each entry: cyan section header, then per-command pairs of (gray comment, command).
@@ -63,10 +74,13 @@ cmd("clear inherited context for this run (pass an empty file)", "vigolium-audit
 blank();
 
 section("# Output cleanup");
-cmd("deep/confirm auto-prune raw workspaces on success", "vigolium-audit run --mode deep");
+cmd("deep/confirm auto-prune raw workspaces + redact secrets on success", "vigolium-audit run --mode deep");
 cmd("keep raw workspaces for manual review (overrides the deep/confirm auto-prune)", "vigolium-audit run --mode deep --keep-raw");
+cmd("prune + sweep junk but retain DB snapshots and confirm-workspace secrets", "vigolium-audit run --mode confirm --keep-secrets");
 cmd("strip raw artifacts for modes that do not auto-prune", "vigolium-audit run --mode lite --strip-raw");
-cmd("strip an existing vigolium-results/ folder on demand", "vigolium-audit strip ./repo");
+cmd("strip + redact an existing vigolium-results/ folder on demand", "vigolium-audit strip ./repo");
+cmd("strip an existing folder but keep its secrets", "vigolium-audit strip ./repo --keep-secrets");
+cmd("print the ideal output layout as a cleanup spec for another coding agent", "vigolium-audit output-structure --markdown");
 blank();
 
 section("# Inspect prior audits");
@@ -89,7 +103,9 @@ cmd("boot target + execute PoCs", "vigolium-audit run --mode confirm");
 cmd("second pass with anti-anchoring", "vigolium-audit run --mode revisit");
 cmd("cross-agent re-verification of CRIT/HIGH", "vigolium-audit run --mode reinvest --agent codex");
 cmd("hail-mary file-by-file vulnerability hunt", "vigolium-audit run --mode longshot");
-cmd("normalize a pre-merged vigolium-results/ dir", "vigolium-audit run --mode merge");
+cmd("merge two audit folders + dedup/normalize in one go (e.g. different agents/models)", "vigolium-audit merge --dir ./auditA --dir ./auditB --agent codex");
+cmd("same combined pass via run (--dir straight into the merge mode)", "vigolium-audit run --mode merge --dir ./auditA --dir ./auditB");
+cmd("just the deterministic consolidation (no tokens; inspect before normalizing)", "vigolium-audit merge --dir ./auditA --dir ./auditB --premerge-only --output ./merged");
 cmd("only re-run phases affected since baseline", "vigolium-audit run --mode diff --baseline HEAD~10");
 cmd("auto-route: revisit if a prior audit exists, else fresh deep", "vigolium-audit run --mode refresh");
 cmd("chain modes in one invocation (stops on non-complete; aggregate --max-cost)", "vigolium-audit run --modes deep,refresh,confirm");
@@ -117,7 +133,6 @@ const runCmd = cli
   .command("run", "Run a security audit")
   .option("--mode <mode>", "Audit mode (lite|balanced|deep|diff|confirm|merge|revisit|reinvest|longshot|refresh|resume). 'resume' is an alias for `vigolium-audit resume`: auto-detect the latest non-complete audit and continue it.")
   .option("--modes <list>", "Run multiple modes in sequence (comma-separated, e.g. deep,refresh,confirm). Mutually exclusive with --mode. Stops on first non-complete mode; --max-cost is an aggregate cap.")
-  .option("--agent <agent>", "Agent platform (claude|codex)", { default: "claude" })
   .option("--model <model>", "Model name forwarded to the agent runtime. Defaults to the agent's own configured model; set this flag or the VIGOLIUM_AUDIT_MODEL env var to override.")
   .option("--target <path-or-url>", "Target directory, or a remote git URL (https://github.com/..., https://gitlab.com/..., git@host:owner/repo, git://, ssh://). A URL is cloned with --depth=1 into ./<owner-repo>/ under the current working directory and used as the audit target; an existing same-remote checkout there is reused in place.", { default: "." })
   .option("--source <path-or-url>", "Alias of --target (parity with `vigolium agent audit --source`); accepts the same path or remote git URL forms.")
@@ -132,6 +147,7 @@ const runCmd = cli
   .option("--api-key <key>", "Pass as platform API key env (claude → ANTHROPIC_API_KEY, codex → OPENAI_API_KEY)")
   .option("--strip-raw", "Strip raw scanner output and draft findings on success for modes that do not auto-prune")
   .option("--keep-raw", "Keep raw scanner output and intermediate workspaces for manual review; overrides the deep/confirm auto-prune. Mutually exclusive with --strip-raw.")
+  .option("--keep-secrets", "When cleanup runs, retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted). The junk sweep still runs.")
   .option("--focus-file <path>", "Path to a free-form file describing areas to prioritize. Injected as a soft hint into every phase. Auto-inherited by chained modes.")
   .option("--expected-behaviors-file <path>", "Path to a free-form file describing intentional behaviors that should NOT be flagged. Auto-inherited by chained modes.")
   .option("--live-target <url>", "confirm mode only: HTTP(S) endpoint to verify findings against. Skips env discovery + provisioning and runs PoCs against this URL.")
@@ -142,6 +158,8 @@ const runCmd = cli
   .option("--from-results-dir <path>", "Seed the run from an existing vigolium-results/ output dir. vigolium-audit reads its audit-state.json, shallow-clones the recorded repo at the recorded commit, copies this dir into the clone as vigolium-results/, runs the mode, then syncs the result back. Headless-only; --target overrides the clone destination.")
   .option("--keep-clone", "With --from-results-dir: don't remove the temp clone on exit. Useful for inspecting or replaying the cloned working tree.")
   .option("--resume", "Resume the latest non-complete audit in <target>/vigolium-results/ that matches --mode. Completed phases skipped, stale in_progress phases retried. See `vigolium-audit resume` for an auto-detect entry point.")
+  .option("--dir <path>", "merge mode only (repeatable): two-or-more audit output folders to consolidate before normalizing. Runs the deterministic pre-merge (collision-safe copy + merge_metadata) into the first --dir in place, then runs --mode merge over it. See also the standalone `vigolium-audit merge`.")
+  .option("--force", "merge mode only: allow the pre-merge to write into a non-empty destination.")
   .action(async (opts) => {
     // `--source` is an alias of `--target` (parity with `vigolium agent audit`).
     // cac defaults --target to ".", so an unset/default --target with an
@@ -183,7 +201,7 @@ runCmdEx("confirm against a live URL (skips env discovery + provisioning)", "vig
 runCmdEx("revisit — second pass with anti-anchoring on the latest audit", "vigolium-audit run --mode revisit");
 runCmdEx("reinvest — cross-agent re-verification of CRIT/HIGH findings", "vigolium-audit run --mode reinvest --agent codex");
 runCmdEx("longshot — hail-mary file-by-file vulnerability hunt", "vigolium-audit run --mode longshot");
-runCmdEx("merge — normalize a pre-merged vigolium-results/ dir from external sources", "vigolium-audit run --mode merge");
+runCmdEx("merge — consolidate two audit folders (e.g. different agents/models), then dedup + normalize", "vigolium-audit run --mode merge --dir ./auditA --dir ./auditB");
 runCmdEx("refresh — auto-route: revisit if a prior audit exists, else fresh deep (skips advisory/git/cve-bypass)", "vigolium-audit run --mode refresh");
 runCmdEx("resume — alias for `vigolium-audit resume`: auto-detect the latest non-complete audit and continue it", "vigolium-audit run --mode resume");
 runBlank();
@@ -224,8 +242,9 @@ runCmdEx("clear inherited context for this run (pass an empty file)", "vigolium-
 runBlank();
 
 runSection("# Output & debugging");
-runCmdEx("deep/confirm auto-prune raw workspaces on success", "vigolium-audit run --mode deep");
+runCmdEx("deep/confirm auto-prune raw workspaces + redact secrets on success", "vigolium-audit run --mode deep");
 runCmdEx("keep raw workspaces for manual review (overrides the deep/confirm auto-prune)", "vigolium-audit run --mode deep --keep-raw");
+runCmdEx("prune + sweep junk but retain DB snapshots and confirm-workspace secrets", "vigolium-audit run --mode confirm --keep-secrets");
 runCmdEx("strip raw artifacts for modes that do not auto-prune", "vigolium-audit run --mode lite --strip-raw");
 runCmdEx("stream NDJSON phase events", "vigolium-audit run --mode lite --json | jq -c 'select(.kind == \"phaseEnd\")'");
 runCmdEx("verbose: tool inputs/results, thinking, child stderr", "vigolium-audit run --mode lite --debug");
@@ -255,11 +274,46 @@ cli
   });
 
 cli
-  .command("strip <path>", "Strip raw byproducts from a vigolium-results/ folder; keeps audit-state.json, findings/, findings-theoretical/, attack-surface/, and *.md reports. Pass either the project dir or vigolium-results/ itself.")
-  .action(async (path: string, opts: { json?: boolean }) => {
+  .command("strip <path>", "Strip raw byproducts from a vigolium-results/ folder; keeps audit-state.json, findings/, findings-theoretical/, attack-surface/, and *.md reports. Also sweeps scanner scratch (*.sarif/*.bqrs/tmp) and redacts confirm-workspace secrets (drops DB snapshots; masks passwords/tokens/keys in JSON+logs). Pass either the project dir or vigolium-results/ itself.")
+  .option("--keep-secrets", "Retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted). The junk sweep still runs.")
+  .action(async (path: string, opts: { json?: boolean; keepSecrets?: boolean }) => {
     const { stripCommand } = await import("./cli/strip.js");
-    await stripCommand(path, { json: !!opts.json });
+    await stripCommand(path, { json: !!opts.json, ...(opts.keepSecrets ? { keepSecrets: true } : {}) });
   });
+
+cli
+  .command("merge", "Consolidate two-or-more vigolium-results/ folders into one and normalize the result in a single pass: a deterministic collision-safe copy (findings + attack-surface + merge_metadata stamp), then the `run --mode merge` LLM pass that dedups by root cause, renumbers, and regenerates reports. Pass --premerge-only to stop after the deterministic step (no tokens).")
+  .option("--dir <path>", "An audit output folder to merge (repeatable; pass at least two). Accepts a project dir or a vigolium-results/ dir.")
+  .option("--output <dir>", "Write the merged result to <dir>/vigolium-results/ instead of merging into the first --dir in place (non-destructive to the sources).")
+  .option("--force", "Allow merging into a non-empty --output destination.")
+  .option("--premerge-only", "Stop after the deterministic consolidation; skip the LLM normalization pass (no tokens spent). Prints the `run --mode merge` follow-up command.")
+  .option("--model <model>", "Model name forwarded to the normalization pass.")
+  .option("--max-cost <usd>", "Hard cost cap in USD for the normalization pass; abort when exceeded.")
+  .option("--strict", "Abort the normalization pass on first phase failure instead of skip-and-continue.")
+  .option("--oauth-token <token>", "Set CLAUDE_CODE_OAUTH_TOKEN for the normalization pass.")
+  .option("--oauth-cred-file <path>", "Override platform creds for the normalization pass; original is backed up + restored on exit.")
+  .option("--api-key <key>", "Pass as platform API key env (claude → ANTHROPIC_API_KEY, codex → OPENAI_API_KEY) for the normalization pass.")
+  .action(
+    async (opts: {
+      dir?: string | string[];
+      output?: string;
+      force?: boolean;
+      premergeOnly?: boolean;
+      agent?: AgentPlatform;
+      model?: string;
+      maxCost?: number;
+      strict?: boolean;
+      oauthToken?: string;
+      oauthCredFile?: string;
+      apiKey?: string;
+      json?: boolean;
+      debug?: boolean;
+      streaming?: boolean;
+    }) => {
+      const { mergeCommand } = await import("./cli/merge.js");
+      await mergeCommand(opts);
+    },
+  );
 
 cli
   .command("status [path]", "Print a one-screen summary of the latest audit in a project's vigolium-results/ folder. Read-only.")
@@ -270,10 +324,21 @@ cli
 
 cli
   .command(
+    "output-structure",
+    "Print the canonical 'ideal' vigolium-results/ layout as a prompt-ready cleanup spec (the same delivery-oriented shape `vigolium-audit strip` produces). Hand it to another coding agent — along with a results folder — to normalize/clean up the output. Static; reads nothing. Use --markdown to pipe into an agent, --json for tooling.",
+  )
+  .alias("structure")
+  .option("--markdown", "Emit raw markdown (for piping into another agent or `> spec.md`) instead of the colorized terminal summary.")
+  .action(async (opts: { json?: boolean; markdown?: boolean }) => {
+    const { outputStructureCommand } = await import("./cli/output-structure.js");
+    await outputStructureCommand({ json: !!opts.json, ...(opts.markdown ? { markdown: true } : {}) });
+  });
+
+cli
+  .command(
     "resume [path]",
     "Resume the latest non-complete audit in <path>/vigolium-results/. Auto-detects the audit's mode from audit-state.json and continues where it left off (in_progress > aborted > failed). Headless.",
   )
-  .option("--agent <agent>", "Agent platform (claude|codex). Defaults to whatever the audit used.")
   .option("--strict", "Abort on first phase failure instead of skip-and-continue.")
   .option("--max-cost <usd>", "Hard cost cap in USD for this resume invocation.")
   .option("--output <dir>", "Mirror <path>/vigolium-results/ to <dir> after each phase.")
@@ -282,6 +347,7 @@ cli
   .option("--api-key <key>", "Pass as platform API key env")
   .option("--strip-raw", "Strip raw scanner output and draft findings on success")
   .option("--keep-raw", "Keep raw scanner output and intermediate workspaces for manual review; overrides the deep/confirm auto-prune. Mutually exclusive with --strip-raw.")
+  .option("--keep-secrets", "When cleanup runs, retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted).")
   .option("--serial", "Force serial phase execution")
   .option("--no-git", "Skip all git-related checks")
   .action(
@@ -297,6 +363,7 @@ cli
         apiKey?: string;
         stripRaw?: boolean;
         keepRaw?: boolean;
+        keepSecrets?: boolean;
         serial?: boolean;
         git?: boolean;
         json?: boolean;
@@ -314,7 +381,6 @@ const confirmCmd = cli
     "confirm [path]",
     "Boot the target and execute PoCs against a prior audit's findings. Curated entry point for `--mode confirm`; --mode/--modes/--baseline/--parallel-modes don't apply here.",
   )
-  .option("--agent <agent>", "Agent platform (claude|codex)", { default: "claude" })
   .option("--model <model>", "Model name forwarded to the agent runtime.")
   .option("-i, --interactive", "Enable Ink TUI (auto-disabled when stdout is not a TTY)")
   .option("--from-audit <id>", "Source audit id to confirm. Defaults to the latest completed audit in <path>/vigolium-results/.")
@@ -329,6 +395,7 @@ const confirmCmd = cli
   .option("--api-key <key>", "Pass as platform API key env")
   .option("--strip-raw", "Strip raw scanner output and draft findings on success")
   .option("--keep-raw", "Keep raw scanner output and intermediate workspaces for manual review; overrides the deep/confirm auto-prune. Mutually exclusive with --strip-raw.")
+  .option("--keep-secrets", "When cleanup runs, retain DB snapshots and skip scrubbing secrets from confirm-workspace JSON/logs (default: redacted).")
   .option("--dry-run", "Resolve and print the phase plan without invoking any adapter. No state file is written.")
   .option("--serial", "Force serial phase execution")
   .option("--resume", "Resume the latest non-complete confirm audit in <path>/vigolium-results/ instead of starting fresh.")
@@ -354,6 +421,7 @@ const confirmCmd = cli
         apiKey?: string;
         stripRaw?: boolean;
         keepRaw?: boolean;
+        keepSecrets?: boolean;
         dryRun?: boolean;
         serial?: boolean;
         resume?: boolean;
@@ -385,8 +453,9 @@ confirmEx("cross-agent confirmation on codex", "vigolium-audit confirm ./repo --
 confirmBlank();
 
 confirmSection("# Output cleanup");
-confirmEx("default: confirm auto-prunes raw workspaces on success", "vigolium-audit confirm ./repo");
-confirmEx("keep raw workspaces for manual review", "vigolium-audit confirm ./repo --keep-raw");
+confirmEx("default: confirm auto-prunes raw workspaces + redacts secrets on success", "vigolium-audit confirm ./repo");
+confirmEx("keep raw workspaces for manual review (no prune, no redaction)", "vigolium-audit confirm ./repo --keep-raw");
+confirmEx("prune + sweep junk but retain DB snapshots and confirm-workspace secrets", "vigolium-audit confirm ./repo --keep-secrets");
 confirmBlank();
 
 confirmSection("# Replay an archived results dir");

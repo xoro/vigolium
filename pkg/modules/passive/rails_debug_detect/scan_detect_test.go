@@ -74,3 +74,30 @@ func TestScanPerRequest_Benign(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// TestScanPerRequest_GenericErrorOnly ensures a generic OS/Ruby error string
+// without any Rails-specific path or debug pattern is NOT reported as Rails
+// path disclosure.
+func TestScanPerRequest_GenericErrorOnly(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx(`{"error":"No such file or directory","code":"ENOENT"}`)
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "generic error string alone must not fire path disclosure")
+}
+
+// TestScanPerRequest_GenericErrorWithRailsPattern ensures a generic error string
+// IS reported once corroborated by a matched Rails debug/exception pattern.
+func TestScanPerRequest_GenericErrorWithRailsPattern(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx("ActionView::Template::Error\nErrno::ENOENT: No such file or directory")
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	names := make([]string, 0, len(results))
+	for _, r := range results {
+		names = append(names, r.Info.Name)
+	}
+	assert.Contains(t, names, "Rails Debug: Source Path Disclosure")
+}

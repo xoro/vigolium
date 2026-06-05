@@ -1,5 +1,5 @@
 import { readFile, rm } from "fs/promises";
-import { resolve, join } from "path";
+import { resolve, join, dirname } from "path";
 import { OutputSyncer, assertOutputNotNested } from "../engine/output-sync.js";
 import { writeCache as writeRateLimitsCache, readCache as readRateLimitsCache, ageMs, formatResetsIn } from "../engine/rate-limits-cache.js";
 import chalk from "chalk";
@@ -11,7 +11,7 @@ import { CodexSdkAdapter } from "../adapters/codex-sdk.js";
 import { chooseAdapter } from "../adapters/detect.js";
 import { getContentLoader } from "../content-loader.js";
 import { Orchestrator, type OrchestratorResult } from "../engine/orchestrator.js";
-import { stripRawArtifacts } from "../engine/strip-artifacts.js";
+import { finalizeOutput } from "../engine/redact-artifacts.js";
 import { ClaudeHandoff } from "../engine/claude-handoff.js";
 import { CodexHandoff, isCodexHandoffMode } from "../engine/codex-handoff.js";
 import type { OrchestratorEvent } from "../engine/events.js";
@@ -26,6 +26,8 @@ import {
   findInProgressRefreshAudit,
 } from "./refresh-detect.js";
 import { resolveResultsDirSeed, type ResultsDirSeedHandle } from "./seed.js";
+import { premergeResults } from "../engine/premerge.js";
+import { normalizeDirInputs } from "./merge.js";
 import { cloneRemoteTarget, isRemoteTargetUrl } from "./clone-target.js";
 import type { ResumeOptions } from "./resume.js";
 import { compact } from "../engine/util.js";
@@ -190,6 +192,42 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     }
   }
 
+  // --mode merge --dir A --dir B: run the deterministic pre-merge first, then
+  // dispatch the LLM normalization (merge mode) against the consolidated folder.
+  // The pre-merge consolidates into the first --dir in place (the standalone
+  // `vigolium-audit merge --output` exists for a non-destructive destination).
+  let mergeTargetOverride: string | undefined;
+  const mergeInputs = normalizeDirInputs(opts.dir);
+  if (mergeInputs.length > 0) {
+    if (requestedModes.length !== 1 || requestedModes[0] !== "merge") {
+      fail(`--dir is only valid with --mode merge (got mode ${requestedModes.join(",")})`);
+    }
+    if (opts.target !== undefined && opts.target !== ".") {
+      fail(
+        `--mode merge --dir derives the destination from the first --dir; drop --target ` +
+          `(or use \`vigolium-audit merge --dir … --output <dir>\` for a separate destination)`,
+      );
+    }
+    if (opts.fromResultsDir !== undefined) fail(`--mode merge --dir is incompatible with --from-results-dir`);
+    if (opts.resume === true) fail(`--mode merge --dir is incompatible with --resume`);
+    try {
+      const pre = await premergeResults({ inputs: mergeInputs, ...(opts.force ? { force: true } : {}) });
+      mergeTargetOverride = pre.destProjectDir;
+      if (json) {
+        emitJsonEvent({ kind: "premerge", ...pre });
+      } else {
+        console.log(
+          chalk.blue("[merge]") +
+            ` consolidated ${pre.sources.length} folders → ${chalk.cyan(pre.destResultsDir)} ` +
+            `(${pre.findingsCopied} findings copied, ${pre.idRemap.length} renamed)` +
+            (pre.backup ? chalk.dim(` · state backed up to ${pre.backup}`) : ""),
+        );
+      }
+    } catch (err) {
+      fail((err as Error).message);
+    }
+  }
+
   // --from-results-dir: clone the recorded repo at the recorded commit, copy
   // the seed vigolium-results/ into the clone, and run against that. The seed
   // handle's cleanup() syncs the result back to the original input dir on exit.
@@ -215,7 +253,11 @@ export async function runCommand(opts: RunOptions): Promise<void> {
     }
   }
 
-  const targetDir = seedHandle ? seedHandle.clonedTargetDir : resolve(opts.target ?? ".");
+  const targetDir = seedHandle
+    ? seedHandle.clonedTargetDir
+    : mergeTargetOverride !== undefined
+      ? resolve(mergeTargetOverride)
+      : resolve(opts.target ?? ".");
 
   // Auth overrides must be applied before any adapter / subprocess work — env
   // vars and file swaps must be in place when the SDK reads them or when
@@ -356,6 +398,7 @@ function toResumeOptions(opts: RunOptions): ResumeOptions {
     oauthCredFile: opts.oauthCredFile,
     apiKey: opts.apiKey,
     stripRaw: opts.stripRaw,
+    keepSecrets: opts.keepSecrets,
     focusFile: opts.focusFile,
     expectedBehaviorsFile: opts.expectedBehaviorsFile,
     serial: opts.serial,
@@ -420,7 +463,7 @@ async function pruneCompletedArtifacts(args: {
   json: boolean;
 }): Promise<void> {
   if (!shouldPruneCompletedArtifacts({ mode: args.mode, opts: args.opts })) return;
-  await stripRawArtifacts(args.resultsDir, {
+  const report = await finalizeOutput(args.resultsDir, {
     // Only lite needs historical draft promotion. Deep/balanced/confirm have
     // canonical finalized finding directories; promoting raw drafts would
     // pollute `findings/` with intermediate chamber output.
@@ -429,11 +472,21 @@ async function pruneCompletedArtifacts(args: {
     // env logs, test fallback output). For other modes, remove stale prior
     // confirm workspaces so the output reflects the just-finished mode.
     keepConfirmWorkspace: args.mode === "confirm",
+    // Sweep scanner scratch and (unless --keep-secrets) drop DB snapshots +
+    // scrub confirm-workspace secrets as part of the same final pass.
+    ...(args.opts.keepSecrets ? { keepSecrets: true } : {}),
   });
   if (args.json) {
-    emitJsonEvent({ kind: "cleanup", mode: args.mode, resultsDir: args.resultsDir });
+    emitJsonEvent({ kind: "cleanup", mode: args.mode, resultsDir: args.resultsDir, redaction: report });
   } else {
-    console.log(chalk.blue("[cleanup]") + ` pruned raw artifacts under ${chalk.dim(args.resultsDir)}`);
+    const secretsNote = args.opts.keepSecrets
+      ? " (secrets retained)"
+      : report.valuesMasked > 0 || report.artifactsDropped.length > 0
+        ? ` (redacted ${report.valuesMasked} secret(s), dropped ${report.artifactsDropped.length} snapshot(s))`
+        : "";
+    console.log(
+      chalk.blue("[cleanup]") + ` pruned raw artifacts under ${chalk.dim(args.resultsDir)}${secretsNote}`,
+    );
   }
 }
 
@@ -743,6 +796,7 @@ async function runHeadless(args: {
                     ...compact({
                       maxCost: perModeBudget,
                       stripRaw: opts.stripRaw || undefined,
+                      keepSecrets: opts.keepSecrets || undefined,
                       parallel: opts.serial ? false : undefined,
                       noGit: noGit || undefined,
                     }),
@@ -892,6 +946,7 @@ async function runHeadless(args: {
                 ...compact({
                   maxCost: remainingBudget,
                   stripRaw: opts.stripRaw || undefined,
+                  keepSecrets: opts.keepSecrets || undefined,
                   resume:
                     opts.resume === true || refreshRouting?.resume === true
                       ? true

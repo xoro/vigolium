@@ -111,42 +111,36 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		// Try to verify the uploaded file is accessible
+		// Strict drop-on-fail: a 2xx on the upload endpoint alone is not proof of
+		// an arbitrary file upload — many endpoints return 200/redirect even when
+		// the upload is rejected, stored out of reach, or handled by middleware.
+		// Only report when the file is independently retrievable AND echoes our
+		// unique marker (upload accepted + file fetchable + marker present), which
+		// is the actual vulnerability. Unverified candidates are dropped.
 		verified, verifyBody := m.verifyUpload(ctx, httpClient, respBody, probe, marker)
-
-		sev := severity.High
-		description := fmt.Sprintf("File upload accepted: %s (%s)", probe.name, probe.filename)
-		confidence := severity.Firm
-
-		if verified {
-			description = fmt.Sprintf("File upload and execution confirmed: %s (%s)", probe.name, probe.filename)
-			confidence = severity.Certain
+		if !verified {
+			continue
 		}
 
 		results = append(results, &output.ResultEvent{
-			URL:     urlx.String(),
-			Request: string(modified),
-			Response: func() string {
-				if verified {
-					return verifyBody
-				}
-				return respBody
-			}(),
+			URL:              urlx.String(),
+			Request:          string(modified),
+			Response:         verifyBody,
 			FuzzingParameter: "file",
 			ExtractedResults: []string{
 				fmt.Sprintf("Probe: %s", probe.name),
 				fmt.Sprintf("Filename: %s", probe.filename),
-				fmt.Sprintf("Verified: %v", verified),
+				"Verified: true",
 			},
 			Info: output.Info{
 				Name:        "Arbitrary File Upload",
-				Description: description,
-				Severity:    sev,
-				Confidence:  confidence,
+				Description: fmt.Sprintf("File upload and retrieval confirmed: %s (%s)", probe.name, probe.filename),
+				Severity:    severity.High,
+				Confidence:  severity.Certain,
 			},
 		})
 
-		return results, nil // One finding is enough
+		return results, nil // One confirmed finding is enough
 	}
 
 	return results, nil

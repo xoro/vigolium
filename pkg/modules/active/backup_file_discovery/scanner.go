@@ -1,6 +1,7 @@
 package backup_file_discovery
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"math"
@@ -86,7 +87,7 @@ func (m *Module) ScanPerHost(
 	var results []*output.ResultEvent
 
 	for _, path := range paths {
-		result := m.probePath(ctx, httpClient, path, fp)
+		result := m.probePath(ctx, httpClient, scanCtx, path, fp)
 		if result != nil {
 			results = append(results, result)
 		}
@@ -163,6 +164,34 @@ var sqlMarkers = []string{
 	"PRAGMA", "sqlite",
 }
 
+// hasArchiveMagic reports whether the response body begins with a recognized
+// binary-archive signature. A genuine archive starts with one of these magic
+// byte sequences; a catch-all / error 200 served as application/octet-stream (a
+// common false-positive source) will not. This is the binary-archive equivalent
+// of the SQL content markers.
+func hasArchiveMagic(body string) bool {
+	b := []byte(body)
+	signatures := [][]byte{
+		{0x50, 0x4B, 0x03, 0x04},             // zip / jar / docx (local file header)
+		{0x50, 0x4B, 0x05, 0x06},             // empty zip (end of central directory)
+		{0x1F, 0x8B},                         // gzip
+		{0x42, 0x5A, 0x68},                   // bzip2 ("BZh")
+		{0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C}, // 7z
+		{0x52, 0x61, 0x72, 0x21, 0x1A, 0x07}, // rar ("Rar!\x1a\x07")
+		{0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00}, // xz
+	}
+	for _, sig := range signatures {
+		if bytes.HasPrefix(b, sig) {
+			return true
+		}
+	}
+	// POSIX tar: the "ustar" magic lives at byte offset 257.
+	if len(b) >= 262 && string(b[257:262]) == "ustar" {
+		return true
+	}
+	return false
+}
+
 // isSQLExtension returns true if the path ends with an SQL/dump-related extension.
 func isSQLExtension(path string) bool {
 	lower := strings.ToLower(path)
@@ -177,6 +206,7 @@ func isSQLExtension(path string) bool {
 func (m *Module) probePath(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
 	path string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
@@ -268,11 +298,26 @@ func (m *Module) probePath(
 			return nil
 		}
 
+		// Strict drop-on-fail: require the body to actually begin with a known
+		// archive magic signature. An archive Content-Type alone is trivially
+		// spoofed by a catch-all / error 200 served as octet-stream; the magic
+		// bytes are the real content marker for a binary archive.
+		if !hasArchiveMagic(body) {
+			return nil
+		}
+
 		// Additional signal: Content-Disposition header
 		cd := strings.ToLower(resp.Response().Header.Get("Content-Disposition"))
 		if strings.Contains(cd, "attachment") {
 			confidence = severity.Firm
 		}
+	}
+
+	// Soft-404 / SPA-shell gate: reject a 200 that is just the host's wildcard
+	// response to a random path.
+	location := resp.Response().Header.Get("Location")
+	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, status, []byte(body), location) {
+		return nil
 	}
 
 	// Extract filename from path for display

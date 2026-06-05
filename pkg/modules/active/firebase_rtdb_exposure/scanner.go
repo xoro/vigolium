@@ -1,6 +1,7 @@
 package firebase_rtdb_exposure
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -145,6 +146,37 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
+// looksLikeRTDBData reports whether a 200 body is genuine Firebase Realtime
+// Database content: it must parse as JSON and be a non-empty object or array
+// (the shape of an exposed data tree). It rejects invalid JSON (HTML/error
+// interstitials returned with a 200), empty/null trees, a lone {"error": ...}
+// Firebase error envelope, and bare scalars — all of which are not evidence of a
+// world-readable database.
+func looksLikeRTDBData(body string) bool {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" || trimmed == "null" || trimmed == "{}" || trimmed == "[]" {
+		return false
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(trimmed), &v); err != nil {
+		return false
+	}
+	switch t := v.(type) {
+	case map[string]interface{}:
+		if len(t) == 0 {
+			return false
+		}
+		if _, hasErr := t["error"]; hasErr && len(t) == 1 {
+			return false // lone {"error": ...} Firebase envelope, not data
+		}
+		return true
+	case []interface{}:
+		return len(t) > 0
+	default:
+		return false // bare scalar node — too weak to confirm exposure
+	}
+}
+
 func (m *Module) probeRTDB(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
@@ -191,9 +223,11 @@ func (m *Module) probeRTDB(
 		return nil
 	}
 
-	// Skip null/empty responses
-	trimmed := strings.TrimSpace(respBody)
-	if trimmed == "null" || trimmed == "" || trimmed == "{}" || trimmed == "[]" {
+	// Strict drop-on-fail: a 200 is only an exposure when the body is genuine,
+	// non-trivial RTDB data — a non-empty JSON object/array. This drops 200s that
+	// are not valid JSON (interstitials / error pages on a coincidentally-matched
+	// host), empty/null trees, Firebase error envelopes, and bare scalars.
+	if !looksLikeRTDBData(respBody) {
 		return nil
 	}
 

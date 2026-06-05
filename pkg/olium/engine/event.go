@@ -46,6 +46,35 @@ type Event struct {
 	StopReason stream.StopReason `json:"stop_reason,omitempty"`
 	Usage      *stream.Usage     `json:"usage,omitempty"`
 
+	// ToolCalls carries the model's tool calls for the just-completed turn.
+	// Populated only on EventTurnDone, and only when the turn produced tool
+	// calls. It exists so out-of-band consumers (the Pi-style JSONL session
+	// transcript in pkg/olium/sessionlog) can render a complete assistant
+	// message with full tool arguments without reconstructing them from the
+	// argument-less EventToolCallStart events — arguments are only known once
+	// the provider stream resolves, which is after the start event fires.
+	// Live UI / tool-log consumers ignore this field.
+	ToolCalls []stream.ToolCall `json:"tool_calls,omitempty"`
+
 	// Error payload.
 	Err string `json:"error,omitempty"`
+}
+
+// EventRecorder receives a copy of every engine Event, plus the initiating
+// user prompt, so an out-of-band consumer — notably the Pi-style JSONL
+// session transcript in pkg/olium/sessionlog — can persist a run without
+// coupling into the engine's many event-emission sites or any consumer's
+// drain loop. The engine feeds a single recorder sequentially from one
+// goroutine per Run, so implementations need not be reentrant; they may,
+// however, be called across successive Run calls on the same Engine (the
+// interactive TUI reuses one Engine for a whole session).
+//
+// A recorder that also implements io.Closer is closed by Engine.CloseRecorder.
+type EventRecorder interface {
+	// UserPrompt is invoked once at the start of each Run with the prompt
+	// text that seeds the turn, before any event is emitted.
+	UserPrompt(prompt string)
+	// Record is invoked for every Event the engine emits, in order, before
+	// the event is forwarded on the public Run channel.
+	Record(ev Event)
 }

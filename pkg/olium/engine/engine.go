@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,22 @@ import (
 	"github.com/vigolium/vigolium/pkg/olium/stream"
 	"github.com/vigolium/vigolium/pkg/olium/tool"
 )
+
+// toStreamToolCalls converts the engine's internal provider.ToolCall slice
+// into the stream.ToolCall shape carried on EventTurnDone for recorders.
+// Returns nil for an empty input so the field stays omitted on text-only
+// turns (and so event-equality assertions in tests don't see a spurious
+// empty slice).
+func toStreamToolCalls(calls []provider.ToolCall) []stream.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]stream.ToolCall, len(calls))
+	for i, c := range calls {
+		out[i] = stream.ToolCall{ID: c.ID, Name: c.Name, Arguments: c.Args}
+	}
+	return out
+}
 
 // DefaultToolTimeout bounds each individual tool invocation. A runaway
 // bash/web_fetch call shouldn't be able to hang the whole autopilot
@@ -88,6 +105,15 @@ type Config struct {
 	// halt tool (autopilot's halt_scan) should override with a message
 	// that names it explicitly.
 	NudgeOnEmptyMessage string
+
+	// Recorder, when non-nil, receives a copy of every emitted Event plus
+	// the initiating user prompt (see EventRecorder). Engine.Run tees
+	// through it at a single chokepoint so no emit site or consumer drain
+	// loop needs to know about it. Used to persist a Pi-style JSONL session
+	// transcript (pkg/olium/sessionlog). Forks do NOT inherit the recorder
+	// — concurrent sub-runs would interleave one file. A recorder that
+	// implements io.Closer is closed by Engine.CloseRecorder.
+	Recorder EventRecorder
 }
 
 // DefaultRetryInitialBackoff is the first sleep between transient stream
@@ -175,8 +201,14 @@ func (e *Engine) Fork() *Engine {
 	snapshot := make([]provider.Message, len(e.history))
 	copy(snapshot, e.history)
 	e.mu.Unlock()
+	// Share config by value, but drop the session recorder: forks run
+	// concurrently (parallel sub-calls fan out from one parent), and a
+	// shared recorder would interleave or double-write the parent's single
+	// transcript file. Derivative sub-runs simply aren't recorded.
+	forkCfg := e.cfg
+	forkCfg.Recorder = nil
 	return &Engine{
-		cfg:              e.cfg,
+		cfg:              forkCfg,
 		maxT:             e.maxT,
 		toolTimeout:      e.toolTimeout,
 		maxToolResultLen: e.maxToolResultLen,
@@ -184,6 +216,17 @@ func (e *Engine) Fork() *Engine {
 		nudgeMessage:     e.nudgeMessage,
 		history:          snapshot,
 	}
+}
+
+// CloseRecorder closes the configured session recorder if one is set and it
+// implements io.Closer. Safe to call on an engine with no recorder (no-op)
+// and on a fork (forks carry no recorder). Callers with a clear run
+// lifecycle should defer this so the transcript file is flushed and closed.
+func (e *Engine) CloseRecorder() error {
+	if c, ok := e.cfg.Recorder.(io.Closer); ok {
+		return c.Close()
+	}
+	return nil
 }
 
 // History returns a snapshot of the conversation. Safe to call from the UI thread.
@@ -207,7 +250,26 @@ func (e *Engine) Reset() {
 // (success or error). All events must be drained.
 func (e *Engine) Run(ctx context.Context, userPrompt string) <-chan Event {
 	out := make(chan Event, 64)
-	go e.run(ctx, userPrompt, out)
+	rec := e.cfg.Recorder
+	if rec == nil {
+		go e.run(ctx, userPrompt, out)
+		return out
+	}
+	// Tee every event through the recorder before forwarding it to the
+	// caller. This single chokepoint means no emit site inside run() and no
+	// consumer drain loop (headless, TUI, autopilot, agent adapter) needs to
+	// know recording exists, and the recorder also sees the initiating
+	// prompt — which is never an emitted event.
+	raw := make(chan Event, 64)
+	go e.run(ctx, userPrompt, raw)
+	go func() {
+		rec.UserPrompt(userPrompt)
+		for ev := range raw {
+			rec.Record(ev)
+			out <- ev
+		}
+		close(out)
+	}()
 	return out
 }
 
@@ -256,7 +318,7 @@ func (e *Engine) run(ctx context.Context, userPrompt string, out chan<- Event) {
 		e.history = append(e.history, assistantMsg)
 		e.mu.Unlock()
 
-		out <- Event{Type: EventTurnDone, StopReason: stopReason, Usage: usage}
+		out <- Event{Type: EventTurnDone, StopReason: stopReason, Usage: usage, ToolCalls: toStreamToolCalls(toolCalls)}
 
 		if len(toolCalls) == 0 {
 			// Text-only turn. Small open-weight models routinely lose the

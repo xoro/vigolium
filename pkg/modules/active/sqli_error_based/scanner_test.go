@@ -109,6 +109,33 @@ func TestScanPerInsertionPoint_RateLimitChallengeNotSQLi(t *testing.T) {
 	assert.Empty(t, res, "a 429 Cloudflare challenge page must not be reported as SQLi")
 }
 
+// TestScanPerInsertionPoint_TwoHundredChallengeNotSQLi covers a Cloudflare
+// challenge served with an ordinary 200 status — managed and JS challenges
+// routinely do this. The status-code gate alone would pass it through, so the
+// shared block detector must recognize it by the cf-mitigated header /
+// challenge-platform body marker and suppress the otherwise-matching TiDB token
+// carried in the challenge page's text.
+func TestScanPerInsertionPoint_TwoHundredChallengeNotSQLi(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+		// A 200 challenge interstitial whose body still carries TiDB-signature
+		// words as standalone tokens (so the regex would match if it ran).
+		_, _ = io.WriteString(w, `<html><head><title>Just a moment...</title></head><body>`+
+			`<script src="/cdn-cgi/challenge-platform/h/g/orchestrate/chl_page/v1"></script>`+
+			`<!-- TiKV TiDB server tidb_version --></body></html>`)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?id=1")
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 200 Cloudflare challenge page must not be reported as SQLi")
+}
+
 // TestScanPerInsertionPoint_BareRateLimitNotSQLi covers a plain 429 with no
 // vendor headers (a generic rate limiter the vendor detector would not recognize)
 // whose body matches a SQL-error pattern. The status gate must still suppress it.

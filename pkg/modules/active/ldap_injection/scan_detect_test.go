@@ -64,6 +64,31 @@ func TestScanPerInsertionPoint_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a stable, error-free endpoint must not yield an LDAP injection finding")
 }
 
+// TestScanPerInsertionPoint_ChallengePageNotLDAP reproduces the cross-module
+// false-positive class: a WAF/CDN challenge page (here a Cloudflare 429
+// "Cf-Mitigated: challenge") whose body happens to carry an LDAP-error token
+// must not be reported as injection — the block gate must reject it before the
+// signature match runs.
+func TestScanPerInsertionPoint_ChallengePageNotLDAP(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Server", "cloudflare")
+		w.Header().Set("Cf-Mitigated", "challenge")
+		w.WriteHeader(http.StatusTooManyRequests)
+		// Challenge body that nonetheless contains an LDAP-error token.
+		_, _ = w.Write([]byte("Just a moment... javax.naming.directory.InvalidSearchFilterException"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?username=alice")
+	ip := modtest.InsertionPoint(t, rr, "username")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a WAF/CDN challenge page must not be reported as LDAP injection")
+}
+
 // TestScanPerInsertionPoint_NonLDAPParamSkipped ensures a parameter whose name
 // does not suggest LDAP usage is skipped without sending any probes.
 func TestScanPerInsertionPoint_NonLDAPParamSkipped(t *testing.T) {

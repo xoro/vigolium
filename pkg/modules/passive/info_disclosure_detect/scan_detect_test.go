@@ -42,6 +42,20 @@ func TestScanPerRequest_StackTrace(t *testing.T) {
 	require.NotEmpty(t, results)
 }
 
+// TestScanPerRequest_JSBundleInternalIP is a regression: a private RFC1918 IP
+// baked into a minified JS bundle (served text/javascript at an extensionless
+// route) is not a disclosure. The Content-Type gate must skip body checks.
+func TestScanPerRequest_JSBundleInternalIP(t *testing.T) {
+	t.Parallel()
+	m := New()
+	body := `const cfg={devHost:"192.168.1.50",api:"10.0.0.1"};export default cfg;`
+	ctx := makeHTTPCtx("/assets/app", "Content-Type: text/javascript", body)
+
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
 // TestScanPerRequest_InternalIP drives a response body leaking a private RFC1918
 // address and expects a finding.
 func TestScanPerRequest_InternalIP(t *testing.T) {
