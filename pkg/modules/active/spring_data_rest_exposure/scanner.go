@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/api",
 		name:        "Spring Data REST API Root",
-		markers:     []string{`"_links"`, `"self"`, `"profile"`, `"href"`},
+		markers:     [][]string{{`"_links"`}, {`"profile"`}, {`"href"`}},
 		antiMarkers: []string{"404", "Not Found", "swagger", "openapi", "graphql"},
 		sev:         severity.Medium,
 		desc:        "Spring Data REST API root detected with HAL links, indicating auto-exposed repository endpoints that may lack authorization controls",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/api/profile",
 		name:        "Spring Data REST ALPS Profile",
-		markers:     []string{`"alps"`, `"descriptor"`, `"representation"`},
+		markers:     [][]string{{`"alps"`}, {`"descriptor"`, `"representation"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Spring Data REST ALPS profile endpoint exposed, revealing full data model descriptors and entity relationships",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/profile",
 		name:        "Spring Data REST Profile (root)",
-		markers:     []string{`"alps"`, `"descriptor"`, `"representation"`},
+		markers:     [][]string{{`"alps"`}, {`"descriptor"`, `"representation"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE", "facebook", "twitter", "user"},
 		sev:         severity.Medium,
 		desc:        "Spring Data REST ALPS profile at root level, revealing data model metadata",
@@ -223,15 +223,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

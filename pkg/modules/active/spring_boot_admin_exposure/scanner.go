@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/admin",
 		name:        "Spring Boot Admin Dashboard",
-		markers:     []string{"Spring Boot Admin", "spring-boot-admin", "sba-settings", "applications"},
+		markers:     [][]string{{"Spring Boot Admin", "spring-boot-admin", "sba-settings"}},
 		antiMarkers: []string{"404", "Not Found", "WordPress", "wp-admin", "Drupal", "django"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin dashboard accessible, providing centralized access to actuator data from multiple services",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/boot-admin",
 		name:        "Spring Boot Admin (boot-admin)",
-		markers:     []string{"Spring Boot Admin", "spring-boot-admin", "sba-settings", "applications"},
+		markers:     [][]string{{"Spring Boot Admin", "spring-boot-admin", "sba-settings"}},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin dashboard accessible at /boot-admin path",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/sba",
 		name:        "Spring Boot Admin (sba)",
-		markers:     []string{"Spring Boot Admin", "spring-boot-admin", "sba-settings", "applications"},
+		markers:     [][]string{{"Spring Boot Admin", "spring-boot-admin", "sba-settings"}},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin dashboard accessible at /sba path",
@@ -52,7 +52,7 @@ var probes = []probe{
 	{
 		path:        "/springbootadmin",
 		name:        "Spring Boot Admin (springbootadmin)",
-		markers:     []string{"Spring Boot Admin", "spring-boot-admin", "sba-settings", "applications"},
+		markers:     [][]string{{"Spring Boot Admin", "spring-boot-admin", "sba-settings"}},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin dashboard accessible at /springbootadmin path",
@@ -60,7 +60,7 @@ var probes = []probe{
 	{
 		path:        "/admin/instances",
 		name:        "SBA Instances API",
-		markers:     []string{`"registration"`, `"statusInfo"`, `"managementUrl"`, `"healthUrl"`},
+		markers:     [][]string{{`"registration"`, `"statusInfo"`}, {`"managementUrl"`, `"healthUrl"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin instances API exposed, revealing registered service URLs and health endpoints",
@@ -68,7 +68,7 @@ var probes = []probe{
 	{
 		path:        "/admin/applications",
 		name:        "SBA Applications API",
-		markers:     []string{`"name"`, `"instances"`, `"status"`, `"buildVersion"`},
+		markers:     [][]string{{`"instances"`}, {`"buildVersion"`, `"statusTimestamp"`, `"registration"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Spring Boot Admin applications API exposed, revealing all registered application details",
@@ -247,15 +247,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

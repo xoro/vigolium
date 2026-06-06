@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/application/default",
 		name:        "Config Server (application/default)",
-		markers:     []string{`"propertySources"`, `"name"`, `"source"`},
+		markers:     [][]string{{`"propertySources"`}, {`"source"`, `"profiles"`, `"name":"application"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Cloud Config Server exposed, returning default application configuration with potential secrets and internal URLs",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/application/prod",
 		name:        "Config Server (application/prod)",
-		markers:     []string{`"propertySources"`, `"name"`, `"source"`},
+		markers:     [][]string{{`"propertySources"`}, {`"source"`, `"profiles"`, `"name":"application"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Cloud Config Server exposed for production profile, potentially leaking production credentials",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/application/dev",
 		name:        "Config Server (application/dev)",
-		markers:     []string{`"propertySources"`, `"name"`, `"source"`},
+		markers:     [][]string{{`"propertySources"`}, {`"source"`, `"profiles"`, `"name":"application"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Cloud Config Server exposed for development profile",
@@ -52,7 +52,7 @@ var probes = []probe{
 	{
 		path:        "/application/default/main",
 		name:        "Config Server (main label)",
-		markers:     []string{`"propertySources"`, `"name"`, `"source"`, `"label"`},
+		markers:     [][]string{{`"propertySources"`}, {`"source"`, `"profiles"`, `"label"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Cloud Config Server exposed with main branch label",
@@ -60,7 +60,7 @@ var probes = []probe{
 	{
 		path:        "/application/default/master",
 		name:        "Config Server (master label)",
-		markers:     []string{`"propertySources"`, `"name"`, `"source"`, `"label"`},
+		markers:     [][]string{{`"propertySources"`}, {`"source"`, `"profiles"`, `"label"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Cloud Config Server exposed with master branch label",
@@ -68,7 +68,7 @@ var probes = []probe{
 	{
 		path:        "/encrypt/status",
 		name:        "Config Server Encryption Status",
-		markers:     []string{`"status"`, "OK", "UP"},
+		markers:     [][]string{{`"status"`}, {"OK", "NO_KEY", "INVALID"}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Spring Cloud Config Server encryption status endpoint exposed, confirming encryption capability is enabled",
@@ -247,15 +247,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

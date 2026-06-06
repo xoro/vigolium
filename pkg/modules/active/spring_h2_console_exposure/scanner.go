@@ -23,7 +23,7 @@ type notFoundFingerprint struct {
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -33,7 +33,7 @@ var probes = []probe{
 	{
 		path:        "/h2-console",
 		name:        "H2 Console",
-		markers:     []string{"H2 Console", "h2-console", "JDBC URL", "Driver Class", "org.h2"},
+		markers:     [][]string{{"H2 Console", "h2-console"}, {"JDBC URL", "Driver Class", "org.h2"}},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Critical,
 		desc:        "H2 database web console exposed, allowing direct database access and potential remote code execution",
@@ -41,7 +41,7 @@ var probes = []probe{
 	{
 		path:        "/h2-console/",
 		name:        "H2 Console (trailing slash)",
-		markers:     []string{"H2 Console", "h2-console", "JDBC URL", "Driver Class", "org.h2"},
+		markers:     [][]string{{"H2 Console", "h2-console"}, {"JDBC URL", "Driver Class", "org.h2"}},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Critical,
 		desc:        "H2 database web console exposed with trailing slash",
@@ -49,7 +49,7 @@ var probes = []probe{
 	{
 		path:        "/console",
 		name:        "H2 Console (alternate path)",
-		markers:     []string{"H2 Console", "h2-console", "JDBC URL", "org.h2"},
+		markers:     [][]string{{"H2 Console", "h2-console"}, {"JDBC URL", "org.h2", "Driver Class"}},
 		antiMarkers: []string{"404", "Not Found", "WebLogic", "WildFly", "JBoss"},
 		sev:         severity.Critical,
 		desc:        "H2 database console exposed at alternate /console path",
@@ -223,15 +223,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

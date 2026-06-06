@@ -64,13 +64,14 @@ func validateParallelScan(opts *types.Options) error {
 
 // targetResult records the outcome of one child scan in the fan-out.
 type targetResult struct {
-	target   string
-	output   string
-	console  string
-	err      error
-	duration time.Duration
-	stats    childStats
-	statsOK  bool
+	target      string
+	output      string
+	console     string
+	err         error
+	interrupted bool // batch was canceled (Ctrl-C) before this target finished
+	duration    time.Duration
+	stats       childStats
+	statsOK     bool
 }
 
 // childStats are the per-target counts the parent recovers from a child's JSONL
@@ -233,10 +234,10 @@ func runStatelessTargetsParallel(cmd *cobra.Command, settings *config.Settings, 
 		}
 	}
 
-	results, failed := fanOutTargetScans(ctx, exe, targets, parallel, planFor)
+	results, failed, interrupted := fanOutTargetScans(ctx, exe, targets, parallel, planFor)
 
-	printParallelSummary(results, failed)
-	return parallelBatchError(failed, len(targets))
+	printParallelSummary(results, failed, interrupted)
+	return parallelBatchError(failed, interrupted, len(targets))
 }
 
 // childPlan describes one child scan the parent will spawn: the full argv (with
@@ -257,13 +258,14 @@ type childPlan struct {
 // (via runChildScan) SIGINT forwarding; callers print the banner before the call
 // and the roll-up / unified export after it. Shared by the stateless (per-host
 // files) and db-isolate (merge into --db) parallel paths.
-func fanOutTargetScans(ctx context.Context, exe string, targets []string, parallel int, planFor func(i int, target string) childPlan) ([]targetResult, int) {
+func fanOutTargetScans(ctx context.Context, exe string, targets []string, parallel int, planFor func(i int, target string) childPlan) ([]targetResult, int, int) {
 	var (
-		mu        sync.Mutex // guards results, completed, failed, and stderr prints
-		results   = make([]targetResult, len(targets))
-		completed int
-		failed    int
-		wg        sync.WaitGroup
+		mu          sync.Mutex // guards results, completed, failed, interrupted, and stderr prints
+		results     = make([]targetResult, len(targets))
+		completed   int
+		failed      int
+		interrupted int
+		wg          sync.WaitGroup
 	)
 	sem := make(chan struct{}, parallel)
 	total := len(targets)
@@ -279,6 +281,20 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// Ctrl-C (ctx canceled) before this child got a worker slot: don't
+			// launch it. Record it as interrupted/not-scanned and stay silent —
+			// the summary collapses the whole un-started set into one general
+			// line instead of printing a start+failed pair (and a zap error) for
+			// every queued target the operator never meant to wait on.
+			if ctx.Err() != nil {
+				mu.Lock()
+				results[i] = targetResult{target: target, console: plan.console, err: ctx.Err(), interrupted: true}
+				completed++
+				interrupted++
+				mu.Unlock()
+				return
+			}
+
 			if !scanOpts.Silent {
 				mu.Lock()
 				fmt.Fprintf(os.Stderr, "%s %s %s %s\n",
@@ -293,6 +309,11 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 			runErr := runChildScan(ctx, exe, plan.args, plan.console)
 			dur := time.Since(start)
 
+			// A child that was killed by the batch-wide Ctrl-C didn't really
+			// "fail" — it was cut short. Treat it as interrupted so it joins the
+			// general not-scanned tally rather than the genuine-failure list.
+			wasInterrupted := runErr != nil && ctx.Err() != nil
+
 			// Recover per-target counts from the JSONL the child just wrote.
 			// Only on success — a failed child may have written nothing.
 			var stats childStats
@@ -302,14 +323,26 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 			}
 
 			mu.Lock()
-			results[i] = targetResult{target: target, output: plan.statsBase, console: plan.console, err: runErr, duration: dur, stats: stats, statsOK: statsOK}
+			results[i] = targetResult{target: target, output: plan.statsBase, console: plan.console, err: runErr, interrupted: wasInterrupted, duration: dur, stats: stats, statsOK: statsOK}
 			completed++
-			if runErr != nil {
+			switch {
+			case wasInterrupted:
+				interrupted++
+			case runErr != nil:
 				failed++
 			}
 			doneCount, failCount := completed, failed
 			if !scanOpts.Silent {
-				if runErr != nil {
+				switch {
+				case wasInterrupted:
+					// Muted, single line — no "see <console>", no zap error: this
+					// target was stopped by the operator, not by a real fault.
+					fmt.Fprintf(os.Stderr, "%s %s %s %s  (interrupted)\n",
+						terminal.Gray(terminal.SymbolSkipped),
+						terminal.BoldHiBlue(fmt.Sprintf("[%d/%d]", i+1, total)),
+						terminal.Gray(padStatus("stopped")),
+						terminal.Gray(target))
+				case runErr != nil:
 					fmt.Fprintf(os.Stderr, "%s %s %s %s  (%s) — see %s\n",
 						terminal.BoldRed(terminal.SymbolError),
 						terminal.BoldHiBlue(fmt.Sprintf("[%d/%d]", i+1, total)),
@@ -317,7 +350,7 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 						target,
 						terminal.Magenta(dur.Round(time.Second).String()),
 						terminal.Gray(plan.console))
-				} else {
+				default:
 					fmt.Fprintf(os.Stderr, "%s %s %s %s  (%s) · %s%d/%d done, %d failed\n",
 						terminal.BoldGreen(terminal.SymbolSuccess),
 						terminal.BoldHiBlue(fmt.Sprintf("[%d/%d]", i+1, total)),
@@ -330,7 +363,9 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 			}
 			mu.Unlock()
 
-			if runErr != nil {
+			// Only genuine failures are logged at ERROR — an operator Ctrl-C is
+			// not an error worth a stack of red log lines.
+			if runErr != nil && !wasInterrupted {
 				zap.L().Error("Parallel target scan failed",
 					zap.String("target", target),
 					zap.String("console", plan.console),
@@ -340,7 +375,7 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 	}
 
 	wg.Wait()
-	return results, failed
+	return results, failed, interrupted
 }
 
 // runIsolatedTargetsParallel scans every target in targets concurrently, up to
@@ -453,20 +488,21 @@ func runIsolatedTargetsParallel(cmd *cobra.Command, settings *config.Settings, s
 		}
 	}
 
-	results, failed := fanOutTargetScans(ctx, exe, targets, parallel, planFor)
+	results, failed, interrupted := fanOutTargetScans(ctx, exe, targets, parallel, planFor)
 
-	printParallelSummary(results, failed)
+	printParallelSummary(results, failed, interrupted)
 
 	// Export the unified output only when at least one child merged something —
-	// if every child failed there is nothing new in the destination to export.
-	if failed < len(targets) {
+	// if every child failed or was interrupted there is nothing new in the
+	// destination to export.
+	if failed+interrupted < len(targets) {
 		if err := exportUnifiedFromDB(destCfg, scanOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "%s unified export from %s failed: %v\n",
 				terminal.ErrorPrefix(), terminal.Cyan(destCfg.SQLite.Path), err)
 		}
 	}
 
-	return parallelBatchError(failed, len(targets))
+	return parallelBatchError(failed, interrupted, len(targets))
 }
 
 // exportUnifiedFromDB opens the merge-destination database and writes the
@@ -488,12 +524,20 @@ func exportUnifiedFromDB(destCfg config.DatabaseConfig, opts *types.Options) err
 	return nil
 }
 
-// parallelBatchError decides the batch's exit status: non-zero only when every
-// target failed. A partial success is still a success, so the roll-up's failed
-// count is the signal for partial failures; --soft-fail (handled at the root)
-// still forces exit 0 regardless of what this returns.
-func parallelBatchError(failed, total int) error {
-	if total > 0 && failed == total {
+// parallelBatchError decides the batch's exit status. A partial success is
+// still a success, so the only non-zero outcomes are: every target genuinely
+// failed, or the batch was Ctrl-C'd before a single target finished cleanly
+// (everything either failed or was interrupted). A partial interrupt — some
+// targets completed before the stop — exits clean, just like a partial failure.
+// --soft-fail (handled at the root) still forces exit 0 regardless.
+func parallelBatchError(failed, interrupted, total int) error {
+	if total == 0 {
+		return nil
+	}
+	if interrupted > 0 && failed+interrupted == total {
+		return fmt.Errorf("scan interrupted: %d of %d targets not scanned", interrupted, total)
+	}
+	if failed == total {
 		return fmt.Errorf("all %d target scans failed", total)
 	}
 	return nil
@@ -532,13 +576,16 @@ func runChildScan(ctx context.Context, exe string, args []string, consolePath st
 }
 
 // printParallelSummary prints the final roll-up for the fan-out: counts, total
-// wall time, and the per-target console path for each failure.
-func printParallelSummary(results []targetResult, failed int) {
+// wall time, and the per-target console path for each genuine failure. Targets
+// the operator interrupted (Ctrl-C) before they finished are not enumerated —
+// they collapse into a single "N not scanned" line, since listing every
+// un-started target is pure noise the operator didn't ask to wait on.
+func printParallelSummary(results []targetResult, failed, interrupted int) {
 	if scanOpts.Silent {
 		return
 	}
 	total := len(results)
-	succeeded := total - failed
+	succeeded := total - failed - interrupted
 
 	var longest time.Duration
 	agg := childStats{sev: make(map[string]int)}
@@ -557,12 +604,23 @@ func printParallelSummary(results []targetResult, failed int) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "\n%s %s  %s targets · %s succeeded · %s failed · longest %s\n",
+	// The header reads "… complete" normally but "… interrupted" when the
+	// operator stopped the batch — and only carries the "N not scanned" segment
+	// in that case, so a clean run's header stays uncluttered.
+	headline := terminal.BoldAqua("Parallel scan complete")
+	interruptedSeg := ""
+	if interrupted > 0 {
+		headline = terminal.BoldYellow("Parallel scan interrupted")
+		interruptedSeg = fmt.Sprintf(" · %s not scanned", terminal.BoldYellow(fmt.Sprintf("%d", interrupted)))
+	}
+
+	fmt.Fprintf(os.Stderr, "\n%s %s  %s targets · %s succeeded · %s failed%s · longest %s\n",
 		terminal.Aqua(terminal.SymbolSparkle),
-		terminal.BoldAqua("Parallel scan complete"),
+		headline,
 		terminal.HiCyan(fmt.Sprintf("%d", total)),
 		terminal.BoldGreen(fmt.Sprintf("%d", succeeded)),
 		failColor(failed),
+		interruptedSeg,
 		terminal.Gray(longest.Round(time.Second).String()))
 
 	if haveStats {
@@ -580,9 +638,10 @@ func printParallelSummary(results []targetResult, failed int) {
 			findings)
 	}
 
+	// Enumerate genuine failures only — each with its console for triage.
 	if failed > 0 {
 		for _, r := range results {
-			if r.err == nil {
+			if r.err == nil || r.interrupted {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "  %s %s — %v (%s)\n",
@@ -591,6 +650,15 @@ func printParallelSummary(results []targetResult, failed int) {
 				r.err,
 				terminal.Gray(r.console))
 		}
+	}
+
+	// One general line for everything the Ctrl-C left un-scanned — no per-target
+	// dump, no console paths (there is nothing to triage in a target that was
+	// never run). Re-run the batch to scan the remainder.
+	if interrupted > 0 {
+		fmt.Fprintf(os.Stderr, "  %s %s target(s) stopped before completing and were not scanned — re-run to finish them\n",
+			terminal.Gray(terminal.SymbolSkipped),
+			terminal.BoldYellow(fmt.Sprintf("%d", interrupted)))
 	}
 }
 
@@ -758,12 +826,13 @@ func perHostOutputPattern(output string) string {
 	return stripped + "-<host>" + rest
 }
 
-// padStatus right-pads a lifecycle status word ("start"/"done"/"failed") to a
-// fixed width so the target column lines up across all three regardless of word
-// length. Padding the plain word (the spaces carry no color) keeps the columns
-// aligned even though each word is wrapped in ANSI color codes.
+// padStatus right-pads a lifecycle status word ("start"/"done"/"failed"/
+// "stopped") to a fixed width so the target column lines up across all of them
+// regardless of word length. Padding the plain word (the spaces carry no color)
+// keeps the columns aligned even though each word is wrapped in ANSI color
+// codes. The width fits the longest word ("stopped").
 func padStatus(s string) string {
-	return fmt.Sprintf("%-6s", s)
+	return fmt.Sprintf("%-7s", s)
 }
 
 // summarizeTargetList joins up to max targets for display, collapsing the rest

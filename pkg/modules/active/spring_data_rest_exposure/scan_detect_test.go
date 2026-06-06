@@ -57,6 +57,31 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host that 404s all data-rest paths must not yield a finding")
 }
 
+// TestScanPerRequest_WeakMarkerNoFalsePositive ensures a generic JSON response
+// carrying the old weak substrings ("self"/"href") but no HAL "_links" envelope
+// and no Spring Data REST "profile" link is no longer reported.
+func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"self":{"href":"/api"},"items":[]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a generic JSON body without the HAL _links/profile envelope must not yield a finding")
+}
+
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

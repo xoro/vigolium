@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.23-beta] - 2026-06-06
+
+A false-positive-hardening release centered on the Spring module family, with invalid-date mutation payloads and cleaner parallel-scan interrupt handling.
+
+### Added
+
+- **Invalid-date mutation payloads** — the mutation engine now emits explicit, labeled invalid-date boundary values (impossible day-of-month, out-of-range month 13) for date parameters to probe lenient date parsers/validators, deterministically and reproducibly.
+
+### Changed
+
+- **Spring module false-positive hardening** — `spring-actuator-misconfig` now confirms each endpoint by its actuator-specific JSON structure (`"status":"UP"` for `/health`, the `propertySources` envelope for `/env`, dotted Micrometer metric ids for `/metrics`, …) instead of a generic word match, and the seven sibling exposure modules (boot-admin, cloud-config, data-rest, debug, gateway, h2-console, jolokia) now require co-occurring marker groups rather than any single weak token. All eight probe a guaranteed-nonexistent sibling under the same directory to reject catch-all handlers (e.g. Keycloak i18n message bundles, SPA fallbacks) that 200 every child path. New shared `modkit` primitives back this: `MatchAllGroups` (AND-of-OR groups) and `SiblingPathCatchAll`.
+- **Parallel-scan interrupts** — Ctrl-C during a `-P`/`--parallel` batch now treats un-started and cut-short targets as "not scanned" rather than failures: a muted per-target line, no `ERROR` log spam, a `Parallel scan interrupted · N not scanned` roll-up, and an exit status that distinguishes an operator stop from a genuine all-failed batch.
+
 ## [v0.1.22-beta] - 2026-06-06
 
 An agentic-scan and traffic-capture release: attack-vector skills wired into autopilot and swarm with planner-driven selection, an HTTPS-intercepting ingest proxy, sturdier olium stream recovery, a static-root traversal file-read oracle, and cleaner parallel-scan output.

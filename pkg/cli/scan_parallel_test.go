@@ -160,14 +160,22 @@ func TestValidateParallelScan(t *testing.T) {
 	}
 }
 
-// parallelBatchError returns an error only when every target failed; partial
-// success and an empty batch are both clean exits.
+// parallelBatchError exits non-zero only when every target genuinely failed, or
+// the batch was interrupted before any target finished cleanly. Partial success
+// (including a partial interrupt) and an empty batch are clean exits.
 func TestParallelBatchError(t *testing.T) {
-	assert.NoError(t, parallelBatchError(0, 0), "empty batch is not a failure")
-	assert.NoError(t, parallelBatchError(0, 5), "all succeeded")
-	assert.NoError(t, parallelBatchError(4, 5), "partial success exits clean")
-	assert.Error(t, parallelBatchError(5, 5), "all failed exits non-zero")
-	assert.Error(t, parallelBatchError(1, 1), "single failed target exits non-zero")
+	assert.NoError(t, parallelBatchError(0, 0, 0), "empty batch is not a failure")
+	assert.NoError(t, parallelBatchError(0, 0, 5), "all succeeded")
+	assert.NoError(t, parallelBatchError(4, 0, 5), "partial success exits clean")
+	assert.Error(t, parallelBatchError(5, 0, 5), "all failed exits non-zero")
+	assert.Error(t, parallelBatchError(1, 0, 1), "single failed target exits non-zero")
+
+	// Interrupt handling: a full stop (nothing finished) is non-zero, but a
+	// partial interrupt — some targets completed before Ctrl-C — exits clean.
+	assert.Error(t, parallelBatchError(0, 5, 5), "full interrupt before any success exits non-zero")
+	assert.Error(t, parallelBatchError(2, 3, 5), "all targets failed or interrupted exits non-zero")
+	assert.NoError(t, parallelBatchError(0, 3, 5), "partial interrupt with successes exits clean")
+	assert.NoError(t, parallelBatchError(1, 2, 5), "some succeeded despite interrupt exits clean")
 }
 
 // withIndexSuffix disambiguates two targets that resolve to the same per-host

@@ -57,6 +57,31 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host that 404s all jolokia paths must not yield a finding")
 }
 
+// TestScanPerRequest_WeakMarkerNoFalsePositive ensures a 200 JSON response that
+// carries the old weak substring ("agent") but not the corroborating Jolokia
+// "protocol" field is no longer reported.
+func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/jolokia" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"agent":"monitoring-agent","config":{"x":1}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a JSON body with a bare agent field but no Jolokia protocol field must not yield a finding")
+}
+
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

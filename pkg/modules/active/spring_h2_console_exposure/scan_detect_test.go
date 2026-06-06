@@ -57,6 +57,31 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host that 404s all H2 paths must not yield a finding")
 }
 
+// TestScanPerRequest_WeakMarkerNoFalsePositive ensures a page that merely
+// mentions "H2 Console" (e.g. documentation) but lacks the JDBC URL / org.h2
+// connection-form tokens is no longer reported.
+func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/h2-console" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><body>See the H2 Console documentation page</body></html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a page that only mentions H2 Console without the JDBC connection form must not yield a finding")
+}
+
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

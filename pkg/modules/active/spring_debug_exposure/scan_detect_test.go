@@ -57,6 +57,31 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no spring debug markers must not yield a finding")
 }
 
+// TestScanPerRequest_WeakMarkerNoFalsePositive ensures a generic error page that
+// merely contains "status=" (the old weak marker) but not the Spring Whitelabel
+// phrases is no longer reported.
+func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/error" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><body>request failed with status=500</body></html>`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a generic error page without the Spring Whitelabel phrases must not yield a finding")
+}
+
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

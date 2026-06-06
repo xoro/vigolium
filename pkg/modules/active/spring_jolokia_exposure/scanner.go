@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/jolokia",
 		name:        "Jolokia Agent",
-		markers:     []string{`"agent"`, `"protocol"`, `"config"`, "jolokia"},
+		markers:     [][]string{{`"agent"`, `"agentId"`}, {`"protocol"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia JMX agent exposed, providing HTTP access to Java Management Extensions with potential for sensitive data disclosure and remote operations",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/jolokia/list",
 		name:        "Jolokia MBean List",
-		markers:     []string{`"value"`, `"java.lang"`, `"type=Memory"`, `"type=Runtime"`},
+		markers:     [][]string{{`"value"`}, {`"java.lang"`, `"type=Memory"`, `"type=Runtime"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia MBean listing exposed, revealing all registered JMX MBeans including runtime, memory, and application-specific beans",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/jolokia/version",
 		name:        "Jolokia Version",
-		markers:     []string{`"agent"`, `"protocol"`, `"info"`},
+		markers:     [][]string{{`"agent"`, `"agentId"`}, {`"protocol"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Jolokia version endpoint exposed, revealing agent version and configuration details",
@@ -52,7 +52,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/jolokia",
 		name:        "Jolokia via Actuator",
-		markers:     []string{`"agent"`, `"protocol"`, `"config"`, "jolokia"},
+		markers:     [][]string{{`"agent"`, `"agentId"`}, {`"protocol"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia exposed through Spring Boot Actuator path, providing JMX access via actuator management interface",
@@ -60,7 +60,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/jolokia/list",
 		name:        "Jolokia MBean List via Actuator",
-		markers:     []string{`"value"`, `"java.lang"`, `"type=Memory"`},
+		markers:     [][]string{{`"value"`}, {`"java.lang"`, `"type=Memory"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia MBean listing exposed through actuator path, revealing all JMX beans",
@@ -239,15 +239,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

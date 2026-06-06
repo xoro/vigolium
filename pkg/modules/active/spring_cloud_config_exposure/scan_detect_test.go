@@ -57,6 +57,32 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host that 404s all config paths must not yield a finding")
 }
 
+// TestScanPerRequest_WeakMarkerNoFalsePositive ensures a 200 JSON response that
+// carries only the old weak single substrings ("name"/"status") but lacks the
+// propertySources envelope is no longer reported. The old OR-any matcher fired on
+// a bare "name"; the strengthened matcher requires the structural anchor.
+func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/application/default" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"name":"app","status":"UP","label":"main"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "weak markers without the propertySources envelope must not yield a finding")
+}
+
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

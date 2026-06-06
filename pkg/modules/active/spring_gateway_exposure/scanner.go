@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/gateway/routes",
 		name:        "Gateway Routes",
-		markers:     []string{`"route_id"`, `"uri"`, `"predicate"`, `"route_definition"`},
+		markers:     [][]string{{`"route_id"`, `"route_definition"`}, {`"uri"`, `"predicate"`, `"filters"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Spring Cloud Gateway routes exposed, revealing internal service URLs, routing predicates, and backend topology",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/gateway/globalfilters",
 		name:        "Gateway Global Filters",
-		markers:     []string{`"order"`, "Filter", "filter", "Gateway"},
+		markers:     [][]string{{"cloud.gateway", "GatewayFilter", "WebFilter"}, {`"order"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Spring Cloud Gateway global filters exposed, revealing security filter chain and processing pipeline",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/gateway/routefilters",
 		name:        "Gateway Route Filters",
-		markers:     []string{"Filter", "filter", "AddRequestHeader", "RewritePath", "StripPrefix"},
+		markers:     [][]string{{"AddRequestHeader", "RewritePath", "StripPrefix", "GatewayFilterFactory", "cloud.gateway"}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Spring Cloud Gateway route filter definitions exposed, revealing available filter configurations",
@@ -223,15 +223,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 

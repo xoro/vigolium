@@ -57,3 +57,83 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res, "a host that 404s all actuator paths must not yield a finding")
 }
+
+// TestScanPerRequest_KeycloakMessageBundleNoFalsePositive reproduces the reported
+// false positive: a Keycloak-style i18n resource handler that serves the same
+// application/json message bundle for every path. The bundle contains the bare
+// words the old matchers keyed on ("status", "scope", an "...Beans" key) but
+// none of the actuator-specific JSON shapes, so detection must not fire.
+func TestScanPerRequest_KeycloakMessageBundleNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	const bundle = `[{"key":"status","value":"Status"},` +
+		`{"key":"scope","value":"Scope"},` +
+		`{"key":"clientScope","value":"Client scope"},` +
+		`{"key":"adminBeans","value":"Admin Beans"},` +
+		`{"key":"loginStatus","value":"UP"},` +
+		`{"key":"effectiveMessageBundlesHelp","value":"You can search for effective message bundles."}]`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(bundle))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/auth/resources/master/admin/health")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a Keycloak i18n message bundle must not be reported as a Spring actuator endpoint")
+}
+
+// TestScanPerRequest_SubDirCatchAllSuppressed ensures the sibling-path guard
+// rejects a catch-all handler scoped to a sub-directory prefix: every child of
+// /auth/resources/master/admin/ returns an actuator-shaped health body, so even
+// though the marker matches, a guaranteed-nonexistent sibling under the same
+// directory returns the same body and the finding is dropped. The root-scoped
+// soft-404 probe cannot catch this because the catch-all only fires under the
+// prefix.
+func TestScanPerRequest_SubDirCatchAllSuppressed(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/auth/resources/master/admin/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"UP","components":{"db":{"status":"UP"}}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/auth/resources/master/admin/health")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a sub-directory catch-all that returns actuator JSON for every child path must be suppressed")
+}
+
+// TestScanPerRequest_RealHealthAtSinglePath confirms the sibling guard does NOT
+// suppress a genuine actuator: only /health returns the status body, while a
+// random sibling 404s, so the finding survives.
+func TestScanPerRequest_RealHealthAtSinglePath(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/health") {
+			w.Header().Set("Content-Type", "application/vnd.spring-boot.actuator.v3+json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"UP","groups":["liveness","readiness"]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/api/v1/users")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a real /health actuator returning a status body must still be detected")
+}

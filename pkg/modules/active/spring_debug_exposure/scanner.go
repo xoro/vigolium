@@ -18,7 +18,7 @@ import (
 type probe struct {
 	path        string
 	name        string
-	markers     []string
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -28,7 +28,7 @@ var probes = []probe{
 	{
 		path:        "/error",
 		name:        "Whitelabel Error Page",
-		markers:     []string{"Whitelabel Error Page", "There was an unexpected error", "status="},
+		markers:     [][]string{{"Whitelabel Error Page", "There was an unexpected error"}},
 		antiMarkers: []string{"404", "nginx", "Apache"},
 		sev:         severity.Low,
 		desc:        "Spring Boot Whitelabel Error Page is enabled, confirming Spring Boot is running and may reveal version information",
@@ -36,7 +36,7 @@ var probes = []probe{
 	{
 		path:        "/error?trace=true",
 		name:        "Whitelabel Error with Stack Trace",
-		markers:     []string{"org.springframework", "at java.", "at org.", "Caused by:", ".java:"},
+		markers:     [][]string{{".java:", "Caused by:", "Exception"}, {"at java.", "at org.", "at com.", "org.springframework"}},
 		antiMarkers: []string{},
 		sev:         severity.Medium,
 		desc:        "Spring Boot Whitelabel Error Page returns full stack traces when trace parameter is provided, revealing internal packages, libraries, and code paths",
@@ -44,7 +44,7 @@ var probes = []probe{
 	{
 		path:        "/error?message=true&trace=true",
 		name:        "Whitelabel Error with Message and Trace",
-		markers:     []string{"org.springframework", "Exception", "Caused by:"},
+		markers:     [][]string{{"Caused by:", "Exception"}, {"org.springframework", ".java:", "at java."}},
 		antiMarkers: []string{},
 		sev:         severity.Medium,
 		desc:        "Spring Boot error page returns detailed error messages and stack traces",
@@ -52,7 +52,7 @@ var probes = []probe{
 	{
 		path:        "/.~~spring-boot!~/restart",
 		name:        "Spring DevTools Remote Restart",
-		markers:     []string{"status", "restart", "spring"},
+		markers:     [][]string{{"restart"}, {"spring"}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Spring Boot DevTools remote restart endpoint is accessible, potentially allowing remote application restart and configuration manipulation",
@@ -60,7 +60,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/startup",
 		name:        "Actuator Startup Events",
-		markers:     []string{`"timeline"`, `"startupStep"`, `"spring.boot"`, `"spring.beans"`},
+		markers:     [][]string{{`"startupStep"`, `"timeline"`}, {`"startupStep"`, `"spring.boot"`, `"spring.beans"`, `"duration"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Spring Boot startup events endpoint exposed, revealing application initialization details, bean creation order, and timing data",
@@ -68,7 +68,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/conditions",
 		name:        "Actuator Auto-Configuration Report",
-		markers:     []string{`"positiveMatches"`, `"negativeMatches"`, `"unconditionalClasses"`},
+		markers:     [][]string{{`"positiveMatches"`, `"negativeMatches"`, `"unconditionalClasses"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Spring Boot auto-configuration conditions endpoint exposed, revealing which configurations are active and why",
@@ -76,7 +76,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/scheduledtasks",
 		name:        "Actuator Scheduled Tasks",
-		markers:     []string{`"cron"`, `"fixedDelay"`, `"fixedRate"`, `"target"`},
+		markers:     [][]string{{`"cron"`, `"fixedDelay"`, `"fixedRate"`}, {`"target"`, `"runnable"`, `"expression"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Low,
 		desc:        "Spring Boot scheduled tasks endpoint exposed, revealing internal task scheduling and method names",
@@ -84,7 +84,7 @@ var probes = []probe{
 	{
 		path:        "/actuator/caches",
 		name:        "Actuator Caches",
-		markers:     []string{`"cacheManagers"`, `"caches"`, `"target"`},
+		markers:     [][]string{{`"cacheManagers"`}, {`"caches"`, `"cacheManager"`, `"target"`}},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Low,
 		desc:        "Spring Boot caches endpoint exposed, revealing cache manager configuration and cache names",
@@ -263,15 +263,19 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
+	matchedMarkers, ok := modkit.MatchAllGroups(body, p.markers)
+	if !ok {
+		return nil
 	}
-	if !matched {
+
+	// Sub-directory catch-all guard: drop the finding if a guaranteed-nonexistent
+	// sibling under the same parent directory returns the same markers (a catch-all
+	// handler that 200s every child path). Root-level probes are already covered by
+	// the random-path 404 fingerprint above, so this is a no-op for them.
+	if modkit.SiblingPathCatchAll(ctx, httpClient, p.path, func(b string) bool {
+		_, ok := modkit.MatchAllGroups(b, p.markers)
+		return ok
+	}) {
 		return nil
 	}
 
