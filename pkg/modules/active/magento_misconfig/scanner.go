@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -14,6 +15,11 @@ import (
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
+
+// deployedVersionPattern matches the bare version token Magento writes to
+// /static/deployed_version.txt — a Unix timestamp or build hash, a single
+// whitespace-free token. Prose/HTML/JSON (which contain spaces) won't match.
+var deployedVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type probe struct {
 	path        string
@@ -120,9 +126,12 @@ var probes = []probe{
 	},
 	// Static version endpoint
 	{
-		path:        "/static/deployed_version.txt",
-		name:        "Magento Deployed Version",
-		markers:     []string{"."},
+		path: "/static/deployed_version.txt",
+		name: "Magento Deployed Version",
+		// No substring marker: the file holds a bare version token (a Unix
+		// timestamp or build hash), validated structurally in probeFile. The
+		// previous "." marker matched every non-empty body.
+		markers:     []string{},
 		antiMarkers: []string{"<html", "<!DOCTYPE", "404 Not Found"},
 		sev:         severity.Info,
 		desc:        "Magento deployed version file accessible, confirming Magento installation",
@@ -329,10 +338,25 @@ func (m *Module) probeFile(
 
 	matched := false
 	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+	if len(p.markers) == 0 {
+		// Markerless probes need structural validation, not substring matching.
+		switch p.path {
+		case "/static/deployed_version.txt":
+			trimmed := strings.TrimSpace(body)
+			if len(trimmed) == 0 || len(trimmed) > 64 || !deployedVersionPattern.MatchString(trimmed) {
+				return nil
+			}
 			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
+			matchedMarkers = append(matchedMarkers, "deployed version: "+trimmed)
+		default:
+			return nil
+		}
+	} else {
+		for _, marker := range p.markers {
+			if strings.Contains(body, marker) {
+				matched = true
+				matchedMarkers = append(matchedMarkers, marker)
+			}
 		}
 	}
 	if !matched {

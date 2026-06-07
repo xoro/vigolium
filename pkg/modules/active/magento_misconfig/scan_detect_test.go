@@ -75,6 +75,57 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no exposed Magento files must not yield a finding")
 }
 
+// TestScanPerRequest_DeployedVersionConfirmed serves a real Magento
+// deployed_version.txt (a bare timestamp token) and asserts the Info finding
+// fires on the version-token shape.
+func TestScanPerRequest_DeployedVersionConfirmed(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/static/deployed_version.txt" {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("1530000000"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>store</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected an Info finding when deployed_version.txt holds a version token")
+	assert.True(t, strings.Contains(res[0].Info.Name, "Deployed Version"))
+}
+
+// TestScanPerRequest_DeployedVersionGenericBodyNoFalsePositive reproduces the
+// "." marker false positive: a small non-version 200 text body (prose with
+// spaces) on the version path must not yield a finding. The old "." marker
+// matched any non-empty body; the version-token regex rejects whitespace-laden
+// prose.
+func TestScanPerRequest_DeployedVersionGenericBodyNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/static/deployed_version.txt" {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = w.Write([]byte("Welcome to our store homepage"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("not found"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html><body>store</body></html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a non-version text body on deployed_version.txt must not yield a finding")
+}
+
 // TestCanProcess covers the custom CanProcess gate: a request needs a response.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

@@ -55,6 +55,33 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no exposed health endpoints must not yield a finding")
 }
 
+// TestScanPerRequest_GenericStatusJSONNoFalsePositive guards the marker
+// tightening: a generic JSON API at /health that merely contains a "status"
+// key (but no Healthy/Unhealthy/Degraded health-state value) must not be
+// reported. The old marker set listed bare "status"/"entries", which matched
+// any JSON status endpoint.
+func TestScanPerRequest_GenericStatusJSONNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" || r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"running","entries":42,"uptime":12345}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("404 page not found - unique-baseline-marker"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "<html>home</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a generic JSON status endpoint without a health-state value must not be reported")
+}
+
 // TestCanProcess_RequiresResponse verifies the module only runs with a baseline response.
 func TestCanProcess_RequiresResponse(t *testing.T) {
 	t.Parallel()

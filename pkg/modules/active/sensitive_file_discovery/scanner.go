@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"regexp"
 	"strings"
 
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -14,6 +15,12 @@ import (
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
+
+// envAssignmentPattern matches a genuine dotenv KEY=VALUE assignment line
+// (uppercase env-style key at line start, optionally `export`-prefixed). It
+// gates the Critical .env findings: a bare "=" marker matched any non-HTML body
+// (JSON, CSS, config) that happened to contain an equals sign.
+var envAssignmentPattern = regexp.MustCompile(`(?m)^[ \t]*(?:export[ \t]+)?[A-Z][A-Z0-9_]+[ \t]*=`)
 
 // notFoundFingerprint stores characteristics of a custom 404 page.
 type notFoundFingerprint struct {
@@ -240,6 +247,21 @@ func (m *Module) probeFile(
 			matchedMarkers = append(matchedMarkers, marker)
 		}
 	}
+
+	// .env files: confirm on a genuine KEY=VALUE assignment line. The credential
+	// markers above (DB_, SECRET, …) only corroborate — a real .env may use
+	// app-specific keys, while a non-env body that merely contains "SECRET" in
+	// prose must not forge a Critical finding. The assignment pattern is the gate.
+	if strings.HasPrefix(sf.path, "/.env") {
+		if !envAssignmentPattern.MatchString(body) {
+			return nil
+		}
+		matched = true
+		if len(matchedMarkers) == 0 {
+			matchedMarkers = append(matchedMarkers, "env assignment (KEY=VALUE)")
+		}
+	}
+
 	if !matched {
 		return nil
 	}

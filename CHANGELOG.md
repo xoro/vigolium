@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.25-beta] - 2026-06-07
+
+A false-positive-reduction release hardening the endpoint- and file-exposure modules against generic markers and reflected error pages.
+
+### Changed
+
+- **Rails Active Storage / Action Mailbox probe** — confirms OPTIONS endpoints only on a 2xx `Allow: POST` header (no longer body-matching `"Allow"`/`"POST"`, which forged findings from nginx `405 Not Allowed` pages), and rejects blanket-OPTIONS hosts, CORS preflights, and WAF/rate-limit pages.
+- **Marker hardening** — `.env` files now require a real `KEY=VALUE` line (was bare `"="`), Magento `deployed_version.txt` a valid version token (was `"."`), and ASP.NET health checks an actual health-state word (was generic JSON keys).
+
 ## [v0.1.24-beta] - 2026-06-07
 
 A false-positive-reduction and severity-recalibration release: per-template severity overrides for known-issue scan, decode-confirmed LFI and marker-confirmed WordPress detection, right-sized passive DOM-XSS severities, and a fix for response bodies being dropped from stored known-issue findings.

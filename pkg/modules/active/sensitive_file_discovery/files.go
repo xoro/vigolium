@@ -32,7 +32,7 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/.env",
 		name:        "Environment File",
-		markers:     []string{"=", "DB_", "API_", "SECRET", "KEY", "PASSWORD", "TOKEN"},
+		markers:     []string{"DB_", "API_", "SECRET", "KEY", "PASSWORD", "TOKEN"},
 		antiMarkers: []string{"<html", "<HTML", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Environment configuration file exposed, potentially containing credentials and API keys",
@@ -40,7 +40,7 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/.env.local",
 		name:        "Local Environment File",
-		markers:     []string{"=", "DB_", "API_", "SECRET", "KEY"},
+		markers:     []string{"DB_", "API_", "SECRET", "KEY"},
 		antiMarkers: []string{"<html", "<HTML", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Local environment file exposed with potential secrets",
@@ -48,7 +48,7 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/.env.production",
 		name:        "Production Environment File",
-		markers:     []string{"=", "DB_", "API_", "SECRET", "KEY"},
+		markers:     []string{"DB_", "API_", "SECRET", "KEY"},
 		antiMarkers: []string{"<html", "<HTML", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Production environment file exposed with potential secrets",
@@ -280,7 +280,7 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/.env.bak",
 		name:        "Environment Backup",
-		markers:     []string{"=", "DB_", "API_", "SECRET", "KEY"},
+		markers:     []string{"DB_", "API_", "SECRET", "KEY"},
 		antiMarkers: []string{"<html", "<HTML", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Environment backup file exposed with potential secrets",
@@ -288,7 +288,7 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/.env.old",
 		name:        "Old Environment File",
-		markers:     []string{"=", "DB_", "API_", "SECRET", "KEY"},
+		markers:     []string{"DB_", "API_", "SECRET", "KEY"},
 		antiMarkers: []string{"<html", "<HTML", "<!DOCTYPE"},
 		sev:         severity.Critical,
 		desc:        "Old environment file exposed with potential secrets",

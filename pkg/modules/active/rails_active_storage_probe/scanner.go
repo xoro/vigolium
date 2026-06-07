@@ -6,14 +6,30 @@ import (
 	"math"
 	"strings"
 
+	httputil "github.com/projectdiscovery/utils/http"
+
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
+
+// railsBodyMarkers are genuine Rails framework references. They corroborate an
+// OPTIONS finding (they never gate it) and confirm the GET blob-route finding.
+// Matched against the echo-stripped body so a reflected request path can't forge
+// them — the probe paths themselves contain "active_storage"/"action_mailbox".
+var railsBodyMarkers = []string{
+	"ActiveStorage",
+	"Active Storage",
+	"ActionMailbox",
+	"Action Mailbox",
+	"ActionDispatch",
+	"ActionController",
+}
 
 type notFoundFingerprint struct {
 	bodyHash string
@@ -73,6 +89,14 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
+	// Detect blanket OPTIONS handlers before probing. If a guaranteed-nonexistent
+	// path answers OPTIONS with 200/204 + Allow:POST (or a generic CORS preflight),
+	// the host responds to OPTIONS uniformly on every path and OPTIONS-based
+	// evidence is meaningless here.
+	if m.detectBlanketOptions(ctx, httpClient) {
+		return nil, nil
+	}
+
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
@@ -83,6 +107,54 @@ func (m *Module) ScanPerRequest(
 	}
 
 	return results, nil
+}
+
+// detectBlanketOptions sends OPTIONS to a random non-Rails path. A host whose
+// reverse proxy / API gateway / CORS middleware answers OPTIONS uniformly (Allow
+// with POST, or an Access-Control-Allow-* preflight) would yield a finding on
+// every probe path, so OPTIONS evidence is discarded for the whole host.
+func (m *Module) detectBlanketOptions(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+) bool {
+	randomPath := "/vigolium-not-rails-" + utils.RandomString(12)
+
+	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "OPTIONS")
+	if err != nil {
+		return false
+	}
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, randomPath)
+	if err != nil {
+		return false
+	}
+
+	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
+	if err != nil {
+		return false
+	}
+	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+	if err != nil {
+		return false
+	}
+	defer resp.Close()
+
+	if resp.Response() == nil {
+		return false
+	}
+
+	if resp.Response().StatusCode == 200 || resp.Response().StatusCode == 204 {
+		allow := resp.Response().Header.Get("Allow")
+		if allow != "" && strings.Contains(strings.ToUpper(allow), "POST") {
+			return true
+		}
+		if isCORSPreflightResponse(resp) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *Module) fingerprint404(
@@ -151,11 +223,17 @@ func (m *Module) probeEndpoint(
 	}
 
 	status := resp.Response().StatusCode
-	// Reject responses that aren't evidence of the route — 404 means absent;
-	// 401/403 are generic auth/WAF gates; 429 is rate-limit; 5xx are upstream/CDN
-	// errors (incl. Cloudflare 520-526). None of these confirm the endpoint exists.
-	if status == 404 || status == 401 || status == 403 || status == 429 ||
-		(status >= 500 && status <= 599) {
+	// Reject responses that never reached — or were rejected by — the Rails route:
+	//   404            route absent
+	//   405            method not allowed; OPTIONS isn't handled here. This is the
+	//                  production false-positive status: an nginx "405 Not Allowed"
+	//                  page literally contains "Allow" inside "Not Allowed".
+	//   401/403        generic auth / WAF gates
+	//   5xx            upstream / CDN errors (incl. Cloudflare 520-526)
+	//   blocked        rate-limit / vendor challenge pages (429/408/425/451, …)
+	// None of these confirm the endpoint exists.
+	if status == 404 || status == 405 || status == 401 || status == 403 ||
+		status >= 500 || isBlockedOrThrottled(resp) {
 		return nil
 	}
 
@@ -174,74 +252,73 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
-	for _, anti := range p.antiMarkers {
-		if strings.Contains(body, anti) {
-			return nil
-		}
-	}
-
-	// OPTIONS probes: check Allow header for POST method
-	if p.method == "OPTIONS" {
-		allowHeader := resp.Response().Header.Get("Allow")
-		if allowHeader != "" && strings.Contains(strings.ToUpper(allowHeader), "POST") {
-			// Found - endpoint accepts POST
-		} else {
-			// Check body/headers for markers as fallback
-			matched := false
-			for _, marker := range p.markers {
-				if strings.Contains(body, marker) {
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				return nil
-			}
-		}
-	}
-
-	// GET probes with no markers: check for indicators the route exists
-	if p.method == "GET" && len(p.markers) == 0 {
-		if status == 301 || status == 302 {
-			// Redirect indicates the route exists
-		} else if strings.Contains(body, "ActiveStorage") || strings.Contains(body, "ActionMailbox") {
-			// Body contains Rails framework indicators
-		} else if status == 200 {
-			// 200 response on a known route is sufficient
-		} else {
-			return nil
-		}
-	}
-
-	// GET probes with markers: require marker match
-	if p.method == "GET" && len(p.markers) > 0 {
-		matched := false
-		for _, marker := range p.markers {
-			if strings.Contains(body, marker) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return nil
-		}
-	}
-
 	urlx, _ := ctx.URL()
 	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
 
-	var matchedMarkers []string
-	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
-			matchedMarkers = append(matchedMarkers, marker)
+	// Strip any echo of the request target before scanning the body for markers.
+	// Error / 404 / throttle pages routinely reflect the requested URL, and every
+	// probe path contains "active_storage"/"action_mailbox" — a reflected target
+	// must not be mistaken for genuine framework content.
+	scanBody := stripEcho(body, p.path, targetURL)
+
+	for _, anti := range p.antiMarkers {
+		if strings.Contains(scanBody, anti) {
+			return nil
 		}
 	}
-	// Also check Allow header for matched markers on OPTIONS probes
-	if p.method == "OPTIONS" {
-		allowHeader := resp.Response().Header.Get("Allow")
-		if allowHeader != "" && strings.Contains(strings.ToUpper(allowHeader), "POST") {
-			matchedMarkers = append(matchedMarkers, "Allow: "+allowHeader)
+
+	var evidence []string
+
+	switch p.method {
+	case "OPTIONS":
+		// Direct-upload and mail-ingress endpoints are POST-only API routes with
+		// no rendered body. A generic CORS preflight (Access-Control-Allow-* with
+		// no Allow header) is the API-gateway / proxy reply to OPTIONS on *any*
+		// path — it proves a CORS responder exists, not that the Rails route is
+		// mounted.
+		if isCORSPreflightResponse(resp) {
+			return nil
 		}
+		// Only a 2xx OPTIONS advertising POST via the standard Allow *header*
+		// confirms a live Rails route. We never match "POST"/"Allow" as body
+		// substrings: that is the exact bug that flagged nginx "405 Not Allowed"
+		// pages (which contain "Allow" inside "Not Allowed").
+		if status != 200 && status != 204 {
+			return nil
+		}
+		allowHeader := resp.Response().Header.Get("Allow")
+		if allowHeader == "" || !strings.Contains(strings.ToUpper(allowHeader), "POST") {
+			return nil
+		}
+		evidence = append(evidence, "Allow: "+allowHeader)
+		// Surface any genuine Rails reference in the body as corroboration
+		// (does not gate the finding).
+		for _, marker := range railsBodyMarkers {
+			if strings.Contains(scanBody, marker) {
+				evidence = append(evidence, "Body: "+marker)
+				break
+			}
+		}
+	case "GET":
+		// Blob routes: confirm on a real redirect to a stored object (the genuine
+		// Active Storage behavior) or on actual framework body content — never on a
+		// bare 200, which SPA/landing pages return for every path.
+		if status == 301 || status == 302 {
+			loc := resp.Response().Header.Get("Location")
+			if loc != "" && !strings.Contains(loc, p.path) {
+				evidence = append(evidence, "Redirect: "+loc)
+			}
+		}
+		for _, marker := range p.markers {
+			if strings.Contains(scanBody, marker) {
+				evidence = append(evidence, "Body: "+marker)
+			}
+		}
+		if len(evidence) == 0 {
+			return nil
+		}
+	default:
+		return nil
 	}
 
 	return &output.ResultEvent{
@@ -249,7 +326,7 @@ func (m *Module) probeEndpoint(
 		Matched:          targetURL,
 		Request:          string(modifiedRaw),
 		Response:         resp.FullResponseString(),
-		ExtractedResults: matchedMarkers,
+		ExtractedResults: evidence,
 		Info: output.Info{
 			Name:        fmt.Sprintf("Rails Endpoint Exposed: %s", p.name),
 			Description: p.desc,
@@ -259,4 +336,58 @@ func (m *Module) probeEndpoint(
 			Reference:   []string{"https://guides.rubyonrails.org/active_storage_overview.html", "https://guides.rubyonrails.org/action_mailbox_basics.html"},
 		},
 	}
+}
+
+// isBlockedOrThrottled reports whether a probe response came from a rate
+// limiter, WAF/CDN edge, or server error rather than the Rails application.
+// Such responses never exercised the route, so their bodies (often error pages
+// that reflect the requested path) cannot confirm exposure.
+func isBlockedOrThrottled(resp *httputil.ResponseChain) bool {
+	if resp == nil || resp.Response() == nil {
+		return false
+	}
+	// Vendor-aware detector (Cloudflare, Akamai, CloudFront, Incapsula, AWS ELB)
+	// plus the generic rate-limit cases.
+	if infra.GetBlockDetectionValidator().Validate(resp) != nil {
+		return true
+	}
+	switch resp.Response().StatusCode {
+	case 408, // request timeout
+		425, // too early
+		429, // too many requests
+		451: // unavailable for legal reasons (edge block)
+		return true
+	}
+	return false
+}
+
+// isCORSPreflightResponse reports whether resp is a generic CORS preflight reply
+// rather than a real Rails route. API gateways and reverse proxies (AWS API
+// Gateway, Cloudflare, nginx) answer OPTIONS for every path with an empty 204/200
+// carrying Access-Control-Allow-* headers and no standard Allow header. A real
+// Rails route answering OPTIONS sets the Allow header, so its presence rules out
+// a preflight.
+func isCORSPreflightResponse(resp *httputil.ResponseChain) bool {
+	if resp == nil || resp.Response() == nil {
+		return false
+	}
+	h := resp.Response().Header
+	if h.Get("Access-Control-Allow-Origin") == "" && h.Get("Access-Control-Allow-Methods") == "" {
+		return false
+	}
+	return h.Get("Allow") == ""
+}
+
+// stripEcho removes occurrences of the requested path and full URL from the body.
+// Reflected request targets are common on WAF, rate-limit, and 404 pages; because
+// every probe path contains "active_storage"/"action_mailbox", an echoed target
+// would masquerade as genuine framework content.
+func stripEcho(body, path, fullURL string) string {
+	out := body
+	for _, echo := range []string{fullURL, path} {
+		if echo != "" {
+			out = strings.ReplaceAll(out, echo, "")
+		}
+	}
+	return out
 }

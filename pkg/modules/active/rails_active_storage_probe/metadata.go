@@ -15,15 +15,20 @@ uploads, and Action Mailbox ingress endpoints that may accept unauthorized email
 Also checks for publicly accessible Active Storage blob routes.
 
 ## Notes
-- Uses OPTIONS requests for direct upload endpoint to check allowed methods
-- Probes Action Mailbox ingress paths for multiple email providers
-- Fingerprints 404 responses to avoid false positives
+- OPTIONS-based ingress probes confirm only on a 2xx Allow header advertising
+  POST — never on a body substring (an nginx "405 Not Allowed" page contains
+  "Allow"), and never on a 405 / 404 / auth-gate / WAF-blocked reply
+- Detects blanket-OPTIONS hosts (proxies / API gateways / CORS middleware that
+  answer OPTIONS uniformly) and CORS-preflight replies, and discards their
+  OPTIONS evidence
+- Fingerprints 404 responses and strips reflected request targets to avoid
+  false positives
 
 ## References
 - https://guides.rubyonrails.org/active_storage_overview.html
 - https://guides.rubyonrails.org/action_mailbox_basics.html`
 
-	ModuleConfirmation = "Confirmed when Active Storage or Action Mailbox endpoints respond with expected behavior"
+	ModuleConfirmation = "Confirmed when an Active Storage / Action Mailbox OPTIONS probe returns a 2xx Allow header advertising POST, or a blob route redirects to a stored object"
 	ModuleSeverity     = severity.Medium
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"rails", "ruby", "misconfiguration", "file-exposure", "light"}
