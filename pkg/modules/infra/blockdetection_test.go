@@ -118,3 +118,36 @@ func TestValidate_ChallengeAndBlockPages(t *testing.T) {
 		})
 	}
 }
+
+// TestIsErrorSurfaceStatus pins the companion gate to IsBlockedResponse: it
+// rejects the no-handler-ran statuses (404 + any 3xx) that let a catch-all/SPA
+// 404 shell or a redirect interstitial feed page noise into a body-matching
+// module, while accepting the statuses on which a genuine server-side leak can
+// ride (2xx, 5xx, and non-404 4xx like 400/422 the app returns with output).
+func TestIsErrorSurfaceStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   bool
+	}{
+		{200, true},
+		{201, true},
+		{400, true},
+		{422, true},
+		{500, true},
+		{502, true},
+		{404, false},
+		{301, false},
+		{302, false},
+		{307, false},
+		{308, false},
+	}
+	for _, c := range cases {
+		rc := fillResponseChain(t, c.status, nil, "body")
+		if got := IsErrorSurfaceStatus(rc); got != c.want {
+			t.Errorf("IsErrorSurfaceStatus(%d) = %v, want %v", c.status, got, c.want)
+		}
+	}
+	if IsErrorSurfaceStatus(nil) {
+		t.Error("IsErrorSurfaceStatus(nil) = true, want false")
+	}
+}

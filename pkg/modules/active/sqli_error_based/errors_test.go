@@ -94,3 +94,49 @@ func TestCheckBodyContainsErrorMsg_TiDBBoundaries(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckBodyContainsErrorMsg_CockroachBoundaries pins the tightened CockroachDB
+// patterns: the bare "CockroachDB" token must still match a genuine error leak but
+// must NOT match when it is glued inside ordinary page content — the motivating
+// false positive was a Salesforce community 404 shell whose inline feature-flag
+// list carried "...userHasCockroachDBEnabled...".
+func TestCheckBodyContainsErrorMsg_CockroachBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantHit bool
+	}{
+		{
+			name:    "standalone CockroachDB error matches",
+			body:    `pq: syntax error at or near ")" (CockroachDB v23.1)`,
+			wantHit: true,
+		},
+		{
+			name:    "crdb_internal reference matches",
+			body:    `ERROR: relation "crdb_internal.zones" does not exist`,
+			wantHit: true,
+		},
+		{
+			name:    "node-readiness error matches",
+			body:    `node is not ready to accept SQL clients`,
+			wantHit: true,
+		},
+		{
+			name:    "CockroachDB glued inside a feature-flag name does not match",
+			body:    `"UnifiedAnalytics.userHasCockroachDBEnabled":false,"x":1`,
+			wantHit: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dbName, _, hit := checkBodyContainsErrorMsg(tt.body)
+			if hit != tt.wantHit {
+				t.Errorf("hit = %v, want %v (db=%q)", hit, tt.wantHit, dbName)
+			}
+			if hit && dbName != "CockroachDB" {
+				t.Errorf("dbName = %q, want %q", dbName, "CockroachDB")
+			}
+		})
+	}
+}

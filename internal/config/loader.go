@@ -191,9 +191,11 @@ func LoadSettings(configPath string) (*Settings, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Install the configured global User-Agent so every scan phase that resolves
-	// httpmsg.DefaultUserAgent() at request time picks it up. Empty is a no-op,
-	// preserving the built-in Chrome default.
+	// Install the configured global User-Agent selector so every scan phase that
+	// resolves httpmsg.DefaultUserAgent() at request time picks it up. The
+	// selector is "preset" (default, self-identifying string), "random"/"" (a
+	// rotating browser string), or a literal; VIGOLIUM_DEFAULT_UA still wins at
+	// resolution time.
 	httpmsg.SetDefaultUserAgent(settings.ScanningStrategy.HTTP.UserAgent)
 
 	return &settings, nil

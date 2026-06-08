@@ -214,7 +214,14 @@ var (
 			regexp.MustCompile(`\[(Virtuoso Driver|Virtuoso iODBC Driver)\]\[Virtuoso Server\]`),
 		},
 		"CockroachDB": {
-			regexp.MustCompile(`(?i)(?:node is not ready|CockroachDB|crdb_internal)`),
+			// "CockroachDB" is a short, context-free token that appears verbatim in
+			// ordinary page content — e.g. a Salesforce community 404 shell whose
+			// inline feature-flag list carries "...userHasCockroachDBEnabled...",
+			// which matched the bare token and was reported as Critical/Certain SQLi.
+			// Anchor the name (and crdb_internal) to word boundaries and require the
+			// node-readiness phrase in its SQL-client form, so only a genuine error
+			// leak — where the token stands alone — matches, never a glued substring.
+			regexp.MustCompile(`(?i)(?:node is not ready to accept|\bCockroachDB\b|\bcrdb_internal\b)`),
 		},
 		"YugabyteDB": {
 			regexp.MustCompile(`(?i)(?:com\.yugabyte|YBClient|yb_catalog)`),

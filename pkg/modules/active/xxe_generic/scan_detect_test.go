@@ -42,7 +42,36 @@ func TestScanPerRequest_DetectsXXE(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected an XXE finding when /etc/passwd is reflected")
-	assert.Contains(t, res[0].ExtractedResults, "root:")
+	// The extracted marker is now the structural passwd root line (uid:gid 0:0),
+	// not a bare "root:" substring.
+	assert.Contains(t, res[0].ExtractedResults[0], "root:x:0:0:")
+}
+
+// TestScanPerRequest_NotFoundShellNotXXE reproduces the false-positive class that
+// motivated the status gate and the structural passwd marker: a catch-all/SPA
+// 404 shell whose inline CSS carries a custom property like "--dxp-g-root:" (so a
+// bare "root:" substring is present) must NOT be reported as an /etc/passwd read.
+// Two independent guards suppress it — the 404 is not an error surface, and
+// "--dxp-g-root:" does not match the "root:...:0:0:" passwd shape.
+func TestScanPerRequest_NotFoundShellNotXXE(t *testing.T) {
+	t.Parallel()
+	const sfdcShell = `<!DOCTYPE html><html><head><style>:root{` +
+		`--dxp-g-root:var(--lwc-dxpGRoot,#FFFFFF);` +
+		`--dxp-g-root-contrast:var(--lwc-dxpGRootContrast,#4f4f4f)}` +
+		`</style></head><body>Page Not Found</body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html;charset=UTF-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, sfdcShell)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "POST", srv.URL+"/api/orders", seedXML)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 404 catch-all shell containing a --dxp-g-root: CSS var must not be reported as XXE")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a hardened parser that never

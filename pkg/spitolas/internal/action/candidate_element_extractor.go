@@ -252,12 +252,31 @@ func (e *CandidateElementExtractor) extractFromFrames(ctx context.Context, page 
 			continue
 		}
 
-		// Recursively extract from this frame
-		frameCandidates := e.extractFromPageAndFrames(ctx, fi.Page, seen, framePath)
+		// Recursively extract from this frame, guarded against go-rod panicking
+		// on a frame that went cross-origin/detached mid-crawl (nil
+		// ContentDocument in getJSCtxID). The browser wrappers already convert
+		// these to errors, but this is a per-frame backstop so a single bad
+		// frame can never abort the whole crawl.
+		frameCandidates := e.safeExtractFrame(ctx, fi.Page, seen, framePath)
 		candidates = append(candidates, frameCandidates...)
 	}
 
 	return candidates
+}
+
+// safeExtractFrame wraps frame extraction in a panic recovery so a go-rod nil
+// dereference on a cross-origin/detached frame is contained to that frame
+// instead of crashing the entire scan.
+func (e *CandidateElementExtractor) safeExtractFrame(ctx context.Context, page *browser.Page, seen map[string]bool, framePath string) (candidates []*CandidateElement) {
+	defer func() {
+		if r := recover(); r != nil {
+			zap.L().Debug("Recovered from panic during frame extraction (cross-origin/detached frame)",
+				zap.String("frame_path", framePath),
+				zap.Any("panic", r))
+			candidates = nil
+		}
+	}()
+	return e.extractFromPageAndFrames(ctx, page, seen, framePath)
 }
 
 // shouldIgnoreFrame checks if a frame should be ignored based on patterns.

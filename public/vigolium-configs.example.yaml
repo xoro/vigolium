@@ -58,7 +58,7 @@ server:
   # Optional license identifier surfaced in /server-info for the UI to display
   # (e.g., "community", "enterprise", or a customer/tenant tag).
   # Leave empty to omit from the response.
-  license: "self-hosted"
+  license: "open-source"
 
 # ============================================================================
 # Database Configuration
@@ -264,13 +264,32 @@ scanning_strategy:
   # harvesting). The browser-driven spidering phase uses its native Chromium
   # User-Agent and is not affected.
   http:
-    # User-Agent header sent on every outgoing scanner request. Leave empty to
-    # use the built-in Chrome-like string (recommended for WAF-bypass realism).
-    # The literal {version} is replaced with the running binary version, so the
-    # value stays correct across upgrades. An explicit `-H 'User-Agent: ...'`
-    # CLI flag still overrides this for the dynamic-assessment phase. Set with:
-    #   vigolium config set scanning_strategy.http.user_agent "Mozilla/5.0 (compatible; Vigolium/{version}; +https://github.com/vigolium/vigolium)"
-    user_agent: ""
+    # User-Agent header sent on every outgoing scanner request (modules that
+    # deliberately inject their own User-Agent — e.g. header-injection probes —
+    # keep theirs). Accepted values:
+    #   preset  -> "Mozilla/5.0 (compatible; Vigolium/{version}; +https://github.com/vigolium/vigolium)"
+    #              the honest, self-identifying default. {version} is replaced
+    #              with the running binary version, so it stays correct across
+    #              upgrades.
+    #   random  -> rotate a realistic browser User-Agent per request.
+    #   ""      -> blank behaves exactly like "random".
+    #   <any>   -> use the literal string verbatim ({version} still expands).
+    # An explicit `-H 'User-Agent: ...'` CLI flag still overrides this for the
+    # dynamic-assessment phase, and the VIGOLIUM_DEFAULT_UA env var overrides
+    # this config value when set. Set with:
+    #   vigolium config set scanning_strategy.http.user_agent preset
+    #   vigolium config set scanning_strategy.http.user_agent random
+    # ...or as a one-off, without touching this file:
+    #   export VIGOLIUM_DEFAULT_UA=random
+    #
+    # @NOTE: Yes, "preset" waves a tiny flag that says "hi, it's me, Vigolium" on
+    # every request, and that's on purpose. We'd rather the blue team spot us in
+    # the logs in 5 seconds than spend their evening chasing a "mystery actor"
+    # that turns out to be... their own authorized scan. If you want to go full
+    # ninja, flip it to "random", but then you also own the incident bridge at
+    # 3am. And if any of this surprised you, that's a gentle hint to go read the
+    # docs (we promise they're good): https://docs.vigolium.com/
+    user_agent: "preset"
 
   lite:
     external_harvesting: false

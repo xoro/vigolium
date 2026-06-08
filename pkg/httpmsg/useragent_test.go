@@ -1,36 +1,69 @@
 package httpmsg
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// reset restores the process-global UA state so each subtest is independent.
+// reset restores the process-global UA state to its package defaults so each
+// subtest is independent (uaOverride defaults to the "preset" selector).
 func reset() {
 	uaMu.Lock()
-	uaOverride = ""
+	uaOverride = UserAgentPreset
 	buildVersion = ""
 	uaMu.Unlock()
 }
 
-func TestDefaultUserAgent_BuiltinWhenUnset(t *testing.T) {
+func inRandomPool(ua string) bool {
+	for _, p := range randomUserAgentPool {
+		if p == ua {
+			return true
+		}
+	}
+	return false
+}
+
+func TestDefaultUserAgent_PresetIsDefault(t *testing.T) {
 	reset()
-	if got := DefaultUserAgent(); got != BuiltinUserAgent {
-		t.Fatalf("unset override: got %q, want builtin %q", got, BuiltinUserAgent)
+	SetBuildVersion("v9.9.9")
+	const want = "Mozilla/5.0 (compatible; Vigolium/v9.9.9; +https://github.com/vigolium/vigolium)"
+	if got := DefaultUserAgent(); got != want {
+		t.Fatalf("default (preset): got %q, want %q", got, want)
 	}
 }
 
-func TestSetDefaultUserAgent_EmptyIsNoOp(t *testing.T) {
+func TestDefaultUserAgent_PresetKeyword(t *testing.T) {
 	reset()
-	SetDefaultUserAgent("   ") // blank must not clobber the builtin default
-	if got := DefaultUserAgent(); got != BuiltinUserAgent {
-		t.Fatalf("blank override should be ignored: got %q, want %q", got, BuiltinUserAgent)
+	SetBuildVersion("v1.2.3")
+	SetDefaultUserAgent("  PRESET  ") // case-insensitive, whitespace-trimmed
+	const want = "Mozilla/5.0 (compatible; Vigolium/v1.2.3; +https://github.com/vigolium/vigolium)"
+	if got := DefaultUserAgent(); got != want {
+		t.Fatalf("preset keyword: got %q, want %q", got, want)
 	}
 }
 
-func TestSetDefaultUserAgent_OverrideWins(t *testing.T) {
+func TestDefaultUserAgent_RandomKeyword(t *testing.T) {
 	reset()
-	const ua = "Mozilla/5.0 (compatible; Vigolium; +https://github.com/vigolium/vigolium)"
+	SetDefaultUserAgent("random")
+	if got := DefaultUserAgent(); !inRandomPool(got) {
+		t.Fatalf("random keyword: got %q, want a value from the rotation pool", got)
+	}
+}
+
+func TestDefaultUserAgent_BlankIsRandom(t *testing.T) {
+	reset()
+	SetDefaultUserAgent("   ") // blank == random
+	if got := DefaultUserAgent(); !inRandomPool(got) {
+		t.Fatalf("blank selector: got %q, want a value from the rotation pool", got)
+	}
+}
+
+func TestSetDefaultUserAgent_LiteralOverrideWins(t *testing.T) {
+	reset()
+	const ua = "Mozilla/5.0 (compatible; Acme; +https://example.com)"
 	SetDefaultUserAgent("  " + ua + "  ") // surrounding whitespace is trimmed
 	if got := DefaultUserAgent(); got != ua {
-		t.Fatalf("override: got %q, want %q", got, ua)
+		t.Fatalf("literal override: got %q, want %q", got, ua)
 	}
 }
 
@@ -49,5 +82,37 @@ func TestDefaultUserAgent_VersionPlaceholderFallsBackToDev(t *testing.T) {
 	SetDefaultUserAgent("Vigolium/{version}")
 	if got := DefaultUserAgent(); got != "Vigolium/dev" {
 		t.Fatalf("empty build version: got %q, want %q", got, "Vigolium/dev")
+	}
+}
+
+// The VIGOLIUM_DEFAULT_UA env var overrides the configured selector, accepting
+// the same selector keywords and literals.
+func TestDefaultUserAgent_EnvVarOverridesConfig(t *testing.T) {
+	reset()
+	SetBuildVersion("v9.9.9")
+	SetDefaultUserAgent("random") // config says random...
+
+	const literal = "Mozilla/5.0 (compatible; EnvWins/{version})"
+	t.Setenv(DefaultUserAgentEnvVar, literal)
+	if got := DefaultUserAgent(); got != "Mozilla/5.0 (compatible; EnvWins/v9.9.9)" {
+		t.Fatalf("env literal override: got %q", got)
+	}
+
+	t.Setenv(DefaultUserAgentEnvVar, "preset")
+	const wantPreset = "Mozilla/5.0 (compatible; Vigolium/v9.9.9; +https://github.com/vigolium/vigolium)"
+	if got := DefaultUserAgent(); got != wantPreset {
+		t.Fatalf("env preset override: got %q, want %q", got, wantPreset)
+	}
+}
+
+// A blank env var is present-but-empty and must resolve to random (not fall
+// through to the configured selector).
+func TestDefaultUserAgent_BlankEnvVarIsRandom(t *testing.T) {
+	reset()
+	SetDefaultUserAgent("preset") // config says preset...
+	t.Setenv(DefaultUserAgentEnvVar, "")
+	got := DefaultUserAgent()
+	if strings.Contains(got, "Vigolium/") || !inRandomPool(got) {
+		t.Fatalf("blank env override: got %q, want a rotation-pool value", got)
 	}
 }

@@ -8,7 +8,7 @@ var DefaultBrowserHeaders = map[string]string{
 	"Sec-Ch-Ua-Mobile":   "?0",
 	"Sec-Ch-Ua-Platform": `"macOS"`,
 	"Accept-Language":    "en-US;q=0.9,en;q=0.8",
-	"User-Agent":         BuiltinUserAgent, // authoritative value resolved at request time via DefaultUserAgent()
+	"User-Agent":         BuiltinUserAgent, // placeholder; authoritative value resolved at request time via DefaultUserAgent() (preset/random/literal)
 	"Accept":             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 	"Sec-Fetch-Site":     "none",
 	"Sec-Fetch-Mode":     "navigate",

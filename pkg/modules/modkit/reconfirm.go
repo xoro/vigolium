@@ -8,6 +8,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/shared/authzutil"
 )
 
@@ -682,4 +683,72 @@ func fetchResponseBody(client *http.Requester, service *httpmsg.Service, raw []b
 		return 0, "", false
 	}
 	return resp.Response().StatusCode, resp.Body().String(), true
+}
+
+// ConfirmMatchReproduces re-confirms that a regex-matched server-side error/leak
+// signature was genuinely introduced by an injected payload rather than ambient
+// page noise (a per-request random token, a static error string, or a signature a
+// stale baseline happened to miss). It is the shared confirmation gate behind the
+// error-based injection modules (sqli-error-based, nosqli-error-based, …).
+//
+// re must (1) reproduce when payloadRaw is re-sent on a genuine application error
+// surface — non-blocked and not a 404/redirect, so a coincidental match against a
+// token that differs on the re-send fails this — and (2) be ABSENT from a fresh,
+// non-blocked control fetch of the insertion point's original value, so an error
+// the endpoint returns for ANY input is rejected even when the captured baseline
+// missed it.
+//
+// It fails open (returns true) on a transport error so a transient failure never
+// suppresses a true positive, and drops the finding (returns false) when the
+// re-fetch is blocked or not an error surface, or the control is blocked: such a
+// page can neither reproduce the leak nor serve as a clean control. A nil re is
+// treated as "nothing to re-confirm" and passes.
+func ConfirmMatchReproduces(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	payloadRaw []byte,
+	re *regexp.Regexp,
+) bool {
+	if re == nil {
+		return true
+	}
+	// (1) Reproducible under the payload, on a genuine (non-blocked, error-surface) response.
+	body, blocked, surface, ok := errorSurfaceFetch(ctx, httpClient, payloadRaw)
+	if !ok {
+		return true
+	}
+	if blocked || !surface || !re.MatchString(body) {
+		return false
+	}
+	// (2) Absent from a fresh, non-blocked control fetch of the original value.
+	controlBody, controlBlocked, _, ok := errorSurfaceFetch(ctx, httpClient, ip.BuildRequest([]byte(ip.BaseValue())))
+	if !ok {
+		return true
+	}
+	if controlBlocked {
+		return false
+	}
+	return !re.MatchString(controlBody)
+}
+
+// errorSurfaceFetch re-issues a raw request and reports its body, whether it was a
+// WAF/CDN/rate-limit page (infra.IsBlockedResponse), and whether its status is an
+// application error surface rather than a 404/redirect (infra.IsErrorSurfaceStatus).
+// ok is false on any parse/HTTP error. NoClustering forces a fresh origin
+// round-trip: the request-clustering cache would otherwise replay the identical
+// captured response, so a coincidental match against a per-request random token
+// would "reproduce" from cache instead of revealing itself as one-off noise.
+func errorSurfaceFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (body string, blocked, surface, ok bool) {
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return "", false, false, false
+	}
+	req = req.WithService(ctx.Service())
+	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
+	if err != nil {
+		return "", false, false, false
+	}
+	defer resp.Close()
+	return resp.Body().String(), infra.IsBlockedResponse(resp), infra.IsErrorSurfaceStatus(resp), true
 }

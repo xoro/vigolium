@@ -1,35 +1,72 @@
 package httpmsg
 
 import (
+	"math/rand"
+	"os"
 	"strings"
 	"sync"
 )
 
-// BuiltinUserAgent is the Chrome-like User-Agent used for every outgoing
-// scanner request unless overridden via config. It is intentionally a real
-// browser string so requests look natural and survive naive WAF filtering.
+// BuiltinUserAgent is a realistic Chrome User-Agent string. It is one entry in
+// the random-rotation pool and a concrete fallback for callers that need a
+// browser string directly. It is no longer the default — see PresetUserAgent.
 const BuiltinUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+
+// PresetUserAgent is the honest, self-identifying User-Agent Vigolium sends by
+// default. The {version} placeholder is replaced with the running binary
+// version at request time so the value stays correct across upgrades. Selected
+// via the "preset" keyword (the default) or any literal containing {version}.
+const PresetUserAgent = "Mozilla/5.0 (compatible; Vigolium/{version}; +https://github.com/vigolium/vigolium)"
 
 // versionPlaceholder is replaced with the running binary version inside a
 // configured User-Agent. Lets operators pin a stable identifier
 // (e.g. "Vigolium/{version}") that stays correct across upgrades.
 const versionPlaceholder = "{version}"
 
+// User-Agent selector keywords accepted by the
+// scanning_strategy.http.user_agent config value and the VIGOLIUM_DEFAULT_UA
+// environment variable. Matched case-insensitively.
+const (
+	// UserAgentPreset selects the self-identifying Vigolium string. Default.
+	UserAgentPreset = "preset"
+	// UserAgentRandom rotates a realistic browser string per request. A blank
+	// value ("") behaves identically.
+	UserAgentRandom = "random"
+)
+
+// DefaultUserAgentEnvVar overrides the configured User-Agent from the
+// environment. When present it wins over scanning_strategy.http.user_agent and
+// accepts the same values: "preset", "random", "" (blank == random), or any
+// literal ({version} still expands).
+const DefaultUserAgentEnvVar = "VIGOLIUM_DEFAULT_UA"
+
+// randomUserAgentPool is a small set of realistic, current desktop browser
+// User-Agents rotated when "random" (or a blank selector) is in effect.
+var randomUserAgentPool = []string{
+	BuiltinUserAgent,
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+}
+
 var (
-	uaMu         sync.RWMutex
-	uaOverride   string // empty => use BuiltinUserAgent
+	uaMu sync.RWMutex
+	// uaOverride is the configured User-Agent selector. It defaults to "preset"
+	// so code paths that never load a config file still send the
+	// self-identifying string rather than a random one.
+	uaOverride   = UserAgentPreset
 	buildVersion string // set once at startup from the CLI layer
 )
 
-// SetDefaultUserAgent installs a process-global User-Agent override applied to
-// every outgoing HTTP request across all scan phases. An empty/blank value is
-// ignored so the built-in Chrome default is preserved (pure opt-in). Safe for
-// concurrent use; last writer wins.
+// SetDefaultUserAgent installs the process-global User-Agent selector applied to
+// every outgoing HTTP request across all scan phases. Accepts a selector
+// keyword ("preset" / "random"), a blank string (== "random"), or any literal
+// User-Agent (with {version} expansion). Safe for concurrent use; last writer
+// wins.
 func SetDefaultUserAgent(ua string) {
 	ua = strings.TrimSpace(ua)
-	if ua == "" {
-		return
-	}
 	uaMu.Lock()
 	uaOverride = ua
 	uaMu.Unlock()
@@ -45,16 +82,39 @@ func SetBuildVersion(v string) {
 	uaMu.Unlock()
 }
 
-// DefaultUserAgent returns the effective User-Agent: the configured override
-// (with {version} expanded) when set, otherwise the built-in Chrome string.
+// DefaultUserAgent returns the effective User-Agent for the next outgoing
+// request. The VIGOLIUM_DEFAULT_UA environment variable (when present) takes
+// precedence over the configured selector; the selector is then resolved:
+// "preset" -> the self-identifying Vigolium string, "random"/"" -> a rotating
+// browser string (a fresh pick per call), any other value -> that literal.
+// {version} is expanded throughout.
 func DefaultUserAgent() string {
 	uaMu.RLock()
-	ua, ver := uaOverride, buildVersion
+	selector, ver := uaOverride, buildVersion
 	uaMu.RUnlock()
 
-	if ua == "" {
-		return BuiltinUserAgent
+	// The env var overrides the configured selector when set (even to blank).
+	if env, ok := os.LookupEnv(DefaultUserAgentEnvVar); ok {
+		selector = env
 	}
+	return resolveUserAgent(selector, ver)
+}
+
+// resolveUserAgent maps a selector value to a concrete User-Agent string.
+func resolveUserAgent(selector, ver string) string {
+	selector = strings.TrimSpace(selector)
+	switch {
+	case selector == "" || strings.EqualFold(selector, UserAgentRandom):
+		return randomUserAgent()
+	case strings.EqualFold(selector, UserAgentPreset):
+		selector = PresetUserAgent
+	}
+	return expandVersion(selector, ver)
+}
+
+// expandVersion replaces the {version} placeholder with the running binary
+// version, falling back to "dev" when the version was never recorded.
+func expandVersion(ua, ver string) string {
 	if strings.Contains(ua, versionPlaceholder) {
 		if ver == "" {
 			ver = "dev"
@@ -62,4 +122,9 @@ func DefaultUserAgent() string {
 		ua = strings.ReplaceAll(ua, versionPlaceholder, ver)
 	}
 	return ua
+}
+
+// randomUserAgent returns a randomly chosen realistic browser User-Agent.
+func randomUserAgent() string {
+	return randomUserAgentPool[rand.Intn(len(randomUserAgentPool))]
 }

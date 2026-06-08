@@ -22,14 +22,27 @@ type nosqlError struct {
 	pattern *regexp.Regexp
 }
 
+// errorPatterns are DBMS error signatures. Every token must be specific enough
+// that a real application body cannot plausibly carry it inside a random
+// per-request token — the bare 4-/6-char forms "BSON", "mongod", "couchdb" and
+// the generic English phrases "bad query" / "invalid operator" matched
+// base64/SPA noise (a Salesforce community 404 shell and a Cloudflare challenge
+// both tripped (?i)BSON on a random token), so they are replaced with their
+// genuine driver/error-context forms.
 var errorPatterns = []nosqlError{
-	{"MongoDB", regexp.MustCompile(`(?i)(?:MongoError|BSON|mongod|MongoClient|mongo server|TopologyDescription|Cannot apply.*update operator)`)},
-	{"MongoDB", regexp.MustCompile(`(?i)(?:E11000 duplicate key|cannot index parallel arrays|\$where requires|bad query|invalid operator|unknown top level operator)`)},
-	{"CouchDB", regexp.MustCompile(`(?i)(?:couchdb|org\.apache\.couchdb|{"error":"bad_request"|"reason":"invalid_json")`)},
-	{"Cassandra", regexp.MustCompile(`(?i)(?:com\.datastax\.driver|InvalidRequestException|SyntaxException.*CQL|no viable alternative at input)`)},
-	{"DynamoDB", regexp.MustCompile(`(?i)(?:com\.amazonaws\.services\.dynamodbv2|ValidationException.*dynamodb|SerializationException)`)},
-	{"Redis", regexp.MustCompile(`(?i)(?:WRONGTYPE Operation|ERR unknown command|Redis::CommandError|redis\.exceptions\.ResponseError)`)},
-	{"Elasticsearch", regexp.MustCompile(`(?i)(?:SearchPhaseExecutionException|ElasticsearchParseException|QueryParsingException|index_not_found_exception)`)},
+	// MongoDB driver / server error class names (CamelCase — does not occur in
+	// random base64) and import paths.
+	{"MongoDB", regexp.MustCompile(`(?i)\bMongo(?:Error|ServerError|ServerSelectionError|NetworkError|NetworkTimeoutError|WriteError|BulkWriteError|ParseError|CommandError|InvalidOperationException)\b`)},
+	{"MongoDB", regexp.MustCompile(`(?i)\bMongoClient\b|com\.mongodb|\bpymongo\b|\bmongoose\b|\bTopologyDescription\b|mongodb://`)},
+	// BSON only in genuine error/type contexts, never the bare token.
+	{"MongoDB", regexp.MustCompile(`(?i)\bBSON(?:Error|Obj|Type|Element|Document|TooLarge)\b|invalid BSON|BSON field|\bbson\.(?:M|D|E|A|ObjectI[dD]|Raw)\b`)},
+	// Distinctive Mongo query/operator error messages.
+	{"MongoDB", regexp.MustCompile(`(?i)E11000 duplicate key|cannot index parallel arrays|\$where\b[^.]{0,40}\brequires\b|unknown (?:top level )?operator|unrecognized expression|Cannot apply \$?\w+ update operator|\bFailedToParse\b|\$expr\b`)},
+	{"CouchDB", regexp.MustCompile(`(?i)org\.apache\.couchdb|"error":"bad_request"|"reason":"invalid_json"|"error":"illegal_database_name"|"reason":"invalid UTF-8 JSON"`)},
+	{"Cassandra", regexp.MustCompile(`(?i)com\.datastax\.driver|InvalidRequestException|SyntaxException.{0,40}CQL|no viable alternative at input`)},
+	{"DynamoDB", regexp.MustCompile(`(?i)com\.amazonaws\.services\.dynamodbv2|ValidationException.{0,40}dynamodb|DynamoDbException|SerializationException`)},
+	{"Redis", regexp.MustCompile(`(?i)WRONGTYPE Operation|ERR unknown command|Redis::CommandError|redis\.exceptions\.ResponseError`)},
+	{"Elasticsearch", regexp.MustCompile(`(?i)SearchPhaseExecutionException|ElasticsearchParseException|QueryParsingException|index_not_found_exception|x_content_parse_exception`)},
 }
 
 var fuzzPayloads = []string{
@@ -130,22 +143,50 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
-		body := resp.Body().String()
-		if dbms, matched := checkNoSQLError(body, origBody); matched {
-			results = append(results, &output.ResultEvent{
-				URL:              urlx.String(),
-				Request:          string(fuzzedRaw),
-				Response:         resp.FullResponseString(),
-				FuzzingParameter: ip.Name(),
-				ExtractedResults: []string{payload},
-				Info: output.Info{
-					Description: fmt.Sprintf("DBMS: %s", dbms),
-				},
-			})
+		// A 404/redirect means the route never resolved, so no NoSQL query ran:
+		// a DB-error substring in such a body is page noise, not an injection
+		// leak. The motivating false positive: a Salesforce community 404 SPA
+		// shell — packed with fresh random base64 tokens on every request, one of
+		// which matched the short MongoDB "BSON" pattern in the fuzzed response
+		// but not the captured baseline. Only an application error surface
+		// (5xx, or a 2xx/4xx the app returns with the driver message echoed) can
+		// carry a genuine leak.
+		if !infra.IsErrorSurfaceStatus(resp) {
 			resp.Close()
-			return results, nil
+			continue
 		}
+
+		body := resp.Body().String()
+		dbms, regExp, matched := checkNoSQLError(body, origBody)
+		if !matched {
+			resp.Close()
+			continue
+		}
+		fullResp := resp.FullResponseString()
 		resp.Close()
+
+		// Confirm the error is genuinely introduced by the NoSQL payload: it must
+		// reproduce when the same payload is re-sent (a per-request random token
+		// that coincidentally matched will not recur — Salesforce mints a new
+		// token each request) AND be absent from a fresh control fetch of the
+		// original value (so a page that returns the pattern for any input is
+		// rejected). Fails open on a transport error so a transient failure never
+		// suppresses a true positive.
+		if !modkit.ConfirmMatchReproduces(ctx, ip, httpClient, fuzzedRaw, regExp) {
+			continue
+		}
+
+		results = append(results, &output.ResultEvent{
+			URL:              urlx.String(),
+			Request:          string(fuzzedRaw),
+			Response:         fullResp,
+			FuzzingParameter: ip.Name(),
+			ExtractedResults: []string{payload},
+			Info: output.Info{
+				Description: fmt.Sprintf("DBMS: %s", dbms),
+			},
+		})
+		return results, nil
 	}
 
 	return results, nil
@@ -161,17 +202,20 @@ func isBlockedResponse(resp *httputil.ResponseChain) bool {
 	return infra.IsBlockedResponse(resp)
 }
 
-// checkNoSQLError checks if response contains NoSQL error patterns not in original.
-func checkNoSQLError(body, origBody string) (string, bool) {
+// checkNoSQLError checks if response contains a NoSQL error pattern not already
+// present in the original (unfuzzed) body. It returns the identified DBMS and the
+// matched pattern so the caller can re-confirm the leak reproduces and is absent
+// from a clean control.
+func checkNoSQLError(body, origBody string) (string, *regexp.Regexp, bool) {
 	for _, ep := range errorPatterns {
 		if ep.pattern.MatchString(body) {
 			if origBody != "" && ep.pattern.MatchString(origBody) {
 				continue
 			}
-			return ep.dbms, true
+			return ep.dbms, ep.pattern, true
 		}
 	}
-	return "", false
+	return "", nil, false
 }
 
 // CanProcess extends the default to also skip if the content type suggests non-injectable content.

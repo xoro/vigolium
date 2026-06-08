@@ -8,10 +8,10 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 )
 
-func TestDefaultScanningStrategy_HTTPUserAgentEmpty(t *testing.T) {
+func TestDefaultScanningStrategy_HTTPUserAgentPreset(t *testing.T) {
 	cfg := DefaultScanningStrategyConfig()
-	if cfg.HTTP.UserAgent != "" {
-		t.Fatalf("default scanning_strategy.http.user_agent should be empty, got %q", cfg.HTTP.UserAgent)
+	if cfg.HTTP.UserAgent != httpmsg.UserAgentPreset {
+		t.Fatalf("default scanning_strategy.http.user_agent should be %q, got %q", httpmsg.UserAgentPreset, cfg.HTTP.UserAgent)
 	}
 }
 

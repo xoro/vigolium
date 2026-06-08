@@ -134,7 +134,14 @@ func (p *Page) URL() (string, error) {
 
 // HTML returns the page HTML.
 func (p *Page) HTML() (string, error) {
-	return p.rodPage.Timeout(p.config.PageLoadTimeout).HTML()
+	var html string
+	if err := safeRod("HTML", func() (err error) {
+		html, err = p.rodPage.Timeout(p.config.PageLoadTimeout).HTML()
+		return err
+	}); err != nil {
+		return "", err
+	}
+	return html, nil
 }
 
 // WaitStable waits for the page to be stable.
@@ -216,8 +223,11 @@ func (p *Page) SetCookies(cookies []*http.Cookie) error {
 // Element finds an element by CSS selector with safe timeout.
 // Uses config.ElementTimeout to prevent infinite waits.
 func (p *Page) Element(selector string) (*Element, error) {
-	rodElem, err := p.rodPage.Timeout(p.config.ElementTimeout).Element(selector)
-	if err != nil {
+	var rodElem *rod.Element
+	if err := safeRod("Element", func() (err error) {
+		rodElem, err = p.rodPage.Timeout(p.config.ElementTimeout).Element(selector)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return &Element{rodElem: rodElem, page: p}, nil
@@ -226,8 +236,11 @@ func (p *Page) Element(selector string) (*Element, error) {
 // Elements finds all elements matching a CSS selector with safe timeout.
 // Uses config.ElementTimeout to prevent infinite waits.
 func (p *Page) Elements(selector string) ([]*Element, error) {
-	rodElems, err := p.rodPage.Timeout(p.config.ElementTimeout).Elements(selector)
-	if err != nil {
+	var rodElems rod.Elements
+	if err := safeRod("Elements", func() (err error) {
+		rodElems, err = p.rodPage.Timeout(p.config.ElementTimeout).Elements(selector)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 
@@ -241,8 +254,11 @@ func (p *Page) Elements(selector string) ([]*Element, error) {
 // ElementX finds an element by XPath with safe timeout.
 // Uses config.ElementTimeout to prevent infinite waits.
 func (p *Page) ElementX(xpath string) (*Element, error) {
-	rodElem, err := p.rodPage.Timeout(p.config.ElementTimeout).ElementX(xpath)
-	if err != nil {
+	var rodElem *rod.Element
+	if err := safeRod("ElementX", func() (err error) {
+		rodElem, err = p.rodPage.Timeout(p.config.ElementTimeout).ElementX(xpath)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return &Element{rodElem: rodElem, page: p}, nil
@@ -251,8 +267,11 @@ func (p *Page) ElementX(xpath string) (*Element, error) {
 // ElementsX finds all elements matching an XPath with safe timeout.
 // Uses config.ElementTimeout to prevent infinite waits.
 func (p *Page) ElementsX(xpath string) ([]*Element, error) {
-	rodElems, err := p.rodPage.Timeout(p.config.ElementTimeout).ElementsX(xpath)
-	if err != nil {
+	var rodElems rod.Elements
+	if err := safeRod("ElementsX", func() (err error) {
+		rodElems, err = p.rodPage.Timeout(p.config.ElementTimeout).ElementsX(xpath)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 
@@ -303,11 +322,18 @@ func (p *Page) Eval(script string) (interface{}, error) {
 
 // EvalWithArgs evaluates JavaScript with arguments.
 func (p *Page) EvalWithArgs(script string, args ...interface{}) (interface{}, error) {
-	result, err := p.rodPage.Evaluate(rod.Eval(script, args...))
-	if err != nil {
+	var val interface{}
+	if err := safeRod("EvalWithArgs", func() error {
+		result, err := p.rodPage.Evaluate(rod.Eval(script, args...))
+		if err != nil {
+			return err
+		}
+		val = result.Value.Val()
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	return result.Value.Val(), nil
+	return val, nil
 }
 
 // EvalCDP executes a CDP command via Runtime.evaluate.
@@ -417,14 +443,24 @@ func (p *Page) WaitDOMStable(d time.Duration, diff float64) error {
 
 // HasElement checks if an element exists.
 func (p *Page) HasElement(selector string) bool {
-	_, err := p.rodPage.Timeout(100 * time.Millisecond).Element(selector)
-	return err == nil
+	found := false
+	_ = safeRod("HasElement", func() error {
+		_, err := p.rodPage.Timeout(100 * time.Millisecond).Element(selector)
+		found = err == nil
+		return nil
+	})
+	return found
 }
 
 // HasElementX checks if an element exists by XPath.
 func (p *Page) HasElementX(xpath string) bool {
-	_, err := p.rodPage.Timeout(100 * time.Millisecond).ElementX(xpath)
-	return err == nil
+	found := false
+	_ = safeRod("HasElementX", func() error {
+		_, err := p.rodPage.Timeout(100 * time.Millisecond).ElementX(xpath)
+		found = err == nil
+		return nil
+	})
+	return found
 }
 
 // Frames returns all iframe elements in the page with safe timeout.
@@ -449,12 +485,30 @@ func (p *Page) Frames() ([]*Page, error) {
 	return frames, nil
 }
 
+// safeRod runs fn and converts a panic raised inside the go-rod library into an
+// error. rod's lazy getJSCtxID() (page_eval.go) dereferences a nil
+// ContentDocument for cross-origin or detached frames. frameAccessible()
+// pre-filters such frames at enumeration time, but a same-origin frame can
+// navigate cross-origin or detach between enumeration and the actual element
+// query (TOCTOU) — common on SPAs — and the nil dereference then crashes the
+// whole scan instead of just skipping the frame. Recovering here turns that into
+// a normal error so callers skip the frame/element and the crawl continues.
+func safeRod(op string, fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("go-rod panic during %s (cross-origin/detached frame?): %v", op, r)
+		}
+	}()
+	return fn()
+}
+
 // frameAccessible returns true if the iframe has a usable content document.
 // Cross-origin or detached iframes return ContentDocument == nil from CDP, and
 // rod's lazy getJSCtxID() panics when it dereferences that nil pointer the first
 // time we touch the resulting frame Page. We pre-filter here with a cheap
 // Describe(pierce=true) call so cross-origin frames are skipped up front
-// rather than crashing later.
+// rather than crashing later. This is best-effort: see safeRod for the runtime
+// backstop that covers the frame going cross-origin after this check.
 func frameAccessible(iframe *rod.Element) bool {
 	node, err := iframe.Describe(1, true)
 	if err != nil {
@@ -516,7 +570,9 @@ func (p *Page) HTMLWithFrames() (string, error) {
 // htmlWithFramesRecursive recursively builds HTML with frame content.
 // This approach is simpler than DOM manipulation and works for state comparison.
 func (p *Page) htmlWithFramesRecursive(parentFramePath string, visited map[string]bool) (string, error) {
-	mainHTML, err := p.rodPage.HTML()
+	// Use the guarded HTML() — p may be a (possibly cross-origin/detached) frame
+	// page here, and rod's HTML() goes through getJSCtxID, which can panic.
+	mainHTML, err := p.HTML()
 	if err != nil {
 		return "", err
 	}
@@ -569,14 +625,16 @@ func (p *Page) htmlWithFramesRecursive(parentFramePath string, visited map[strin
 func (p *Page) HTMLWithFramesFiltered(crawlFrames bool, ignorePatterns []string) (string, error) {
 	if !crawlFrames {
 		// If frame crawling is disabled, return just the main page HTML
-		return p.rodPage.HTML()
+		return p.HTML()
 	}
 	return p.htmlWithFramesFilteredRecursive("", make(map[string]bool), ignorePatterns)
 }
 
 // htmlWithFramesFilteredRecursive recursively builds HTML with filtered frame content.
 func (p *Page) htmlWithFramesFilteredRecursive(parentFramePath string, visited map[string]bool, ignorePatterns []string) (string, error) {
-	mainHTML, err := p.rodPage.HTML()
+	// Use the guarded HTML() — p may be a (possibly cross-origin/detached) frame
+	// page here, and rod's HTML() goes through getJSCtxID, which can panic.
+	mainHTML, err := p.HTML()
 	if err != nil {
 		return "", err
 	}

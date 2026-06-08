@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
+	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 )
@@ -36,6 +37,11 @@ type injectionTest struct {
 	category string
 	// patterns to look for in the response body (case-insensitive)
 	patterns []string
+	// requireConsumed flags the probe only when the literal payload is ABSENT
+	// from the response — i.e. it was evaluated, not reflected verbatim. Used for
+	// the template-injection probes whose bare result marker ("49") is otherwise
+	// far too weak to stand on its own.
+	requireConsumed bool
 }
 
 var injectionTests = []injectionTest{
@@ -110,16 +116,19 @@ var injectionTests = []injectionTest{
 		category: "Command Injection",
 		patterns: []string{"uid=", "gid="},
 	},
-	// Template injection payloads
+	// Template injection payloads — only count if "49" appears AND the literal
+	// "{{7*7}}"/"${7*7}" did NOT survive in the body (proving evaluation).
 	{
-		payload:  `{{7*7}}`,
-		category: "Template Injection",
-		patterns: []string{"49"},
+		payload:         `{{7*7}}`,
+		category:        "Template Injection",
+		patterns:        []string{"49"},
+		requireConsumed: true,
 	},
 	{
-		payload:  `${7*7}`,
-		category: "Template Injection",
-		patterns: []string{"49"},
+		payload:         `${7*7}`,
+		category:        "Template Injection",
+		patterns:        []string{"49"},
+		requireConsumed: true,
 	},
 }
 
@@ -174,6 +183,15 @@ func (m *Module) ScanPerInsertionPoint(
 		}
 	}
 
+	// Baseline body from the original (unfuzzed) response, if captured. A pattern
+	// already present here is static page content — e.g. a feature-flag list that
+	// names DB engines ("userHasMySqlEnabled") or any page that literally contains
+	// "49" — not an injection signal, so it is suppressed.
+	var origBodyLower string
+	if ctx.Response() != nil {
+		origBodyLower = strings.ToLower(ctx.Response().BodyToString())
+	}
+
 	var results []*output.ResultEvent
 
 	for _, test := range injectionTests {
@@ -192,12 +210,29 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
-		body := resp.FullResponseString()
+		// A WAF/CDN/auth/rate-limit page (IsBlockedResponse) or a 404/redirect
+		// (not an error surface) is not the app echoing our payload — its body can
+		// carry a token that trips one of these bare patterns (a catch-all/SPA 404
+		// shell, a feature-flag JSON), so skip it before matching.
+		if infra.IsBlockedResponse(resp) || !infra.IsErrorSurfaceStatus(resp) {
+			resp.Close()
+			continue
+		}
+
+		// Match against the body only, not the headers — a Server/CSP header
+		// naming a DB engine must not trip a bare pattern.
+		bodyLower := strings.ToLower(resp.Body().String())
 		resp.Close()
 
-		bodyLower := strings.ToLower(body)
+		// Template probes: require the literal payload to be gone (evaluated).
+		if test.requireConsumed && strings.Contains(bodyLower, strings.ToLower(test.payload)) {
+			continue
+		}
+
 		for _, pattern := range test.patterns {
-			if strings.Contains(bodyLower, strings.ToLower(pattern)) {
+			pl := strings.ToLower(pattern)
+			// Must appear in the fuzzed response AND be absent from the baseline.
+			if strings.Contains(bodyLower, pl) && !strings.Contains(origBodyLower, pl) {
 				results = append(results, &output.ResultEvent{
 					URL:     urlx.String(),
 					Matched: urlx.String(),

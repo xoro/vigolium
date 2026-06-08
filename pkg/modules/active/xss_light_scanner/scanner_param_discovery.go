@@ -1,6 +1,7 @@
 package xss_light_scanner
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -11,6 +12,8 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/spitolas"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 	"go.uber.org/zap"
 )
 
@@ -21,6 +24,10 @@ type ParamDiscoveryModule struct {
 	transformAnalyzer *TransformAnalyzer
 	jsAnalyzer        *JavaScriptContextAnalyzer
 	paramDiscovery    *ParameterDiscovery
+
+	// Probe runs the headless-browser confirmation step. Overridable so tests
+	// never spawn a real browser. Default: spitolas.ProbeURL.
+	Probe ProbeFunc
 }
 
 // NewParamDiscoveryScanner creates a new parameter discovery XSS scanner.
@@ -41,6 +48,7 @@ func NewParamDiscoveryScanner() *ParamDiscoveryModule {
 		transformAnalyzer: NewTransformAnalyzer(),
 		jsAnalyzer:        NewJavaScriptContextAnalyzer(),
 		paramDiscovery:    NewParameterDiscovery(),
+		Probe:             spitolas.ProbeURL,
 	}
 	m.ModuleTags = ModuleTags
 	return m
@@ -161,9 +169,16 @@ func (m *ParamDiscoveryModule) scanDiscoveredParameters(
 		}
 
 		if result != nil && result.HasVulnerability() {
+			// Re-send a real, context-shaped XSS payload and grade the candidate:
+			// drop it when the executable breakout never survives in the body,
+			// report Low when it survives but no popup fires, and only report
+			// High once a headless browser actually pops alert(marker).
+			outcome := m.confirmCandidate(modifiedParsed, ip, result, httpClient)
+			evt := m.buildConfirmedResultEvent(modifiedParsed, ip, result, outcome)
+			if evt == nil {
+				continue
+			}
 			*foundXSS = true
-			evt := m.buildResultEvent(modifiedParsed, ip, result)
-			evt.Info.Description = "[discovered:" + ip.Name() + "] " + evt.Info.Description
 			results = append(results, evt)
 		}
 	}
@@ -404,4 +419,57 @@ func (m *ParamDiscoveryModule) buildResultEvent(
 			Description: description,
 		},
 	}
+}
+
+// buildConfirmedResultEvent grades the base reflection finding by confirmation
+// outcome. It returns nil (the caller drops the finding) when the executable
+// payload's breakout signature never survived in the body — that is the
+// reflection-only false positive this confirmation step exists to suppress.
+func (m *ParamDiscoveryModule) buildConfirmedResultEvent(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	result *XSSScanResult,
+	outcome confirmOutcome,
+) *output.ResultEvent {
+	// No surviving breakout signature → the reflection-only false positive this
+	// confirmation step exists to suppress. (browserConfirmed implies httpBreakout,
+	// so this guard also covers the unconfirmed case.)
+	if !outcome.httpBreakout {
+		return nil
+	}
+
+	evt := m.buildResultEvent(ctx, ip, result)
+	evt.Info.Description = "[discovered:" + ip.Name() + "] " + evt.Info.Description
+	evt.Request = outcome.request
+
+	evidenceLabel := "reflection-only payload"
+	if outcome.browserConfirmed {
+		evidenceLabel = "browser-confirm payload"
+		evt.Info.Severity = severity.High
+		evt.Info.Confidence = severity.Certain
+		evt.Info.Description += fmt.Sprintf(
+			" — browser-confirmed: alert(%q) fired in a headless browser", outcome.dialogMessage,
+		)
+		evt.ExtractedResults = append(evt.ExtractedResults, "alert: "+outcome.dialogMessage)
+	} else {
+		// Reflection broke out in the raw HTTP body but no popup fired — downgrade
+		// to Low/Tentative rather than reporting a scary High on something the
+		// browser never executed (CSP-locked page, JSON echo, non-script context).
+		evt.Info.Severity = severity.Low
+		evt.Info.Confidence = severity.Tentative
+		note := " — reflection-only: executable payload survived unescaped in the response" +
+			" (signature: " + sigPreview(outcome.signature) + "), but no JavaScript dialog fired"
+		if outcome.browserRan {
+			note += " in a headless browser (execution likely blocked by CSP or a non-executing context)"
+		} else {
+			note += " (no browser confirmation was performed)"
+		}
+		note += "; manual verification recommended"
+		evt.Info.Description += note
+	}
+
+	if ev := output.BuildEvidence(evidenceLabel, outcome.request, outcome.bodySnippet); ev != "" {
+		evt.AdditionalEvidence = append(evt.AdditionalEvidence, ev)
+	}
+	return evt
 }

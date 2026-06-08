@@ -2,7 +2,6 @@ package sqli_error_based
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -106,6 +105,19 @@ func (m *Module) ScanPerInsertionPoint(
 			continue
 		}
 
+		// A 404/redirect means the route never resolved, so no SQL query ran: a
+		// DBMS-name or error substring in such a body is page noise, not an
+		// injection leak. The motivating false positive: a Salesforce community
+		// 404 SPA shell whose inline feature-flag list carries literal DB connector
+		// names ("...userHasCockroachDBEnabled...") matched the CockroachDB
+		// signature and was reported as Critical/Certain SQLi. Only an application
+		// error surface (5xx, or a 2xx/4xx the app returns with the driver message
+		// echoed) can carry a genuine error-based leak.
+		if !infra.IsErrorSurfaceStatus(resp) {
+			resp.Close()
+			continue
+		}
+
 		dbms, regExp, success := checkBodyContainsErrorMsg(resp.Body().String())
 		if !success {
 			resp.Close()
@@ -134,7 +146,7 @@ func (m *Module) ScanPerInsertionPoint(
 		// page that returns the pattern for ANY input — a static error string, or
 		// one a stale baseline missed — is rejected). Fails open on a transport
 		// error so a transient failure never suppresses a true positive.
-		if regExp != nil && !m.confirmSQLError(ctx, ip, httpClient, fuzzedRaw, regExp) {
+		if !modkit.ConfirmMatchReproduces(ctx, ip, httpClient, fuzzedRaw, regExp) {
 			continue
 		}
 
@@ -156,62 +168,6 @@ func (m *Module) ScanPerInsertionPoint(
 	}
 
 	return results, nil
-}
-
-// confirmSQLError verifies a matched DBMS error is genuinely introduced by the
-// broken-syntax payload rather than ambient. It requires the error to (1)
-// reproduce when the payload request is re-sent (not a one-off upstream error)
-// and (2) be ABSENT from a fresh fetch of the ORIGINAL value (the control — so an
-// error the endpoint returns for any input is rejected even when the captured
-// baseline happened to miss it). Fails open on a transport error so a transient
-// failure never suppresses a true positive, and drops the finding when either
-// re-fetch returns a WAF/rate-limit page: such a page is noise, not a reproduced
-// SQL error, and cannot serve as a clean control.
-func (m *Module) confirmSQLError(
-	ctx *httpmsg.HttpRequestResponse,
-	ip httpmsg.InsertionPoint,
-	httpClient *http.Requester,
-	payloadRaw []byte,
-	regExp *regexp.Regexp,
-) bool {
-	// (1) Reproducible under the payload, on a genuine (non-blocked) response.
-	body, blocked, ok := fetchBody(ctx, httpClient, payloadRaw)
-	if !ok {
-		return true
-	}
-	if blocked {
-		return false
-	}
-	if !regExp.MatchString(body) {
-		return false
-	}
-
-	// (2) Absent from a fresh, non-blocked control fetch of the original value.
-	controlRaw := ip.BuildRequest([]byte(ip.BaseValue()))
-	controlBody, controlBlocked, ok := fetchBody(ctx, httpClient, controlRaw)
-	if !ok {
-		return true
-	}
-	if controlBlocked {
-		return false
-	}
-	return !regExp.MatchString(controlBody)
-}
-
-// fetchBody re-issues a raw request and returns its response body and whether the
-// response was a WAF/CDN/rate-limit page. ok is false on any parse/HTTP error.
-func fetchBody(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (body string, blocked, ok bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", false, false
-	}
-	req = req.WithService(ctx.Service())
-	resp, _, err := httpClient.Execute(req, http.Options{})
-	if err != nil {
-		return "", false, false
-	}
-	defer resp.Close()
-	return resp.Body().String(), isBlockedResponse(resp), true
 }
 
 // isBlockedResponse reports whether resp came from a WAF/CDN challenge, auth gate,

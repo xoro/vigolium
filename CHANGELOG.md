@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.26-beta] - 2026-06-08
+
+A false-positive-reduction release closing the "404 catch-all / SPA shell" and "reflected-but-not-executed" classes across the error-based injection and reflection modules: a shared error-surface status gate, structural (not bare-token) signatures, and a headless-browser confirmation tier for discovered-parameter XSS.
+
+### Added
+
+- **`infra.IsErrorSurfaceStatus`** — a shared status gate, companion to `IsBlockedResponse`. A genuine server-side leak (DBMS/driver error, reflected file contents, a stack trace) rides a 5xx or a 2xx/4xx that echoes the payload; a `404` means the route never resolved (no handler ran) and a `3xx` carries no handler output, so a signature substring in either body is page noise — a catch-all/SPA 404 shell or a redirect interstitial. Body-matching modules whose finding is not itself a status signal now reject a response failing *either* gate before matching.
+
+### Changed
+
+- **Error-based injection signatures hardened against catch-all 404 shells** — `sqli-error-based`, `nosqli-error-based`, `xxe-generic`, and `ws-injection` no longer match DBMS/driver/error tokens on a `404`/`3xx` body (via the new `IsErrorSurfaceStatus` gate), and their bare tokens are tightened to structural forms: the CockroachDB name is word-boundary-anchored (was firing on `userHasCockroachDBEnabled` in a Salesforce community 404 shell's feature-flag list), the MongoDB/`BSON` patterns now require genuine driver/error contexts instead of the bare 4–6-char token, XXE confirms `/etc/passwd` by the full `root:…:0:0:` line shape (not a `root:` substring that a `--dxp-g-root:` CSS var carries), and `ws-injection` requires a pattern to be absent from the baseline, match the body only (not headers), and — for the `{{7*7}}`/`${7*7}` template probes — proves evaluation by requiring the literal payload to be *gone* from the response.
+- **`nosqli-error-based` re-confirmation** — a matched DBMS error must now reproduce when the payload is re-sent (a per-request random token that coincidentally matched won't recur) and be absent from a fresh control fetch of the original value, with `NoClustering` forcing a real origin round-trip so the request-clustering cache can't replay the captured hit. Fails open on transport errors.
+- **`lfi-generic` reflection guards and file-shape confirmation** — the `php://filter/convert.base64-encode` read now discards base64 runs that are simply our own `data://` payload being reflected back (Salesforce-Aura-class echo endpoints) or that decode to carry our injection marker, the `/etc/passwd` rule requires the full `root:…:0:0:…` line shape (not the former greedy `root:.*:0:0:`), `win.ini` is confirmed by ≥2 distinct bracketed section headers (was the bare English words `fonts`/`extensions`), and `.env`/`.htaccess` are confirmed by ≥2 distinct file-shaped lines — sensitive `KEY=VALUE` assignments or recognised Apache directives — which both strengthens the evidence and broadens detection beyond the former rigid `DB_PASSWORD`+`APP_KEY`+`APP_SECRET` triple that real Laravel/Symfony files rarely carry.
+- **`xss-light` discovered-parameter confirmation** — a reflected character-transform hit is now re-sent as a real, context-shaped executable payload and graded in tiers: dropped when the breakout signature never survives unescaped in the body (the reflection-only false positive this gate exists to suppress), reported Low/Tentative when it survives but no dialog fires (CSP-locked or non-executing context), and only raised to High/Certain once a headless browser actually pops `alert(marker)`. Browser probes are globally rate-limited and injectable so tests never spawn a real browser.
+
+### Fixed
+
+- **Spidering no longer crashes the whole scan on a cross-origin iframe** — go-rod's lazy `getJSCtxID()` dereferences a nil `ContentDocument` for cross-origin/detached frames, and the existing `frameAccessible()` pre-filter could not close the TOCTOU gap where a same-origin iframe navigates cross-origin (or detaches) between frame enumeration and the element query during extraction — common on SPAs. The nil-pointer panic propagated to the top-level `RunNativeScan` recover and aborted the entire scan (later phases skipped, zero findings). The browser wrappers that reach `getJSCtxID` (`Element`/`ElementX`/`Elements`/`ElementsX`/`EvalWithArgs`/`HTML`/`HasElement[X]`, plus the recursive frame-HTML builders) now convert such panics into ordinary errors so the bad frame is skipped, with a per-frame `recover()` backstop in the candidate-element extractor as a second line of defense.
+
 ## [v0.1.25-beta] - 2026-06-07
 
 A false-positive-reduction release hardening the endpoint- and file-exposure modules against generic markers and reflected error pages.

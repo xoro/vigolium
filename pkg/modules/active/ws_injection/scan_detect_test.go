@@ -80,3 +80,55 @@ func TestScanPerInsertionPoint_NoFalsePositive(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, res, "a safely-handled WS param must not yield a finding")
 }
+
+// flagBody is a feature-flag JSON page (like a Salesforce SPA shell) that names
+// DB engines and contains "49" — exactly the kind of static content whose bare
+// substrings ("mysql", "49") tripped this module before the baseline/status
+// gates. It reflects nothing.
+const flagBody = `{"userHasMySqlEnabled":false,"userHasRedisEnabled":false,"build":49}`
+
+// TestScanPerInsertionPoint_FeatureFlagBaselineNotFlagged covers the static-page
+// FP: the page contains "mysql"/"49" in BOTH the captured baseline and the fuzzed
+// response, so the baseline-absence gate must suppress it (the tokens are page
+// content, not injection output).
+func TestScanPerInsertionPoint_FeatureFlagBaselineNotFlagged(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(flagBody))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	// Capture a baseline that already carries the tokens.
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/ws?message=hello"),
+		"application/json", flagBody,
+	)
+	ip := modtest.InsertionPoint(t, rr, "message")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "tokens present in the baseline are page content, not injection — must not be flagged")
+}
+
+// TestScanPerInsertionPoint_NotFoundShellNotFlagged covers the 404 catch-all FP:
+// the fuzzed request resolves to a 404 shell whose body names DB engines. Even
+// with no baseline, the status gate must drop a 404 before matching.
+func TestScanPerInsertionPoint_NotFoundShellNotFlagged(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<html><body>Not Found " + flagBody + "</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/ws?message=hello")
+	ip := modtest.InsertionPoint(t, rr, "message")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 404 shell naming DB engines must not be flagged as WS injection")
+}

@@ -130,6 +130,76 @@ func TestScanPerInsertionPoint_NoFPOnEmbeddedBase64(t *testing.T) {
 	assert.Empty(t, res, "a page embedding a base64 data-URI image must not be flagged as LFI")
 }
 
+// TestScanPerInsertionPoint_NoFPOnReflectedRequest reproduces the reported
+// Salesforce-Aura false positive: the endpoint echoes the request parameter
+// back in its (200) response. The data:// wrapper payload base64-encodes
+// `<?php echo "vigolium-test"; ?>`, so its reflection decodes straight back to
+// PHP — but no file was ever read, so it must NOT be flagged.
+func TestScanPerInsertionPoint_NoFPOnReflectedRequest(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Echo the parameter back into a JSON body, mimicking an endpoint that
+		// reflects its request context.
+		_, _ = w.Write([]byte(`{"echo":"` + r.URL.Query().Get("file") + `","status":"ok"}`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?file=index.html")
+	ip := modtest.InsertionPoint(t, rr, "file")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an endpoint that merely reflects the request must not be flagged as LFI")
+}
+
+// TestScanPerInsertionPoint_DetectsWinIni drives the Windows win.ini read path:
+// a vulnerable server returns real win.ini content (multiple bracketed section
+// headers), which must be confirmed and yield a finding.
+func TestScanPerInsertionPoint_DetectsWinIni(t *testing.T) {
+	t.Parallel()
+	winIni := "; for 16-bit app support\r\n[fonts]\r\n[extensions]\r\n[mci extensions]\r\n[files]\r\n[Mail]\r\nMAPI=1\r\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("file"), "win.ini") {
+			_, _ = w.Write([]byte(winIni))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>welcome</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?file=index.html")
+	ip := modtest.InsertionPoint(t, rr, "file")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding when win.ini content is returned")
+}
+
+// TestScanPerInsertionPoint_DetectsDotEnv drives the .env read path: a server
+// returns real Laravel .env content with sensitive KEY=VALUE assignments.
+func TestScanPerInsertionPoint_DetectsDotEnv(t *testing.T) {
+	t.Parallel()
+	envContent := "APP_NAME=Laravel\nAPP_ENV=production\nAPP_KEY=base64:abcd1234\nDB_CONNECTION=mysql\nDB_PASSWORD=supersecret\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("file"), ".env") {
+			_, _ = w.Write([]byte(envContent))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>welcome</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?file=index.html")
+	ip := modtest.InsertionPoint(t, rr, "file")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding when .env content is returned")
+}
+
 // TestScanPerInsertionPoint_NoFPOn404WithBase64 mirrors the exact production
 // false positive: a 404 page (GitHub Pages) whose body carries base64 data-URI
 // logos. The status gate alone must drop it regardless of body content.

@@ -95,14 +95,100 @@ func TestScanPerInsertionPoint_SkipsWAFChallenge(t *testing.T) {
 func TestCheckNoSQLError(t *testing.T) {
 	t.Parallel()
 
-	dbms, ok := checkNoSQLError("E11000 duplicate key error collection", "")
+	dbms, re, ok := checkNoSQLError("E11000 duplicate key error collection", "")
 	require.True(t, ok)
 	assert.Equal(t, "MongoDB", dbms)
+	require.NotNil(t, re)
 
-	_, ok = checkNoSQLError("nothing interesting here", "")
+	_, _, ok = checkNoSQLError("nothing interesting here", "")
 	assert.False(t, ok, "benign body must not match")
 
 	// Error already present in the baseline is suppressed.
-	_, ok = checkNoSQLError("E11000 duplicate key", "E11000 duplicate key")
+	_, _, ok = checkNoSQLError("E11000 duplicate key", "E11000 duplicate key")
 	assert.False(t, ok, "error present in baseline must be suppressed")
+
+	// The bare 4-char "BSON" / 6-char "mongod" tokens and the generic English
+	// phrases that previously matched random base64 / SPA noise must no longer
+	// fire on their own — only genuine driver/error-context forms do.
+	for _, noise := range []string{
+		"WqVZzyifbSONOgi1jV6JfU_Yj6osB8oy64IDs", // base64 token containing "bSON"
+		"a1dKZ0ZrdlpkNVJfOUVtTU8zUDUyZ2tVMjdn",  // Salesforce fwuid-style token
+		"this was a bad query for the user",     // generic English
+		"that is an invalid operator here",      // generic English
+		"see the mongoduck mascot",              // "mongod" inside a word
+	} {
+		_, _, ok = checkNoSQLError(noise, "")
+		assert.Falsef(t, ok, "weak-token noise %q must not be matched", noise)
+	}
+
+	// Genuine driver/error-context forms still match.
+	for _, hit := range []string{
+		"MongoServerError: unknown operator: $gt",
+		"caught BSONError: invalid BSON",
+		"com.mongodb.MongoException: bad cmd",
+		"Cannot apply $inc update operator to non-numeric",
+	} {
+		_, _, ok = checkNoSQLError(hit, "")
+		assert.Truef(t, ok, "genuine Mongo error %q must still match", hit)
+	}
+}
+
+// TestScanPerInsertionPoint_Skips404SPAShell reproduces the motivating false
+// positive: a Salesforce community 404 SPA shell that returns a fresh batch of
+// random base64 tokens on every request — one of which matched the old short
+// "BSON" pattern in the fuzzed response but not the captured baseline. A 404 is
+// not an application error surface, so it must never be reported as NoSQLi.
+func TestScanPerInsertionPoint_Skips404SPAShell(t *testing.T) {
+	t.Parallel()
+	tokens := []string{
+		"WqVZzyifbSONOgi1jV6JfU_Yj6osB8oy64IDs",
+		"kWJgFkvZd5R9EmMO3P52gkU27gLaDEE6KqIWkq",
+		"iMQ6kBnAtoBSYBDz0zwTU8zUDUyZ2tVMjdnTGFE",
+	}
+	var i int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// A different random-ish token on every request, like the real shell.
+		tok := tokens[i%len(tokens)]
+		i++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`<!DOCTYPE html><html><head><title>Help Center</title></head><body>` +
+			`<script>var fwuid="` + tok + `";</script></body></html>`))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?q=hello")
+	ip := modtest.InsertionPoint(t, rr, "q")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a 404 SPA shell with random tokens must not be reported as NoSQLi")
+}
+
+// TestScanPerInsertionPoint_RejectsNonReproducingToken ensures a one-off random
+// token that matches a (tightened) pattern in a single 200 response — but does
+// not recur on re-send — is dropped by the reproduce/control confirmation.
+func TestScanPerInsertionPoint_RejectsNonReproducingToken(t *testing.T) {
+	t.Parallel()
+	var i int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		i++
+		// Only the very first injected request leaks a genuine-looking marker;
+		// every subsequent request (the reproduce re-send and the control) is
+		// clean — so the confirmation must reject it.
+		if i == 1 {
+			_, _ = w.Write([]byte("transient BSONError glitch"))
+			return
+		}
+		_, _ = w.Write([]byte("<html><body>ok</body></html>"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/?q=hello")
+	ip := modtest.InsertionPoint(t, rr, "q")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a non-reproducing one-off token match must be dropped")
 }

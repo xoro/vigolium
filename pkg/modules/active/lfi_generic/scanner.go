@@ -107,7 +107,7 @@ func (m *Module) ScanPerInsertionPoint(
 				continue
 			}
 
-			if rule.MatchWithBaseline(resp.Body().String(), origBody) {
+			if rule.MatchWithBaseline(resp.Body().String(), origBody, payload) {
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.String(),
 					Request:          string(fuzzedRaw),
@@ -145,7 +145,14 @@ func getRules() []*rule {
 			"./.././.././.././.././.././.././.././.././.././.././.././.././.././.././../etc/passwd",
 		},
 		[]*regexp.Regexp{
-			regexp.MustCompile(`root:.*:0:0:`),
+			// Require the full /etc/passwd line shape, not just `root:…:0:0:`.
+			// A real root entry is `root:x:0:0:root:/root:/bin/bash` — uid 0,
+			// gid 0, then a GECOS field, a home directory, and the start of a
+			// shell path. The bounded `[^:\r\n]` runs keep the match on a single
+			// passwd-shaped line and stop the former greedy `.*` from bridging
+			// unrelated `root:` / `:0:0:` tokens that happen to share a line in
+			// reflected JSON or HTML.
+			regexp.MustCompile(`root:[^:\r\n]{0,64}:0:0:[^:\r\n]{0,64}:[^:\r\n]{0,128}:[^\s:]`),
 		},
 		[]string{},
 	)
@@ -173,9 +180,13 @@ func getRules() []*rule {
 			// bypass_waf_regx
 			"./.././.././.././.././.././.././.././.././.././.././.././.././.././.././../windows/win.ini",
 		},
+		// Confirmed by requiring two distinct bracketed win.ini section headers
+		// (`[fonts]`, `[extensions]`, …) at line start — see confirmWinIni.
+		// The former bare words "fonts"/"extensions" are ordinary English and
+		// fired on any page that happened to contain them.
 		[]*regexp.Regexp{},
-		[]string{"bit app support", "fonts", "extensions"},
-	)
+		[]string{},
+	).withConfirm(confirmWinIni)
 	rules = append(rules, windowsRule)
 	/* ------------------------------------------------------------------------- */
 	webjarRule := newRule(
@@ -214,11 +225,16 @@ func getRules() []*rule {
 	).withConfirm(confirmPHPFilterBase64)
 	rules = append(rules, phpWrapperRule)
 	/* ------------------------------------------------------------------------- */
+	// Confirmed by requiring two distinct, file-shaped lines — sensitive
+	// `KEY=VALUE` assignments for .env, recognised Apache directives for
+	// .htaccess — see confirmAppConfig. The former bare-word AND of
+	// DB_PASSWORD/APP_KEY/APP_SECRET both missed real Laravel/Symfony files
+	// (which rarely carry all three) and could fire on prose mentioning them.
 	appConfigRule := newRule(
 		[]string{".env", "../.env", "../../.env", ".htaccess", "../.htaccess"},
 		[]*regexp.Regexp{},
-		[]string{"DB_PASSWORD", "APP_KEY", "APP_SECRET"},
-	)
+		[]string{},
+	).withConfirm(confirmAppConfig)
 	rules = append(rules, appConfigRule)
 	return rules
 }

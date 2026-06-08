@@ -91,11 +91,18 @@ parameter names and checks if values are echoed back, then tests for XSS.
 ## Notes
 - Runs per-request to discover parameters not visible in the original request
 - Combines parameter discovery with XSS Light transform analysis
+- Every candidate is re-confirmed with a real, context-shaped XSS payload: the
+  finding is dropped unless the executable breakout survives unescaped in the
+  body, reported as Low/Tentative when it survives but no popup fires (CSP or a
+  non-executing context), and only raised to High/Certain once a headless
+  browser actually triggers an alert() dialog
 
 ## References
 - https://portswigger.net/burp/documentation/scanner/xss`
 
-	ParamDiscoveryModuleConfirmation = "Confirmed when a discovered hidden parameter reflects injected characters without proper encoding"
+	// Per-finding severity/confidence are set by the confirmation step
+	// (buildConfirmedResultEvent); these module defaults are the fallback only.
+	ParamDiscoveryModuleConfirmation = "Confirmed when a discovered parameter's executable XSS payload breaks out unescaped (Low) and fires a JavaScript dialog in a headless browser (High)"
 	ParamDiscoveryModuleSeverity     = severity.High
 	ParamDiscoveryModuleConfidence   = severity.Firm
 )

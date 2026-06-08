@@ -2,6 +2,7 @@ package xxe_generic
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -15,18 +16,30 @@ import (
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
-// xxePayload defines an XXE test case.
+// passwdLineRe matches the canonical /etc/passwd root entry: the username "root",
+// its password field, then uid and gid both 0. Requiring the ":0:0:" structure —
+// not a bare "root:" substring — is what separates a genuine file read from
+// coincidental page content: a CSS custom property like "--dxp-g-root:var(...)"
+// or a JSON key `"root":` on a catch-all/SPA 404 shell contains "root:" but never
+// the full "root:...:0:0:" passwd shape. This was the motivating false positive
+// (a Salesforce community 404 shell whose inline CSS carried "--dxp-g-root:").
+var passwdLineRe = regexp.MustCompile(`root:[^:\r\n]{0,64}:0:0:`)
+
+// xxePayload defines an XXE test case. A success is confirmed by a specific
+// literal marker (markers) and/or a structural marker (markerRe) appearing in the
+// response but NOT in the unfuzzed baseline.
 type xxePayload struct {
-	payload string
-	markers []string // expected strings in response if XXE succeeds
-	desc    string
+	payload  string
+	markers  []string       // specific literal substrings expected on success
+	markerRe *regexp.Regexp // optional structural marker (e.g. /etc/passwd root line)
+	desc     string
 }
 
 var payloads = []xxePayload{
 	{
-		payload: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>`,
-		markers: []string{"root:", "/bin/bash", "/bin/sh", "nobody:"},
-		desc:    "Linux /etc/passwd via file:// entity",
+		payload:  `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>`,
+		markerRe: passwdLineRe,
+		desc:     "Linux /etc/passwd via file:// entity",
 	},
 	{
 		payload: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">]><root>&xxe;</root>`,
@@ -39,14 +52,14 @@ var payloads = []xxePayload{
 		desc:    "Internal entity expansion",
 	},
 	{
-		payload: `<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>`,
-		markers: []string{"root:", "/bin/bash", "/bin/sh", "nobody:"},
-		desc:    "XInclude file:///etc/passwd",
+		payload:  `<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>`,
+		markerRe: passwdLineRe,
+		desc:     "XInclude file:///etc/passwd",
 	},
 	{
-		payload: `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>`,
-		markers: []string{"root:", "/bin/bash", "/bin/sh"},
-		desc:    "SVG XXE via file:// entity",
+		payload:  `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>`,
+		markerRe: passwdLineRe,
+		desc:     "SVG XXE via file:// entity",
 	},
 }
 
@@ -164,8 +177,16 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
+		// A 404/redirect means the XML endpoint never processed the payload, so no
+		// file was read: a marker substring in such a body is page noise (a
+		// catch-all/SPA 404 shell), not an XXE leak.
+		if !infra.IsErrorSurfaceStatus(resp) {
+			resp.Close()
+			continue
+		}
+
 		body := resp.Body().String()
-		if marker := checkXXEMarkers(body, origBody, p.markers); marker != "" {
+		if marker := checkXXEMarkers(body, origBody, p); marker != "" {
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.String(),
 				Request:          string(modifiedRaw),
@@ -185,11 +206,19 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
-// checkXXEMarkers checks if response body contains XXE success indicators not in original.
-func checkXXEMarkers(body, origBody string, markers []string) string {
-	for _, marker := range markers {
+// checkXXEMarkers checks whether the response body contains an XXE success
+// indicator — a specific literal marker or the structural passwd-line marker —
+// that is absent from the unfuzzed baseline (so static page content cannot
+// produce a false positive). It returns the matched text, or "" for no match.
+func checkXXEMarkers(body, origBody string, p xxePayload) string {
+	for _, marker := range p.markers {
 		if strings.Contains(body, marker) && !strings.Contains(origBody, marker) {
 			return marker
+		}
+	}
+	if p.markerRe != nil {
+		if hit := p.markerRe.FindString(body); hit != "" && !p.markerRe.MatchString(origBody) {
+			return hit
 		}
 	}
 	return ""

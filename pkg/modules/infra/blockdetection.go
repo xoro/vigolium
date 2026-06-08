@@ -85,6 +85,37 @@ func IsBlockedResponse(resp *httputil.ResponseChain) bool {
 	return false
 }
 
+// IsErrorSurfaceStatus reports whether resp's status is one an application could
+// plausibly use to surface a server-side leak (a DBMS/driver error string, a
+// reflected file's contents, a stack trace, an injected marker). A genuine leak
+// of that kind rides a 5xx (the stack choked) or a 2xx/4xx the app returns with
+// the payload echoed into the body. A 404 means the route never resolved — no
+// query/handler ran — and a 3xx redirect carries no handler output, so a
+// signature substring in either body is page noise (a catch-all/SPA 404 shell,
+// a redirect interstitial), not evidence of the vulnerability.
+//
+// This is the companion gate to IsBlockedResponse: that one rejects WAF/CDN/
+// auth/rate-limit pages (401/403/429/503 + challenge markers), this one rejects
+// the no-handler-ran statuses (404 + 3xx) that IsBlockedResponse deliberately
+// leaves alone. A body-matching module whose finding is NOT itself a status
+// signal should reject a response that fails EITHER gate before matching.
+//
+// Do NOT use this in a module whose finding IS a 404/redirect (e.g. a broken-link
+// or open-redirect check) — it would suppress the very response it looks for.
+func IsErrorSurfaceStatus(resp *httputil.ResponseChain) bool {
+	if resp == nil || resp.Response() == nil {
+		return false
+	}
+	code := resp.Response().StatusCode
+	if code == 404 {
+		return false
+	}
+	if code >= 300 && code < 400 {
+		return false
+	}
+	return true
+}
+
 func (v *BlockDetectionValidator) Validate(resp *httputil.ResponseChain) error {
 	if v == nil || resp == nil || resp.Response() == nil {
 		return nil
