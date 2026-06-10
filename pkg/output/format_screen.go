@@ -101,8 +101,12 @@ func (w *StandardWriter) formatScreen(output *ResultEvent) []byte {
 		suffix += " (+" + strconv.Itoa(n) + " evidence pairs)"
 	}
 
-	// Truncate URL + suffix to fit terminal width
-	if remaining > 20 {
+	// Truncate URL + suffix to fit terminal width — but only when writing to an
+	// interactive terminal. When stdout is redirected to a file or pipe (e.g. the
+	// per-target .console.log captured by `-P` parallel scans), term.GetSize fails
+	// and TerminalWidth falls back to 150, which would clip URLs/payloads mid-token
+	// with an ellipsis. File/pipe consumers want the full line, so skip truncation.
+	if terminal.IsTerminal() && remaining > 20 {
 		combined := urlStr + suffix
 		if len(combined) > remaining {
 			if len(suffix) >= remaining {

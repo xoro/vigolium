@@ -18,6 +18,13 @@ func TestDefaultScanningStrategy_HTTPUserAgentPreset(t *testing.T) {
 // LoadSettings must read the nested scanning_strategy.http.user_agent key and
 // install it as the process-global User-Agent (with {version} expansion).
 func TestLoadSettings_NestedUserAgentWired(t *testing.T) {
+	// A VIGOLIUM_DEFAULT_UA set in the invoking shell would override the
+	// config-wired selector; clear it (t.Setenv registers the restore).
+	t.Setenv(httpmsg.DefaultUserAgentEnvVar, "")
+	if err := os.Unsetenv(httpmsg.DefaultUserAgentEnvVar); err != nil {
+		t.Fatalf("unset %s: %v", httpmsg.DefaultUserAgentEnvVar, err)
+	}
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vigolium-configs.yaml")
 	yaml := "scanning_strategy:\n" +

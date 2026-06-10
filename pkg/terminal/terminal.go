@@ -18,24 +18,41 @@ func Notice(prefix, message string) {
 
 // Global state for terminal capabilities
 var (
-	colorEnabled = true
-	ciMode       = false
+	colorEnabled     = true
+	ciMode           = false
+	stdoutIsTerminal = false
 )
 
 func init() {
+	stdoutIsTerminal = term.IsTerminal(int(os.Stdout.Fd()))
 	// Auto-detect terminal capabilities and NO_COLOR environment variable
 	// https://no-color.org/
-	if !term.IsTerminal(int(os.Stdout.Fd())) || os.Getenv("NO_COLOR") != "" {
+	if !stdoutIsTerminal || os.Getenv("NO_COLOR") != "" {
 		colorEnabled = false
 	}
 }
 
+// IsTerminal reports whether stdout is an interactive terminal (TTY). It is
+// false when stdout is redirected to a file or pipe — including the per-target
+// .console.log capture used by `-P` parallel scans. Width-based truncation of
+// live console lines keys off this so file/pipe output stays full-length and
+// greppable instead of being clipped to the 150-column TerminalWidth fallback.
+func IsTerminal() bool {
+	return stdoutIsTerminal
+}
+
+// SetIsTerminal overrides the detected TTY state. Intended for tests and any
+// caller that needs to force truncation behavior explicitly.
+func SetIsTerminal(enabled bool) {
+	stdoutIsTerminal = enabled
+}
+
 // TerminalWidth returns the current terminal width in columns.
-// Falls back to 120 if detection fails (e.g. not a TTY, piped output).
+// Falls back to 150 if detection fails (e.g. not a TTY, piped output).
 func TerminalWidth() int {
 	w, _, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || w <= 0 {
-		return 120
+		return 150
 	}
 	return w
 }

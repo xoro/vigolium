@@ -299,6 +299,9 @@ See [docs.vigolium.com/customization/writing-extensions](https://docs.vigolium.c
 
 ## CLI Reference
 
+<details>
+<summary>Expand the full commands & flags reference</summary>
+
 ### Commands
 
 ```
@@ -412,6 +415,8 @@ Output:
       --silent           Suppress all output except findings
   -v, --verbose          Verbose logging
 ```
+
+</details>
 
 ## Repository Layout
 

@@ -195,8 +195,31 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Some files (e.g. cross-domain policies) are near-ubiquitous and only
+	// constitute a finding when their content is actually insecure. When
+	// confirmAny is set, require one of those signals in the body — otherwise
+	// the benign, scoped variant is dropped instead of reported.
+	if len(sf.confirmAny) > 0 {
+		confirmed := false
+		for _, sig := range sf.confirmAny {
+			if strings.Contains(body, sig) {
+				confirmed = true
+				matchedMarkers = append(matchedMarkers, sig)
+				break
+			}
+		}
+		if !confirmed {
+			return nil
+		}
+	}
+
 	urlx, _ := ctx.URL()
 	targetURL := urlx.Scheme + "://" + urlx.Host + sf.path
+
+	findingName := sf.title
+	if findingName == "" {
+		findingName = fmt.Sprintf("ASP.NET Sensitive File: %s", sf.name)
+	}
 
 	return &output.ResultEvent{
 		URL:              targetURL,
@@ -205,7 +228,7 @@ func (m *Module) probeFile(
 		Response:         resp.FullResponseString(),
 		ExtractedResults: matchedMarkers,
 		Info: output.Info{
-			Name:        fmt.Sprintf("ASP.NET Sensitive File: %s", sf.name),
+			Name:        findingName,
 			Description: sf.desc,
 			Severity:    sf.sev,
 			Confidence:  severity.Firm,

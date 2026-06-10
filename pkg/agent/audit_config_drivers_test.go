@@ -370,6 +370,7 @@ func TestBuildAuditDriverCfg(t *testing.T) {
 		Stream:                true,
 		ShowThinking:          true,
 		KeepRaw:               true,
+		KeepSourceOutputDir:   true,
 	}
 	cfg := BuildAuditDriverCfg(in)
 
@@ -396,6 +397,9 @@ func TestBuildAuditDriverCfg(t *testing.T) {
 	}
 	if !cfg.Stream || !cfg.ShowThinking || !cfg.KeepRaw {
 		t.Error("Stream/ShowThinking/KeepRaw flags not threaded through")
+	}
+	if !cfg.KeepSourceOutputDir {
+		t.Error("KeepSourceOutputDir not threaded through")
 	}
 }
 

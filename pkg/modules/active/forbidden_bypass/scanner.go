@@ -155,6 +155,15 @@ func bypassPath(urlx *urlutil.URL, ctx *httpmsg.HttpRequestResponse, httpClient 
 				resp.Close()
 				continue
 			}
+			// Empty/blank-body catch-all guard: if a clean, unprivileged request to
+			// an unrelated random path answers with the same shell (e.g. an empty
+			// 200), the host catch-alls every URL and no path payload here is a real
+			// bypass. ConfirmNotSoft404's WildcardProbe misses this because it only
+			// fires on a NON-EMPTY wildcard body.
+			if !confirmDistinctFromCatchAll(httpClient, ctx.Service(), ctx.Request().Raw(), 200, body) {
+				resp.Close()
+				return results, nil
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + payload,
@@ -248,6 +257,16 @@ func bypassHeaders(
 				resp.Close()
 				continue
 			}
+			// Empty/blank-body catch-all guard (see bypassPath). Probe a CLEAN
+			// original request (no bypass header) at a random path: if it returns the
+			// same shell, the special header isn't granting access — the host just
+			// answers everything alike. Using the clean original (not modifiedRaw)
+			// avoids a false negative on path-rewriting headers (x-original-url etc.),
+			// whose server-honored path would otherwise echo the protected resource.
+			if !confirmDistinctFromCatchAll(httpClient, ctx.Service(), ctx.Request().Raw(), 200, body) {
+				resp.Close()
+				return results, nil
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.Scheme + "://" + urlx.Host + newPath,
@@ -322,6 +341,15 @@ func bypassMethod(
 				resp.Close()
 				continue
 			}
+			// Empty/blank-body catch-all guard (see bypassPath). Probe the SAME
+			// method at a random path (modifiedRaw already carries the mutated method
+			// with the original, space-free path) so a per-method catch-all is caught:
+			// if METHOD /random returns the same shell as METHOD /resource, the method
+			// isn't bypassing anything.
+			if !confirmDistinctFromCatchAll(httpClient, ctx.Service(), modifiedRaw, resp.Response().StatusCode, body) {
+				resp.Close()
+				return results, nil
+			}
 			respDump := resp.FullResponseString()
 			results = append(results, &output.ResultEvent{
 				URL:              urlx.String(),
@@ -370,7 +398,11 @@ func bypassMethod(
 			location := resp.Response().Header.Get("Location")
 			if !strings.Contains(strings.ToLower(body), "method not allowed") &&
 				modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(respBody), location) &&
-				confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, respBody) {
+				confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, respBody) &&
+				// Empty/blank-body catch-all guard (see bypassPath): the override
+				// must yield content distinct from the host's response to an
+				// unrelated random path, or it's just the catch-all shell.
+				confirmDistinctFromCatchAll(httpClient, ctx.Service(), modifiedRaw, 200, respBody) {
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.String(),
 					Request:          string(modifiedRaw),
@@ -452,6 +484,49 @@ func confirmStableBypass(
 		return false // bypass did not reproduce → drop
 	}
 	return modkit.BodiesSimilar(firstBody, body)
+}
+
+// confirmDistinctFromCatchAll reports whether a candidate bypass response is
+// genuinely tied to the targeted resource rather than the host answering every
+// URL alike. It re-issues baseRaw — the bypass request's clean template (same
+// method, minus any path-rewriting bypass header) — against a fresh random,
+// definitely-nonexistent path: if that unprivileged control returns the SAME
+// status AND a body indistinguishable from the bypass response, the host is a
+// catch-all / wildcard handler (e.g. a Google-fronted edge that returns an empty
+// 200 for every path) and the "bypass" is meaningless, so it returns false (drop).
+//
+// It complements modkit.ConfirmNotSoft404, whose WildcardProbe only fires on a
+// NON-EMPTY wildcard body (WildcardEntry.IsWildcard requires BodyLen > 0 and
+// MatchesBody bails on an empty body), so an empty-body catch-all slips straight
+// through it — the exact shape behind the bsr.netflix.net forbidden-bypass false
+// positives, where every mutated payload AND a clean random path return a blank
+// 200. Here modkit.BodiesSimilar treats two empty bodies as identical, closing
+// that gap.
+//
+// It fails OPEN (returns true) on a parse/transport error so a transient failure
+// never suppresses a real bypass.
+func confirmDistinctFromCatchAll(
+	httpClient *http.Requester,
+	service *httpmsg.Service,
+	baseRaw []byte,
+	bypassStatus int,
+	bypassBody string,
+) bool {
+	controlRaw, err := httpmsg.SetPath(baseRaw, "/"+modkit.FreshCanary()+"-vgo404")
+	if err != nil {
+		return true // inconclusive — don't suppress
+	}
+	status, body, ok := modkit.ExecuteRaw(httpClient, service, controlRaw, http.Options{NoRedirects: true, NoClustering: true})
+	if !ok {
+		return true // inconclusive transient error — don't suppress
+	}
+	if status != bypassStatus {
+		return true // an unrelated path answers differently → response is resource-specific, keep
+	}
+	if modkit.BodiesSimilar(bypassBody, body) {
+		return false // same shell for an unprivileged random path → catch-all, drop
+	}
+	return true
 }
 
 // markAndShouldContinue marks the host as checked and returns true if it should continue

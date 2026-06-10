@@ -3,9 +3,19 @@ package aspnet_sensitive_files
 import "github.com/vigolium/vigolium/pkg/types/severity"
 
 type sensitiveFile struct {
-	path        string
-	name        string
-	markers     []string
+	path string
+	name string
+	// title, when set, replaces the "ASP.NET Sensitive File: <name>" finding
+	// title. Used for files (e.g. cross-domain policies) that are not actually
+	// ASP.NET-specific so the finding name is not misleading.
+	title   string
+	markers []string
+	// confirmAny, when non-empty, requires the response body to additionally
+	// contain at least one of these strings before a finding is raised. This
+	// distinguishes a genuinely insecure file (e.g. an overly permissive
+	// cross-domain policy) from the benign, near-ubiquitous presence of the
+	// file itself.
+	confirmAny  []string
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
@@ -137,18 +147,22 @@ var sensitiveFiles = []sensitiveFile{
 	{
 		path:        "/clientaccesspolicy.xml",
 		name:        "Silverlight Client Access Policy",
+		title:       "Overly Permissive Silverlight Client Access Policy",
 		markers:     []string{"<access-policy>", "<cross-domain-access>"},
+		confirmAny:  []string{`uri="*"`, `uri='*'`, `uri="http://*"`, `uri="https://*"`},
 		antiMarkers: defaultAntiMarkers,
-		sev:         severity.Medium,
-		desc:        "Silverlight client access policy file found with potentially overly permissive cross-domain settings",
+		sev:         severity.Low,
+		desc:        "Silverlight client access policy (clientaccesspolicy.xml) grants cross-origin access from any domain via a wildcard `<domain uri=\"*\"/>`. A policy scoped to specific domains is not flagged. Note: this is a Silverlight policy file and is not specific to ASP.NET.",
 	},
 	{
 		path:        "/crossdomain.xml",
 		name:        "Flash Cross-Domain Policy",
+		title:       "Overly Permissive Flash Cross-Domain Policy",
 		markers:     []string{"<cross-domain-policy>", "<allow-access-from"},
+		confirmAny:  []string{`domain="*"`, `domain='*'`, `permitted-cross-domain-policies="all"`, `permitted-cross-domain-policies='all'`},
 		antiMarkers: defaultAntiMarkers,
-		sev:         severity.Medium,
-		desc:        "Flash cross-domain policy file found with potentially overly permissive settings",
+		sev:         severity.Low,
+		desc:        "Flash cross-domain policy (crossdomain.xml) grants cross-origin access to ALL domains via a wildcard `domain=\"*\"` (or `permitted-cross-domain-policies=\"all\"`), letting any site read responses on behalf of an authenticated user. A policy scoped to specific domains (e.g. `domain=\"*.example.com\"`) is benign and is not flagged. Note: crossdomain.xml is a Flash/Silverlight policy file and is not specific to ASP.NET.",
 	},
 	{
 		path:        "/Global.asa",

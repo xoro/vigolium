@@ -45,6 +45,7 @@ func init() {
 	agentQueryCmd.Example = agenticScanExamples
 	agentSessionCmd.Example = agentSessionExamples
 	agentAuditCmd.Example = agentAuditExamples
+	auditCmd.Example = agentAuditExamples
 	agentAutopilotCmd.Example = agentAutopilotExamples
 	agentSwarmCmd.Example = agentSwarmExamples
 	agentOliumCmd.Example = oliumExamples

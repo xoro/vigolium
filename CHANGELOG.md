@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.27-beta] - 2026-06-10
+
+A detection-expansion and false-positive-reduction release: two new modules (clickjacking detection and internal-header fuzzing), out-of-band findings that carry the request that triggered them, a stateless audit mode with an auto HTML report, and catch-all/reflection hardening across several modules.
+
+### Added
+
+- **Clickjacking (UI-redress) passive module** — a new `clickjacking-detect` module that flags a page only when it is both framable *and* worth hijacking, instead of every missing `X-Frame-Options`. It computes the framing verdict like a browser (enforced CSP `frame-ancestors` overrides `X-Frame-Options`; report-only, `ALLOW-FROM`, invalid/conflicting headers, and wildcard sources are treated as ineffective), requires sensitive/interactive content (credential form, authenticated session, or state-changing form), and downgrades when a `SameSite=Strict`/`Lax` session cookie would make the cross-site frame unauthenticated.
+- **Internal header probe (active module)** — a new `internal-header-probe` module that mines a CORS preflight's `Access-Control-Allow-Headers`/`Access-Control-Expose-Headers` for gateway-injected custom headers (identity, routing, trust, feature-flag), re-sends the request with each set to a battery of probe values, and reports those whose response body reproducibly changes — reflection stripped, measured against a per-endpoint noise floor, with a per-host circuit breaker. Adds an OAST spray per header for blind SSRF. Severity Suspect/Tentative: a body change proves the backend reads the header, not that it is exploitable.
+- **Out-of-band findings carry their originating request** — an OAST callback finding now embeds the request/response that planted the payload, the callback URL, the raw collaborator callback as evidence, and trace anchors, so it answers "which request caused this callback?" on its own. A new `GetRecordByRequestHash` lookup recovers the origin even for late callbacks, and the finding is saved even when the record can't be resolved.
+- **Stateless audit with auto HTML report** — `-S`/`--stateless` on `vigolium agent audit` runs the whole audit into a throwaway temp DB (main DB untouched, mirroring `vigolium scan -S`) and auto-renders a self-contained HTML report via the `vigolium import --format html` generator. Defaults to `vigolium-result/vigolium-audit-report.html`; `-o`/`--output` overrides it (supports `gs://` and `{ts}`).
+- **`vigolium audit` top-level alias** — a shortcut for `vigolium agent audit` with the same flags (mirroring `vigolium olium`).
+
+### Changed
+
+- **Audit `--keep-raw` now on by default (CLI)** — retains the `<source>/vigolium-results/` copy for review/re-import; new `--clean-raw` removes it after the run. Mutually exclusive, audit-leg only.
+- **Catch-all false-positive hardening** — `bfla-detection` and `forbidden-bypass` now drop findings when a random unprivileged path returns the same response, catching empty-200 / reflected-shell edge gateways the existing wildcard guards missed.
+- **ASP.NET false-positive hardening** — `crossdomain.xml` / `clientaccesspolicy.xml` are flagged only when actually wildcard-permissive (not merely present), and the OIDC discovery document (`/.well-known/openid-configuration`) is no longer double-reported; all downgraded Medium→Low (these are Flash/Silverlight/OIDC standards, not ASP.NET-specific).
+- **Severity recalibration** — PDF-generation-injection's plain HTML-marker reflection drops High/Firm→Medium/Tentative (the JS/SSRF/file-read variants stay High/Firm), and `web-cache-poisoning` drops Firm→Tentative.
+
+### Fixed
+
+- **Console output no longer clipped to a file or pipe** — width-based truncation now applies only to an interactive TTY (new `terminal.IsTerminal()`). Redirected output — including the `-P`/`--parallel` per-target `.console.log` — previously clipped URLs and payloads mid-token; file/pipe consumers now get the full, greppable line.
+
 ## [v0.1.26-beta] - 2026-06-08
 
 A false-positive-reduction release closing the "404 catch-all / SPA shell" and "reflected-but-not-executed" classes across the error-based injection and reflection modules: a shared error-surface status gate, structural (not bare-token) signatures, and a headless-browser confirmation tier for discovered-parameter XSS.

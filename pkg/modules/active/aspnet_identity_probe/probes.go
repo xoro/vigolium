@@ -12,15 +12,12 @@ type probe struct {
 }
 
 var probes = []probe{
-	// OIDC Discovery (IdentityServer4 / Duende / ASP.NET Core Identity API)
-	{
-		path:        "/.well-known/openid-configuration",
-		name:        "OIDC Discovery Document",
-		markers:     []string{"issuer", "authorization_endpoint", "token_endpoint", "scopes_supported"},
-		antiMarkers: []string{"404", "Not Found"},
-		sev:         severity.Medium,
-		desc:        "OpenID Connect discovery document exposed, revealing authorization endpoints, supported scopes, grant types, and token signing configuration",
-	},
+	// NOTE: the generic OIDC discovery document at /.well-known/openid-configuration
+	// is intentionally NOT probed here. It is public by design (OpenID Connect
+	// Discovery 1.0) and not ASP.NET-specific, and it is already reported once by
+	// probeOIDCDiscovery (a single Low finding with the extracted endpoint/scope/
+	// grant metadata). Listing it here too would double-report the same URL.
+
 	// IdentityServer / Duende endpoints
 	{
 		path:        "/connect/token",

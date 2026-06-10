@@ -14,8 +14,9 @@ import (
 )
 
 // TestScanPerRequest_DetectsOIDCDiscovery serves an OIDC discovery document at
-// /.well-known/openid-configuration. The module probes the fixed identity paths
-// and should flag both the probe match and the OIDC metadata enumeration follow-up.
+// /.well-known/openid-configuration. The module should flag it exactly once, via
+// the OIDC metadata enumeration follow-up (the generic discovery document is not
+// listed in the fixed probe set, so the same URL is not double-reported).
 func TestScanPerRequest_DetectsOIDCDiscovery(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

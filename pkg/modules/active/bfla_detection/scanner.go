@@ -187,7 +187,7 @@ func (m *Module) testNoAuth(
 	}
 
 	respStatus := resp.Response().StatusCode
-	respBodyBytes := resp.Body().Bytes()
+	respBodyBytes := append([]byte(nil), resp.Body().Bytes()...)
 	respBody := resp.FullResponseString()
 	respBodyLen := len(respBody)
 
@@ -204,6 +204,16 @@ func (m *Module) testNoAuth(
 	// that merely happens to be a comparable size to the protected page.
 	if origStatus == 200 && respStatus == 200 && isBodyLengthSimilar(origBodyLen, respBodyLen) &&
 		bodiesContentSimilar(origStatus, origBody, respStatus, respBodyBytes) {
+		// Confirm the privileged path differs from how the host answers an
+		// unauthenticated request to a random path with this method. A host that
+		// serves the same 200 shell (login bounce, empty body) for every path is a
+		// catch-all, not a real authorization bypass — the byte-head wildcard guard
+		// misses this when a reflected path makes the shell's head bytes differ.
+		method, _ := httpmsg.GetMethod(modifiedRaw)
+		baseStatus, baseBody, ok := probeMethodBaseline(ctx, httpClient, method)
+		if ok && matchesMethodBaseline(respStatus, respBodyBytes, baseStatus, baseBody) {
+			return nil, nil
+		}
 		ev := modkit.NewEvidenceCollector()
 		ev.Add("original-auth", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
 		return &output.ResultEvent{
@@ -270,7 +280,7 @@ func (m *Module) testDowngradedAuth(
 	}
 
 	respStatus := resp.Response().StatusCode
-	respBodyBytes := resp.Body().Bytes()
+	respBodyBytes := append([]byte(nil), resp.Body().Bytes()...)
 	respBody := resp.FullResponseString()
 	respBodyLen := len(respBody)
 
@@ -280,6 +290,13 @@ func (m *Module) testDowngradedAuth(
 
 	if origStatus == 200 && respStatus == 200 && isBodyLengthSimilar(origBodyLen, respBodyLen) &&
 		bodiesContentSimilar(origStatus, origBody, respStatus, respBodyBytes) {
+		// Reject the catch-all case where the host answers identically for a random
+		// path with this same method (see testNoAuth for the rationale).
+		method, _ := httpmsg.GetMethod(modifiedRaw)
+		baseStatus, baseBody, ok := probeMethodBaseline(ctx, httpClient, method)
+		if ok && matchesMethodBaseline(respStatus, respBodyBytes, baseStatus, baseBody) {
+			return nil, nil
+		}
 		ev := modkit.NewEvidenceCollector()
 		ev.Add("original-auth", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
 		return &output.ResultEvent{
@@ -351,7 +368,21 @@ func (m *Module) testMethodSwitching(
 
 		if resp.Response() != nil && resp.Response().StatusCode >= 200 && resp.Response().StatusCode < 300 &&
 			!wildcard.MatchesBody(resp.Response().StatusCode, resp.Body().Bytes()) {
+			respStatus := resp.Response().StatusCode
+			candBody := append([]byte(nil), resp.Body().Bytes()...)
 			respBody := resp.FullResponseString()
+			resp.Close()
+
+			// Confirm the privileged endpoint answers differently than the host does
+			// for an arbitrary path with this same method. A host that accepts
+			// POST/PUT/DELETE everywhere (e.g. an empty Content-Length:0 200 from an
+			// edge gateway) returns the same thing for "/", "/includes/" and the
+			// admin path alike — a catch-all, not a function-level auth bypass.
+			baseStatus, baseBody, ok := probeMethodBaseline(ctx, httpClient, tryMethod)
+			if ok && matchesMethodBaseline(respStatus, candBody, baseStatus, baseBody) {
+				continue
+			}
+
 			ev := modkit.NewEvidenceCollector()
 			ev.Add("original-auth", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
 			results = append(results, &output.ResultEvent{
@@ -369,13 +400,74 @@ func (m *Module) testMethodSwitching(
 					Description: fmt.Sprintf("The privileged endpoint accepts %s requests without authentication, indicating broken function-level authorization.", tryMethod),
 				},
 			})
-			resp.Close()
 			return results, nil
 		}
 		resp.Close()
 	}
 
 	return results, nil
+}
+
+// probeMethodBaseline sends method to a random, non-existent path on the same
+// host with Authorization and Cookie stripped, returning how the host answers an
+// unauthenticated request with this method for a path that cannot map to any real
+// privileged function. A host (CDN/edge/SPA gateway) that accepts the method for
+// every path — returning a uniform 2xx such as an empty Content-Length:0 body or a
+// soft login-redirect shell — yields the same answer here as on the "admin" path,
+// which lets callers reject that catch-all instead of flagging it as a
+// function-level authorization bypass. The synthetic "-vigolium-wp/" marker mirrors
+// the wildcard probe so it is unlikely to collide with a real route.
+//
+// ok is false when the probe could not be issued or produced no response.
+func probeMethodBaseline(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	method string,
+) (status int, body []byte, ok bool) {
+	probePath := "/" + utils.RandomString(12) + "-vigolium-wp/" + utils.RandomString(8)
+
+	raw, err := httpmsg.SetMethod(ctx.Request().Raw(), method)
+	if err != nil {
+		return 0, nil, false
+	}
+	if raw, err = httpmsg.SetPath(raw, probePath); err != nil {
+		return 0, nil, false
+	}
+	if raw, err = httpmsg.RemoveHeader(raw, "Authorization"); err != nil {
+		return 0, nil, false
+	}
+	if raw, err = httpmsg.RemoveHeader(raw, "Cookie"); err != nil {
+		return 0, nil, false
+	}
+
+	probeReq, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return 0, nil, false
+	}
+	probeReq = probeReq.WithService(ctx.Service())
+
+	resp, _, err := httpClient.Execute(probeReq, http.Options{NoRedirects: true})
+	if err != nil || resp == nil {
+		return 0, nil, false
+	}
+	defer resp.Close()
+	if resp.Response() == nil {
+		return 0, nil, false
+	}
+	return resp.Response().StatusCode, append([]byte(nil), resp.Body().Bytes()...), true
+}
+
+// matchesMethodBaseline reports whether a candidate response is indistinguishable
+// from the same-method baseline against a random non-existent path: identical
+// status and substantially the same body (two empty bodies count as identical via
+// QuickRatio). When true, the host returns a uniform answer for this method
+// regardless of path — a catch-all gateway, not a path-specific authorization
+// bypass — so the finding must be dropped.
+func matchesMethodBaseline(candStatus int, candBody []byte, baseStatus int, baseBody []byte) bool {
+	if candStatus != baseStatus {
+		return false
+	}
+	return bodiesContentSimilar(candStatus, candBody, baseStatus, baseBody)
 }
 
 // isAdminPath checks if the path matches known admin/privileged patterns (case-insensitive).

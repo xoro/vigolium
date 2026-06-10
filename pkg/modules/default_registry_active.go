@@ -65,6 +65,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/iis_shortname_discovery"
 	"github.com/vigolium/vigolium/pkg/modules/active/input_behavior_probe"
 	"github.com/vigolium/vigolium/pkg/modules/active/insecure_deserialization"
+	"github.com/vigolium/vigolium/pkg/modules/active/internal_header_probe"
 	"github.com/vigolium/vigolium/pkg/modules/active/java_appserver_console"
 	"github.com/vigolium/vigolium/pkg/modules/active/java_sensitive_files"
 	"github.com/vigolium/vigolium/pkg/modules/active/joomla_misconfig"
@@ -215,6 +216,7 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(proxy_pingback.New())
 	// Active modules - Misconfig
 	r.RegisterActive(cors_misconfiguration.New())
+	r.RegisterActive(internal_header_probe.New())
 	r.RegisterActive(spring_actuator_misconfig.New())
 	r.RegisterActive(host_header_injection.New())
 	r.RegisterActive(web_cache_poisoning.New())

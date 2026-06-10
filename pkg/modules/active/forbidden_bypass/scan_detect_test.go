@@ -76,6 +76,31 @@ func TestScanPerRequest_NoFalsePositive_Catchall(t *testing.T) {
 	assert.Empty(t, res, "a 200 catch-all shell must not be reported as a 403 bypass")
 }
 
+// TestScanPerRequest_NoFalsePositive_EmptyBodyCatchall reproduces the
+// bsr.netflix.net false positive: a Google-fronted edge that answers EVERY path —
+// including space-mangled payloads like "/ /logout /" and a clean random probe —
+// with a blank 200 (Content-Length: 0). The wildcard guard (ConfirmNotSoft404)
+// misses this because WildcardEntry.IsWildcard requires a non-empty body, and the
+// reproducibility gate passes because a blank 200 reproduces perfectly. The
+// random-path catch-all guard, which treats two empty bodies as identical, must
+// reject it.
+func TestScanPerRequest_NoFalsePositive_EmptyBodyCatchall(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Blank 200 for every path — no body written.
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seed403(t, srv.URL+"/logout")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an empty-body 200 catch-all must not be reported as a 403 bypass")
+}
+
 // TestScanPerRequest_NoFalsePositive_TransientBypass reproduces a transient 200:
 // the very first admin request succeeds (a flap / race / caching edge), but the
 // reproducibility re-fetch returns 404. The bypass does not reproduce, so the

@@ -3,6 +3,7 @@ package bfla_detection
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -12,6 +13,23 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
+
+// redirectShell is the 200-OK soft login-redirect page a fronting gateway returns
+// for every unauthenticated GET. It reflects the requested path into the first
+// bytes (mirroring the real bsr.netflix.net response), which makes the byte-head
+// wildcard guard miss it — each path produces a slightly different head.
+func redirectShell(path string) string {
+	return `<!DOCTYPE html>
+<html>
+  <head>
+    <title>Redirecting...</title>
+    <noscript>
+      <meta http-equiv="refresh" content="0; url=/login?original_uri=` + url.PathEscape(path) + `" />
+    </noscript>
+  </head>
+  <body>Redirecting to login...</body>
+</html>`
+}
 
 // adminBody is the privileged page content. It is large enough that the full
 // unauthenticated response (status line + headers + body) stays within 50% of
@@ -114,4 +132,40 @@ func TestScanPerRequest_LoginPageOnUnauthNoFalsePositive(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a 200 login page of similar length but different content must not be flagged as BFLA")
+}
+
+// TestScanPerRequest_CatchAllGatewayNoFalsePositive reproduces the bsr.netflix.net
+// false positive: a fronting gateway accepts POST/PUT/DELETE for EVERY path with a
+// uniform empty 200 (Content-Length: 0) and answers every unauthenticated GET with
+// the same soft login-redirect shell. The old method-switching path flagged the
+// empty 200 as a BFLA bypass because the byte-head wildcard guard does not match an
+// empty body; the same-method baseline confirmation must reject it because "/",
+// "/includes/", and the admin path all return the identical response.
+func TestScanPerRequest_CatchAllGatewayNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Non-GET methods are accepted for every path with an empty 200.
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Every GET — admin path, sibling, root, or the random wildcard probe —
+		// returns the same login-bounce shell.
+		w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+		_, _ = w.Write([]byte(redirectShell(r.URL.Path)))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	// The authenticated admin GET also lands on the login bounce, as in the report.
+	adminPath := "/includes/admin-user-details-kp5deaqq"
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+adminPath),
+		"text/html",
+		redirectShell(adminPath),
+	)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a catch-all gateway returning the same response for every path/method must not be flagged as BFLA")
 }

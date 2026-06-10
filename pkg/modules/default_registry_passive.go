@@ -12,6 +12,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/build_misconfig_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cache_auth_misconfiguration"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cache_data_leak"
+	"github.com/vigolium/vigolium/pkg/modules/passive/clickjacking_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/client_auth_guard"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_signed_url_leak"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_storage_error_info"
@@ -112,6 +113,7 @@ func registerPassiveModules(r *Registry) {
 	r.RegisterPassive(secret_detect.New())
 	r.RegisterPassive(sourcemap_detect.New())
 	r.RegisterPassive(security_headers_missing.New())
+	r.RegisterPassive(clickjacking_detect.New())
 	r.RegisterPassive(info_disclosure_detect.New())
 	r.RegisterPassive(directory_listing_detect.New())
 	r.RegisterPassive(cookie_security_detect.New())

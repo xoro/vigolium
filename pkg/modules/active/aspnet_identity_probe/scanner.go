@@ -285,10 +285,14 @@ func (m *Module) probeOIDCDiscovery(
 		Info: output.Info{
 			Name:        "OIDC Discovery Metadata Enumeration",
 			Description: "OpenID Connect discovery document reveals detailed authentication infrastructure including token endpoints, supported scopes, grant types, and signing algorithms",
-			Severity:    severity.Medium,
-			Confidence:  severity.Certain,
-			Tags:        []string{"aspnet", "identity", "oidc", "information-disclosure"},
-			Reference:   []string{"https://openid.net/specs/openid-connect-discovery-1_0.html"},
+			// The discovery document at /.well-known/openid-configuration is public
+			// by design (OpenID Connect Discovery 1.0) and not ASP.NET-specific —
+			// it is exposed identically by any OIDC provider. It is informational
+			// and needs human review, so Low and not tagged "aspnet".
+			Severity:   severity.Low,
+			Confidence: severity.Certain,
+			Tags:       []string{"identity", "oidc", "information-disclosure"},
+			Reference:  []string{"https://openid.net/specs/openid-connect-discovery-1_0.html"},
 		},
 	}
 }

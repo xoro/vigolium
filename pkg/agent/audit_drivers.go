@@ -122,6 +122,12 @@ type AuditDriverCfgInput struct {
 	// ignored for the piolium harness.
 	KeepRaw bool
 
+	// KeepSourceOutputDir suppresses the post-run cleanup of
+	// <source>/vigolium-results/ from the source tree (a session copy is
+	// always synced regardless). The CLI sets it from --keep-raw/--clean-raw
+	// so the on-disk results can be reviewed or re-imported. Audit-only.
+	KeepSourceOutputDir bool
+
 	// AuthOverride carries the resolved BYOK bundle for this run. It is
 	// already folded into Invocation.Auth by the caller (via
 	// ResolveAuditDriverInvocation's variadic override or
@@ -153,6 +159,7 @@ func BuildAuditDriverCfg(in AuditDriverCfgInput) AuditAgentConfig {
 		StreamWriter:          in.StreamWriter,
 		ShowThinking:          in.ShowThinking,
 		KeepRaw:               in.KeepRaw,
+		KeepSourceOutputDir:   in.KeepSourceOutputDir,
 		AuthOverride:          in.AuthOverride,
 	}
 }

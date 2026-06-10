@@ -22,6 +22,9 @@ type PayloadContext struct {
 	InjectionType string
 	ModuleID      string
 	RequestHash   string
+	// CallbackURL is the unique OAST URL that was planted (the payload the target
+	// called back to). Retained so the finding can show exactly what was injected.
+	CallbackURL string
 }
 
 // Service wraps an interactsh client with payload tracking and result emission.
@@ -163,6 +166,7 @@ func (s *Service) GenerateURL(targetURL, paramName, injectionType, moduleID, req
 			InjectionType: injectionType,
 			ModuleID:      moduleID,
 			RequestHash:   requestHash,
+			CallbackURL:   url,
 		})
 	}
 
@@ -240,6 +244,10 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 		zap.String("remote_addr", interaction.RemoteAddress),
 		zap.Bool("correlated", found))
 
+	// Recover the request that planted the payload so both the persisted
+	// interaction and the finding can be traced back to it without a manual join.
+	originUUID, origin := s.originRecord(pctx.RequestHash)
+
 	// Save to database
 	if s.repo != nil {
 		record := &database.OASTInteraction{
@@ -257,6 +265,7 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 			ParameterName: pctx.ParameterName,
 			InjectionType: pctx.InjectionType,
 			ModuleID:      pctx.ModuleID,
+			Payload:       pctx.CallbackURL,
 		}
 		if err := s.repo.SaveOASTInteraction(context.Background(), record); err != nil {
 			zap.L().Warn("OAST: failed to save interaction", zap.Error(err))
@@ -291,27 +300,112 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 		ModuleShort:      "Out-of-band interaction detected via OAST callback",
 	}
 
+	// Attach the originating request and human-readable trace anchors so the
+	// finding answers "which request caused this callback?" on its own.
+	enrichOASTResult(result, interaction, pctx, origin)
+
 	// Save finding to database, linked to the originating HTTP record
-	s.saveFinding(result, pctx.RequestHash)
+	s.saveFinding(result, originUUID)
 
 	if s.emitResult != nil {
 		s.emitResult(result)
 	}
 }
 
-// saveFinding persists a Finding to the database, linked to the HTTP record
-// that originated the OAST payload (resolved via requestHash).
-func (s *Service) saveFinding(result *output.ResultEvent, requestHash string) {
-	if s.repo == nil || requestHash == "" {
+// originRecord resolves the HTTP record that planted an OAST payload. It prefers
+// the executor's in-memory hash→UUID resolver, then loads the record from the
+// database; if the resolver is empty (a late callback after the executor is gone)
+// it falls back to a request-hash lookup. Returns the record UUID — which may be
+// non-empty even when the body could not be loaded — and the record (may be nil).
+func (s *Service) originRecord(requestHash string) (string, *database.HTTPRecord) {
+	if requestHash == "" {
+		return "", nil
+	}
+	var uuid string
+	if s.resolveRequestUUID != nil {
+		uuid = s.resolveRequestUUID(requestHash)
+	}
+	if s.repo == nil {
+		return uuid, nil
+	}
+	ctx := context.Background()
+	if uuid != "" {
+		if rec, err := s.repo.GetRecordByUUID(ctx, uuid); err == nil && rec != nil {
+			return uuid, rec
+		}
+	}
+	// Fallback: recover by request hash (the in-memory resolver may be gone).
+	if rec, err := s.repo.GetRecordByRequestHash(ctx, s.projectUUID, requestHash); err == nil && rec != nil {
+		return rec.UUID, rec
+	}
+	return uuid, nil
+}
+
+// enrichOASTResult embeds the originating request/response and trace anchors into
+// an out-of-band finding so it can be traced back to the request that planted the
+// payload without a manual database join. origin may be nil.
+func enrichOASTResult(result *output.ResultEvent, interaction *server.Interaction, pctx PayloadContext, origin *database.HTTPRecord) {
+	if pctx.CallbackURL != "" {
+		result.ExtractedResults = append(result.ExtractedResults, "callback_url="+pctx.CallbackURL)
+	}
+
+	if origin != nil {
+		originLine := strings.TrimSpace(origin.Method + " " + origin.URL)
+		if origin.UUID != "" {
+			result.ExtractedResults = append(result.ExtractedResults, "http_record="+origin.UUID)
+		}
+		if originLine != "" {
+			result.ExtractedResults = append(result.ExtractedResults, "origin_request="+originLine)
+		}
+		// Embed the planting request/response so the finding card shows them inline
+		// instead of an empty Request panel.
+		if len(origin.RawRequest) > 0 {
+			result.Request = string(origin.RawRequest)
+		}
+		if len(origin.RawResponse) > 0 {
+			result.Response = string(origin.RawResponse)
+		}
+		// Fold the same anchors into the description so plain-text outputs
+		// (console, JSONL) are self-describing too.
+		if originLine != "" {
+			result.Info.Description += " Originating request: " + originLine
+			if origin.UUID != "" {
+				result.Info.Description += " (http_record " + origin.UUID + ")"
+			}
+			result.Info.Description += "."
+		}
+	}
+
+	if !interaction.Timestamp.IsZero() {
+		result.ExtractedResults = append(result.ExtractedResults,
+			"interacted_at="+interaction.Timestamp.UTC().Format(time.RFC3339))
+	}
+
+	// The raw out-of-band request the target's infrastructure sent to the
+	// collaborator — direct, unforgeable proof of the callback — kept as evidence.
+	if cb := strings.TrimSpace(interaction.RawRequest); cb != "" {
+		label := "oast-callback (" + interaction.Protocol
+		if interaction.RemoteAddress != "" {
+			label += " from " + interaction.RemoteAddress
+		}
+		label += ")"
+		if ev := output.BuildEvidence(label, interaction.RawRequest, interaction.RawResponse); ev != "" {
+			result.AdditionalEvidence = append(result.AdditionalEvidence, ev)
+		}
+	}
+}
+
+// saveFinding persists a Finding to the database, linked to the originating HTTP
+// record when one was resolved (recordUUID may be empty — the finding is still
+// saved so out-of-band hits are never silently dropped).
+func (s *Service) saveFinding(result *output.ResultEvent, recordUUID string) {
+	if s.repo == nil || result == nil {
 		return
 	}
 
-	// Resolve the request hash to a database record UUID
 	var recordUUIDs []string
-	if s.resolveRequestUUID != nil {
-		if uuid := s.resolveRequestUUID(requestHash); uuid != "" {
-			recordUUIDs = append(recordUUIDs, uuid)
-		}
+	if recordUUID != "" {
+		recordUUIDs = append(recordUUIDs, recordUUID)
 	}
 
 	if err := s.repo.SaveFinding(context.Background(), result, recordUUIDs, s.scanUUID, s.projectUUID); err != nil {

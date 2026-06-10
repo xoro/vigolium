@@ -126,6 +126,31 @@ func (r *Repository) GetRecordByUUID(ctx context.Context, uuid string) (*HTTPRec
 	return record, nil
 }
 
+// GetRecordByRequestHash retrieves the most recent HTTP record whose raw request
+// hashes to requestHash (the SHA-256 over the raw request bytes, matching
+// httpmsg.HttpRequest.ID). It recovers the originating request for an
+// out-of-band (OAST) finding when the in-memory hash→UUID resolver is no longer
+// available — e.g. a callback that lands after the executor that planted the
+// payload has been torn down. projectUUID may be empty to search across projects.
+func (r *Repository) GetRecordByRequestHash(ctx context.Context, projectUUID, requestHash string) (*HTTPRecord, error) {
+	if requestHash == "" {
+		return nil, sql.ErrNoRows
+	}
+	record := &HTTPRecord{}
+	q := r.db.NewSelect().
+		Model(record).
+		Where("request_hash = ?", requestHash).
+		Order("created_at DESC").
+		Limit(1)
+	if projectUUID != "" {
+		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 // GetRecordsByHostname retrieves HTTP records for a hostname within a project.
 func (r *Repository) GetRecordsByHostname(ctx context.Context, projectUUID, hostname string, limit int) ([]*HTTPRecord, error) {
 	var records []*HTTPRecord

@@ -45,8 +45,16 @@ var (
 	auditCommitDepth  int
 	auditNoDedup      bool
 	auditKeepRaw      bool
+	auditCleanRaw     bool
 	auditProvider     string
 	auditAgent        string
+
+	// auditStateless (-S) runs the audit into a throwaway temp DB (the main
+	// DB is left untouched) and auto-emits a self-contained HTML report,
+	// mirroring `vigolium scan -S`. auditReportOutput (-o) overrides the
+	// report destination.
+	auditStateless    bool
+	auditReportOutput string
 
 	auditPiProvider string
 	auditPiModel    string
@@ -118,10 +126,31 @@ load and turn into a report in one command with
 	RunE: runAgentAudit,
 }
 
+// auditCmd mirrors agentAuditCmd at the top level so users can invoke a
+// unified audit with `vigolium audit` without typing the `agent` parent,
+// matching the `vigolium olium` alias. Both share the package-level flag
+// state via registerAuditFlags, so either entry point behaves identically.
+// Long/Example are wired from agentAuditCmd / usage.go so they stay in sync.
+var auditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Run a unified security audit (alias for `vigolium agent audit`)",
+	Long:  agentAuditCmd.Long,
+	RunE:  runAgentAudit,
+}
+
 func init() {
 	agentCmd.AddCommand(agentAuditCmd)
+	rootCmd.AddCommand(auditCmd)
 
-	f := agentAuditCmd.Flags()
+	registerAuditFlags(agentAuditCmd)
+	registerAuditFlags(auditCmd)
+}
+
+// registerAuditFlags wires the shared audit flag set onto a cobra command.
+// The backing variables are package-level, so agentAuditCmd and auditCmd
+// read from the same state regardless of which entry point is invoked.
+func registerAuditFlags(cmd *cobra.Command) {
+	f := cmd.Flags()
 	f.StringVar(&auditDriver, "driver", agent.AuditDriverAuto, "Audit driver: auto (audit; fall back to piolium when claude/codex CLI missing), both (audit then piolium), audit, or piolium (default auto)")
 	f.StringVar(&auditIntensity, "intensity", "balanced", "Audit intensity preset: quick, balanced, or deep")
 	f.StringVar(&auditMode, "mode", "", "Audit mode override (overrides --intensity). Shared modes: lite, balanced, deep, revisit, confirm, merge. Driver-specific: piolium=longshot/smoke/diff/status, audit=reinvest/refresh/mock/diff/status")
@@ -134,7 +163,10 @@ func init() {
 	f.BoolVar(&auditUploadResults, "upload-results", false, "Upload session bundle to cloud storage after completion (requires storage config)")
 	f.IntVar(&auditCommitDepth, "commit-depth", 1, "git clone --depth value when --source is a git URL (default 1; use 0 for full history; overrides --intensity)")
 	f.BoolVar(&auditNoDedup, "no-dedup", false, "Skip the post-pass project-wide findings dedup that runs after the audit completes")
-	f.BoolVar(&auditKeepRaw, "keep-raw", false, "[audit] Keep raw scanner output, draft findings, and intermediate workspaces under <source>/vigolium-results/ for manual review (overrides audit's deep/confirm auto-prune). No effect on the piolium leg.")
+	f.BoolVar(&auditKeepRaw, "keep-raw", true, "[audit] Keep raw scanner output, draft findings, and intermediate workspaces under <source>/vigolium-results/ for manual review (overrides audit's deep/confirm auto-prune). On by default; the source-folder copy is also retained. Pass --clean-raw to remove it from the source tree. No effect on the piolium leg.")
+	f.BoolVar(&auditCleanRaw, "clean-raw", false, "[audit] Remove <source>/vigolium-results/ from the source tree after the run (the session copy is always kept). Inverts the default --keep-raw retention of the source-folder copy. No effect on the piolium leg.")
+	f.BoolVarP(&auditStateless, "stateless", "S", false, "Run the audit into a throwaway temporary database (the main DB is left untouched) and auto-write a self-contained HTML report. Mirrors 'vigolium scan -S'. Not valid with --interactive.")
+	f.StringVarP(&auditReportOutput, "output", "o", "", "HTML report path for --stateless runs (default vigolium-result/vigolium-audit-report.html; supports gs://<project>/<key> and {ts}). Only applies with -S/--stateless.")
 
 	// Audit-only. audit now drives both Claude Code and Codex
 	// internally, so anthropic-* and openai-* providers are both
@@ -186,6 +218,31 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		return runListModes(false)
 	}
 
+	// --stateless (-S): run the whole audit against a throwaway temp DB so
+	// the main DB is untouched, then auto-emit a self-contained HTML report
+	// (mirrors `vigolium scan -S`). Repoint globalDB at the scratch before
+	// the first getDB() so every DB access in this run opens it. The
+	// temp-file removal defer is registered here — before defer
+	// closeDatabaseOnExit() — so LIFO ordering removes the file only after
+	// the DB connection is closed.
+	if auditStateless {
+		if auditInteractive {
+			return fmt.Errorf("--stateless/-S cannot be combined with --interactive (interactive bypasses the database and report import)")
+		}
+		tmpFile, tmpErr := os.CreateTemp("", "vigolium-audit-stateless-*.sqlite")
+		if tmpErr != nil {
+			return fmt.Errorf("create temporary database: %w", tmpErr)
+		}
+		statelessDBPath := tmpFile.Name()
+		_ = tmpFile.Close()
+		defer func() {
+			_ = os.Remove(statelessDBPath)
+			_ = os.Remove(statelessDBPath + "-wal")
+			_ = os.Remove(statelessDBPath + "-shm")
+		}()
+		globalDB = statelessDBPath
+	}
+
 	defer syncLogger()
 	defer closeDatabaseOnExit()
 
@@ -216,11 +273,29 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--interactive is audit-only and cannot be combined with --driver=piolium (omit --driver or use --driver=audit)")
 	}
 
-	// --keep-raw forwards to vigolium-audit's own --keep-raw; piolium has
-	// no equivalent. Warn (don't error) so --driver=auto/both runs that
-	// happen to fall through to piolium still proceed.
-	if auditKeepRaw && auditDriver == agent.AuditDriverPiolium {
-		fmt.Fprintf(os.Stderr, "%s --keep-raw is audit-only and has no effect with --driver=piolium\n",
+	// --keep-raw / --clean-raw are audit-only. keep-raw is on by default, so
+	// only flag the conflict when the operator explicitly set both, and only
+	// warn about the piolium no-op when they explicitly opted into keep-raw
+	// (otherwise the default-on flag would warn on every --driver=piolium run).
+	keepRawSet := cmd != nil && cmd.Flags().Changed("keep-raw")
+	if auditCleanRaw && keepRawSet && auditKeepRaw {
+		return fmt.Errorf("--keep-raw and --clean-raw are mutually exclusive (omit --keep-raw, which is on by default, to clean the source folder)")
+	}
+	if auditDriver == agent.AuditDriverPiolium {
+		if keepRawSet && auditKeepRaw {
+			fmt.Fprintf(os.Stderr, "%s --keep-raw is audit-only and has no effect with --driver=piolium\n",
+				terminal.WarningSymbol())
+		}
+		if auditCleanRaw {
+			fmt.Fprintf(os.Stderr, "%s --clean-raw is audit-only and has no effect with --driver=piolium\n",
+				terminal.WarningSymbol())
+		}
+	}
+
+	// -o/--output only affects the --stateless HTML report; warn (don't error)
+	// when it's set without -S so the run still proceeds.
+	if strings.TrimSpace(auditReportOutput) != "" && !auditStateless {
+		fmt.Fprintf(os.Stderr, "%s -o/--output only applies with --stateless/-S; ignoring\n",
 			terminal.WarningSymbol())
 	}
 
@@ -367,6 +442,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 			Invocation:            invocation,
 			Stream:                false,
 			KeepRaw:               auditKeepRaw,
+			KeepSourceOutputDir:   keepSourceResults(),
 			AuthOverride:          authOverride,
 		})
 
@@ -492,6 +568,23 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 
 	allOK, allFailed := driverOutcomes(plans)
 
+	// --stateless: the audit drivers imported the on-disk vigolium-results
+	// folder(s) into the throwaway temp DB, so render the self-contained HTML
+	// report from those findings now (before the temp DB is discarded by the
+	// deferred cleanup). Skipped when every driver failed — nothing to report.
+	if auditStateless {
+		if allFailed {
+			fmt.Fprintf(os.Stderr, "%s --stateless: skipping HTML report — no audit driver completed\n",
+				terminal.WarningSymbol())
+		} else if db == nil {
+			fmt.Fprintf(os.Stderr, "%s --stateless: skipping HTML report — database unavailable\n",
+				terminal.WarningSymbol())
+		} else if err := emitAuditStatelessReport(context.Background(), db, projectUUID, auditReportOutput, absTarget, startedAt); err != nil {
+			fmt.Fprintf(os.Stderr, "%s --stateless: HTML report generation failed: %v\n",
+				terminal.WarningSymbol(), err)
+		}
+	}
+
 	// Skip upload when any driver failed so partial uploads don't get
 	// stamped as "complete results".
 	if auditUploadResults && allOK {
@@ -504,6 +597,14 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("all participating audit drivers failed")
 	}
 	return nil
+}
+
+// keepSourceResults reports whether <source>/vigolium-results/ should be left
+// in the source tree after the run (a session copy is always synced). --keep-raw
+// is on by default, so the source-folder copy is retained unless the operator
+// passes --clean-raw, which forces the post-run cleanup. Audit-leg only.
+func keepSourceResults() bool {
+	return auditKeepRaw && !auditCleanRaw
 }
 
 // driverOutcomes summarizes the plans into the two boolean flags every
@@ -565,6 +666,7 @@ func runAuditDriver(ctx context.Context, name, parentSessionDir, parentUUID, pro
 			StreamWriter:          streamWriter,
 			ShowThinking:          auditShowThinking,
 			KeepRaw:               auditKeepRaw,
+			KeepSourceOutputDir:   keepSourceResults(),
 			AuthOverride:          authOverride,
 		})
 		plan.runner = agent.NewAuditRunner(cfg, repo)

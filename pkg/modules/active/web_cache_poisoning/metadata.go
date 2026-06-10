@@ -25,6 +25,6 @@ Detects web cache poisoning vulnerabilities by injecting values via unkeyed head
 
 	ModuleConfirmation = "Confirmed when unkeyed header values are reflected in the response body, indicating cache-poisoning potential"
 	ModuleSeverity     = severity.High
-	ModuleConfidence   = severity.Firm
+	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"cache-poisoning", "header-security", "moderate"}
 )

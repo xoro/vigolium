@@ -144,6 +144,28 @@ func TestFormatScreenIncludesExtractedAndFuzzing(t *testing.T) {
 	assert.Contains(t, out, "[id]", "fuzzing parameter rendered")
 }
 
+func TestFormatScreenTruncationRespectsTTY(t *testing.T) {
+	// A URL far longer than the 150-column TerminalWidth fallback.
+	longURL := "https://example.com/" + strings.Repeat("a", 300)
+	w := &StandardWriter{}
+	ev := &ResultEvent{ModuleID: "m", Info: Info{Severity: severity.Info}, Matched: longURL}
+
+	prev := terminal.IsTerminal()
+	defer terminal.SetIsTerminal(prev)
+
+	// Non-TTY (file/pipe, e.g. parallel-scan .console.log): full line, no ellipsis.
+	terminal.SetIsTerminal(false)
+	out := terminal.StripANSI(string(w.formatScreen(ev)))
+	assert.Contains(t, out, longURL, "redirected output must keep the full URL")
+	assert.NotContains(t, out, "…", "redirected output must not be truncated")
+
+	// Interactive TTY: width-based truncation kicks in and clips with an ellipsis.
+	terminal.SetIsTerminal(true)
+	out = terminal.StripANSI(string(w.formatScreen(ev)))
+	assert.NotContains(t, out, longURL, "terminal output should truncate a long URL")
+	assert.Contains(t, out, "…", "terminal output should mark truncation with an ellipsis")
+}
+
 func TestFormatScreenPrependsHTTPMethod(t *testing.T) {
 	w := &StandardWriter{}
 	ev := &ResultEvent{

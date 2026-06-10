@@ -11,6 +11,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // pdfParamNames are parameter name substrings that suggest content/HTML input
@@ -23,18 +24,24 @@ var pdfParamNames = []string{
 }
 
 // reflectionPayload defines an HTML/JS injection payload and the marker to
-// search for in the response.
+// search for in the response. A zero-value sev/conf inherits the module
+// defaults (High/Firm); set them to override per variant.
 type reflectionPayload struct {
 	payload string
 	marker  string
 	name    string
+	sev     severity.Severity
+	conf    severity.Confidence
 }
 
 var reflectionPayloads = []reflectionPayload{
-	{`<h1>VIGOLIUM_PDF_PROBE_7x8k2</h1>`, "VIGOLIUM_PDF_PROBE_7x8k2", "html-reflection"},
-	{`<img src="x" onerror="document.write('VIGOLIUM_PDF_PROBE_7x8k2')">`, "VIGOLIUM_PDF_PROBE_7x8k2", "js-execution"},
-	{`<link rel="stylesheet" href="http://127.0.0.1:0/VIGOLIUM_PDF_SSRF">`, "VIGOLIUM_PDF_SSRF", "ssrf-link"},
-	{`<iframe src="file:///etc/hostname"></iframe>`, "", "file-read-iframe"},
+	// Plain HTML marker reflection alone doesn't prove server-side PDF
+	// rendering — a normal reflection can echo it back — so this variant is
+	// downgraded to Medium/Tentative.
+	{`<h1>VIGOLIUM_PDF_PROBE_7x8k2</h1>`, "VIGOLIUM_PDF_PROBE_7x8k2", "html-reflection", severity.Medium, severity.Tentative},
+	{`<img src="x" onerror="document.write('VIGOLIUM_PDF_PROBE_7x8k2')">`, "VIGOLIUM_PDF_PROBE_7x8k2", "js-execution", severity.Undefined, severity.ConfidenceUndefined},
+	{`<link rel="stylesheet" href="http://127.0.0.1:0/VIGOLIUM_PDF_SSRF">`, "VIGOLIUM_PDF_SSRF", "ssrf-link", severity.Undefined, severity.ConfidenceUndefined},
+	{`<iframe src="file:///etc/hostname"></iframe>`, "", "file-read-iframe", severity.Undefined, severity.ConfidenceUndefined},
 }
 
 // oastPayloadTemplates define HTML tags that trigger outbound connections.
@@ -150,6 +157,8 @@ func (m *Module) ScanPerInsertionPoint(
 				Info: output.Info{
 					Name:        fmt.Sprintf("PDF Generation Injection: %s", rp.name),
 					Description: fmt.Sprintf("Injected %q into parameter %q — %s", rp.payload, ip.Name(), detail),
+					Severity:    rp.sev,
+					Confidence:  rp.conf,
 				},
 			})
 			resp.Close()
