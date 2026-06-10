@@ -14,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/har"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/formats/postman"
+	"github.com/vigolium/vigolium/pkg/storagesig"
 	"go.uber.org/zap"
 )
 
@@ -45,9 +46,20 @@ func (h *Handlers) isIngestInScope(rr *httpmsg.HttpRequestResponse) bool {
 	if matcher == nil {
 		return true
 	}
-	// Always filter static files regardless of applied_on_ingest
+	// Always filter static files regardless of applied_on_ingest — except
+	// object-storage assets, kept as metadata-only (body stripped) so the CDN
+	// traversal modules can probe storage-fronted static URLs.
 	if matcher.IsStaticFile(rr.Request().Path()) {
-		return false
+		var hg storagesig.HeaderGetter
+		if rr.HasResponse() && rr.Response() != nil {
+			hg = rr.Response()
+		}
+		if !storagesig.KeepStaticAsMeta(rr.Request().Path(), hg) {
+			return false
+		}
+		if rr.Response() != nil {
+			rr.Response().TruncateBody(0)
+		}
 	}
 	if !h.settings.Scope.AppliedOnIngest {
 		return true

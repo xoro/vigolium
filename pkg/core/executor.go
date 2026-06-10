@@ -24,6 +24,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/storagesig"
 	"github.com/vigolium/vigolium/pkg/work"
 	"go.uber.org/zap"
 )
@@ -247,6 +248,42 @@ type Executor struct {
 	// this struct focused on orchestration rather than implementation state.
 	caches scanCaches
 	pool   workerPool
+
+	// storageHosts records hosts observed to front object storage (a response
+	// carried a storage backend signal) so the static-file carve-out keeps
+	// sibling static assets on the same host. Key: host → struct{}.
+	storageHosts sync.Map
+}
+
+// markStorageHost records that host fronts object storage.
+func (e *Executor) markStorageHost(host string) {
+	if host != "" {
+		e.storageHosts.Store(host, struct{}{})
+	}
+}
+
+// isLearnedStorageHost reports whether host was previously seen fronting
+// object storage this scan.
+func (e *Executor) isLearnedStorageHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	_, ok := e.storageHosts.Load(host)
+	return ok
+}
+
+// staticStorageCandidate reports whether a static-file request looks like an
+// object-storage asset worth keeping (recorded metadata-only) rather than
+// dropping: a /obj/<bucket>/<object> path shape, or a host already learned to
+// front object storage.
+func (e *Executor) staticStorageCandidate(rr *httpmsg.HttpRequestResponse) bool {
+	if rr == nil || rr.Request() == nil {
+		return false
+	}
+	if storagesig.LooksLikeStorageObjectPath(rr.Request().Path()) {
+		return true
+	}
+	return rr.Service() != nil && e.isLearnedStorageHost(rr.Service().Host())
 }
 
 // scanCaches groups the Executor's per-scan lookup and dedup state. Every field
@@ -818,11 +855,17 @@ func (e *Executor) drainFeedback(ctx context.Context, itemCh chan<- *work.WorkIt
 // sendItem applies scope/static filters and sends the item to itemCh.
 // Returns false if context is cancelled.
 func (e *Executor) sendItem(ctx context.Context, item *work.WorkItem, itemCh chan<- *work.WorkItem) bool {
-	// Always filter static files before HTTP fetch (unconditional)
+	// Always filter static files before HTTP fetch — EXCEPT object-storage
+	// assets, which are kept and recorded metadata-only (HEAD, body stripped)
+	// so the CDN traversal modules can probe storage-fronted static URLs.
 	if e.cfg.StaticFileMatcher != nil &&
 		e.cfg.StaticFileMatcher.IsStaticFile(item.Request.Request().Path()) {
-		item.Complete()
-		return true
+		if e.staticStorageCandidate(item.Request) {
+			item.StaticMeta = true
+		} else {
+			item.Complete()
+			return true
+		}
 	}
 
 	// Pre-request scope check (host/path only — avoids HTTP call)
@@ -955,9 +998,32 @@ func (e *Executor) processItem(ctx context.Context, item *work.WorkItem) {
 	}
 
 	var httpResp *httpmsg.HttpResponse
-	req, httpResp, pooledBuf, ok := e.fetchBaselineResponse(ctx, req)
+	var ok bool
+	if item.StaticMeta {
+		// Object-storage metadata items record the URL + headers (status,
+		// content-type, content-length), never the (large/binary) object body:
+		// a HEAD, falling back to a ranged GET for origins that reject HEAD.
+		req, httpResp, pooledBuf, ok = e.fetchStaticMetaResponse(ctx, req)
+	} else {
+		req, httpResp, pooledBuf, ok = e.fetchBaselineResponse(ctx, req)
+	}
 	if !ok {
 		return
+	}
+
+	// Learn object-storage-backed hosts from any storage-signalled response so
+	// the static-file carve-out keeps sibling assets on the same host.
+	if req.Service() != nil && storagesig.ResponseHasStorageSignal(httpResp) {
+		e.markStorageHost(req.Service().Host())
+	}
+
+	// Static metadata items: keep only genuine storage assets, body stripped.
+	if item.StaticMeta {
+		if !storagesig.ResponseHasStorageSignal(httpResp) &&
+			!storagesig.LooksLikeStorageObjectPath(req.Request().Path()) {
+			return // storage hint did not pan out; drop without recording
+		}
+		httpResp.TruncateBody(0)
 	}
 
 	// Notify traffic callback
@@ -1051,6 +1117,47 @@ func (e *Executor) processItem(ctx context.Context, item *work.WorkItem) {
 	if !skipActive {
 		e.runActiveStage(ctx, req, &filter, &elig)
 	}
+}
+
+// fetchStaticMetaResponse fetches headers-only metadata for an object-storage
+// static asset: a HEAD request, falling back to a ranged GET (Range: bytes=0-0)
+// when the origin rejects HEAD (405/501). The full object body is never
+// downloaded; callers still strip whatever minimal body returns.
+func (e *Executor) fetchStaticMetaResponse(ctx context.Context, base *httpmsg.HttpRequestResponse) (*httpmsg.HttpRequestResponse, *httpmsg.HttpResponse, []byte, bool) {
+	req, httpResp, pooledBuf, ok := e.fetchBaselineResponse(ctx, staticMetaProbe(base, "HEAD", ""))
+	if ok && !headRejectedStatus(httpResp.StatusCode()) {
+		return req, httpResp, pooledBuf, true
+	}
+	// Release the HEAD buffer before retrying with a ranged GET.
+	if pooledBuf != nil {
+		putResponseBuffer(pooledBuf)
+	}
+	return e.fetchBaselineResponse(ctx, staticMetaProbe(base, "GET", "bytes=0-0"))
+}
+
+// staticMetaProbe builds a header-only probe request from base: a method
+// override plus an optional Range header. Returns base unchanged on parse error.
+func staticMetaProbe(base *httpmsg.HttpRequestResponse, method, rangeHdr string) *httpmsg.HttpRequestResponse {
+	raw := base.Request().Raw()
+	if m, err := httpmsg.SetMethod(raw, method); err == nil {
+		raw = m
+	}
+	if rangeHdr != "" {
+		if h, err := httpmsg.AddHeader(raw, "Range", rangeHdr); err == nil {
+			raw = h
+		}
+	}
+	req, err := httpmsg.ParseRawRequest(string(raw))
+	if err != nil {
+		return base
+	}
+	return req.WithService(base.Service())
+}
+
+// headRejectedStatus reports whether a status indicates the origin refused the
+// HEAD method, so a ranged GET retry is warranted.
+func headRejectedStatus(status int) bool {
+	return status == 405 || status == 501
 }
 
 func (e *Executor) fetchBaselineResponse(ctx context.Context, req *httpmsg.HttpRequestResponse) (*httpmsg.HttpRequestResponse, *httpmsg.HttpResponse, []byte, bool) {

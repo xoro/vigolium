@@ -19,6 +19,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/backup_file_discovery"
 	"github.com/vigolium/vigolium/pkg/modules/active/bfla_detection"
 	"github.com/vigolium/vigolium/pkg/modules/active/cache_deception"
+	"github.com/vigolium/vigolium/pkg/modules/active/cdn_object_traversal_listing"
 	"github.com/vigolium/vigolium/pkg/modules/active/client_prototype_pollution"
 	"github.com/vigolium/vigolium/pkg/modules/active/cloud_bucket_takeover"
 	"github.com/vigolium/vigolium/pkg/modules/active/cloud_origin_bypass"
@@ -309,6 +310,7 @@ func registerActiveModules(r *Registry) {
 	r.RegisterActive(magento_misconfig.New())
 	// Active modules - Cloud Storage Security
 	r.RegisterActive(cloud_storage_listing.New())
+	r.RegisterActive(cdn_object_traversal_listing.New())
 	r.RegisterActive(cloud_bucket_takeover.New())
 	r.RegisterActive(cloud_origin_bypass.New())
 	r.RegisterActive(cloud_public_read.New())

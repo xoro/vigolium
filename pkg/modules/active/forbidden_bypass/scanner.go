@@ -1,6 +1,7 @@
 package forbidden_bypass
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/pkg/errors"
@@ -13,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/infra"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 type Module struct {
@@ -71,6 +73,16 @@ func (m *Module) ScanPerRequest(
 	pathBypassResults, err := bypassPath(urlx, ctx, httpClient, scanCtx)
 	if err == nil && len(pathBypassResults) > 0 {
 		results = append(results, pathBypassResults...)
+		return results, nil
+	}
+
+	// Trusted identity-header spoofing is a distinct, higher-severity class than the
+	// generic IP/rewrite header tricks below, so it runs first: a confirmed identity
+	// bypass should be the reported finding rather than being masked by a lower-value
+	// IP-spoof hit on the same forbidden resource.
+	trustedHeaderResults, err := bypassTrustedIdentityHeaders(urlx, ctx, httpClient, scanCtx)
+	if err == nil && len(trustedHeaderResults) > 0 {
+		results = append(results, trustedHeaderResults...)
 		return results, nil
 	}
 
@@ -285,6 +297,229 @@ func bypassHeaders(
 	}
 
 	return results, nil
+}
+
+// trustedIdentityHeaders are request headers that upstream reverse proxies / SSO
+// gateways (oauth2-proxy, nginx auth_request, Kong, ...) inject AFTER
+// authenticating a user. A backend reached directly (proxy bypassed) may wrongly
+// trust a client-supplied value, so asserting a privileged identity in one of
+// these can turn a 401/403 into an authorized 200. Names are the canonical
+// lowercase form.
+var trustedIdentityHeaders = []string{
+	"x-forwarded-user", "x-forwarded-email", "x-forwarded-role", "x-forwarded-groups",
+	"x-forwarded-login", "x-forwarded-remote-user", "x-forwarded-preferred-username",
+	"x-webauth-user", "x-remote-user", "x-auth-request-user", "x-auth-request-email",
+	"x-auth-request-groups", "x-authenticated-user", "x-user",
+	"x-user-id", "x-user-email", "x-user-role",
+	"x-forwarded-preferred-user",
+	"x-sso-user", "remote-user", "x-consumer-username",
+}
+
+// trustedHeaderProbeValue is the privileged principal asserted in each trusted
+// identity header. A backend that trusts the header treats the request as this
+// user, flipping a forbidden baseline into an authorized response.
+const trustedHeaderProbeValue = "admin"
+
+// bypassTrustedIdentityHeaders tests whether the backend trusts a client-supplied
+// reverse-proxy/SSO identity header to make an authorization decision. It first
+// probes each header on its own (precise attribution — exactly which header is
+// trusted), then, only if none confirmed alone, sends ONE combined probe that
+// asserts the identity across every header at once: some gateways (e.g.
+// oauth2-proxy) gate on several headers together (user + email + groups), which a
+// single-header probe would miss. Every candidate 200 must clear the multi-layer
+// confirmation in confirmTrustedHeaderBypass before it is reported. Only the first
+// confirmed bypass is returned, consistent with the module's other phases.
+func bypassTrustedIdentityHeaders(
+	urlx *urlutil.URL,
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
+) ([]*output.ResultEvent, error) {
+	var results []*output.ResultEvent
+
+	baseRaw := ctx.Request().Raw()
+	baselineBody := string(ctx.Response().Body())
+
+	// Phase 1 — one header at a time (precise attribution).
+	for _, header := range trustedIdentityHeaders {
+		modifiedRaw, err := httpmsg.AddOrReplaceHeader(baseRaw, header, trustedHeaderProbeValue)
+		if err != nil {
+			continue
+		}
+		ev, abort := evalTrustedHeaderProbe(
+			urlx, ctx, httpClient, scanCtx, baseRaw, modifiedRaw, baselineBody,
+			header,
+			fmt.Sprintf("%s: %s", header, trustedHeaderProbeValue),
+			fmt.Sprintf("Found 401/403 authentication bypass via the trusted identity header %q set to %q. "+
+				"The backend trusts a client-supplied identity header that is normally injected by an upstream "+
+				"reverse proxy / SSO gateway (oauth2-proxy, nginx auth_request, Kong); reached directly the header "+
+				"can be spoofed to assert a privileged identity and gain access to a forbidden resource.",
+				header, trustedHeaderProbeValue),
+		)
+		if abort {
+			return results, nil
+		}
+		if ev != nil {
+			results = append(results, ev)
+			return results, nil
+		}
+	}
+
+	// Phase 2 — all trusted identity headers at once (gateways that require several
+	// together). Built once from the clean baseline; `combined` guards against
+	// emitting a pointless bare-request probe if no header could be applied.
+	combinedRaw := baseRaw
+	combined := false
+	for _, header := range trustedIdentityHeaders {
+		next, err := httpmsg.AddOrReplaceHeader(combinedRaw, header, trustedHeaderProbeValue)
+		if err != nil {
+			continue
+		}
+		combinedRaw = next
+		combined = true
+	}
+	if combined {
+		headerList := strings.Join(trustedIdentityHeaders, ", ")
+		ev, _ := evalTrustedHeaderProbe(
+			urlx, ctx, httpClient, scanCtx, baseRaw, combinedRaw, baselineBody,
+			"trusted-identity-headers",
+			fmt.Sprintf("combined (%s) = %s", headerList, trustedHeaderProbeValue),
+			fmt.Sprintf("Found 401/403 authentication bypass via a combined set of trusted identity headers "+
+				"(%s) each set to %q. The backend trusts client-supplied reverse-proxy/SSO identity headers; some "+
+				"gateways (e.g. oauth2-proxy) require several together (user + email + groups), which this combined "+
+				"probe asserts at once.", headerList, trustedHeaderProbeValue),
+		)
+		if ev != nil {
+			results = append(results, ev)
+		}
+	}
+
+	return results, nil
+}
+
+// evalTrustedHeaderProbe issues one trusted-identity-header probe (modifiedRaw)
+// and returns a finding only if the response is a 200 that clears the full
+// multi-layer confirmation against the baseline. abort is true when the host is
+// unresponsive, so the caller stops probing it.
+func evalTrustedHeaderProbe(
+	urlx *urlutil.URL,
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
+	baseRaw, modifiedRaw []byte,
+	baselineBody string,
+	fuzzParam, evidence, description string,
+) (ev *output.ResultEvent, abort bool) {
+	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
+	if err != nil {
+		return nil, false
+	}
+	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
+	if err != nil {
+		if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
+			return nil, true
+		}
+		return nil, false
+	}
+	if resp.Response().StatusCode != 200 {
+		resp.Close()
+		return nil, false
+	}
+	bypassBody := resp.Body().String()
+	location := resp.Response().Header.Get("Location")
+	respDump := resp.FullResponseString()
+	resp.Close()
+
+	if !confirmTrustedHeaderBypass(ctx, httpClient, scanCtx, baseRaw, modifiedRaw, baselineBody, bypassBody, location) {
+		return nil, false
+	}
+
+	return &output.ResultEvent{
+		URL:              urlx.String(),
+		Request:          string(modifiedRaw),
+		Response:         respDump,
+		FuzzingParameter: fuzzParam,
+		ExtractedResults: []string{evidence},
+		Info: output.Info{
+			Name:        "Trusted Identity Header Authentication Bypass",
+			Description: description,
+			Severity:    severity.High,
+			Confidence:  severity.Firm,
+			Tags:        ModuleTags,
+			Reference: []string{
+				"https://book.hacktricks.wiki/en/network-services-pentesting/pentesting-web/403-and-401-bypasses.html",
+				"https://oauth2-proxy.github.io/oauth2-proxy/configuration/overview/",
+			},
+		},
+	}, false
+}
+
+// confirmTrustedHeaderBypass is the multi-layer confirmation for a candidate
+// trusted-identity-header bypass: a forbidden (401/403) baseline that returned 200
+// once an identity header was injected. EVERY layer must hold, and the layers
+// compare the candidate to the baseline on more than one axis so that neither a
+// lone status flip NOR a lone body change is sufficient on its own:
+//
+//  1. not a soft-404 / SPA wildcard shell, and not a redirect to a login page;
+//  2. the 200 body is meaningfully DIFFERENT from the forbidden baseline body — a
+//     200 that still renders the original "forbidden" page is not real access;
+//  3. the bypass REPRODUCES on a re-fetch (same 200 + textually stable body), so a
+//     one-shot flap / cache edge does not qualify;
+//  4. the response is DISTINCT from the host's catch-all (a random path under the
+//     same clean template answers differently), ruling out a wildcard 200 handler;
+//  5. CAUSALITY: re-issuing the BARE request (identity header removed) is STILL
+//     access-controlled — proving the header, not a deploy that made the resource
+//     public, is what flipped the result.
+//
+// Layers 3-5 fail OPEN on a transient/inconclusive error so a flaky confirm fetch
+// never suppresses a real bypass.
+func confirmTrustedHeaderBypass(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	scanCtx *modkit.ScanContext,
+	baseRaw, modifiedRaw []byte,
+	baselineBody, bypassBody, location string,
+) bool {
+	// 1. soft-404 / SPA shell / login-redirect guard.
+	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(bypassBody), location) {
+		return false
+	}
+	// 2. the authorized body must diverge from the forbidden baseline body.
+	if modkit.BodiesSimilar(baselineBody, bypassBody) {
+		return false
+	}
+	// 3. reproducible 200 + stable body.
+	if !confirmStableBypass(httpClient, ctx.Service(), modifiedRaw, 200, bypassBody) {
+		return false
+	}
+	// 4. distinct from the host's catch-all / wildcard handler.
+	if !confirmDistinctFromCatchAll(httpClient, ctx.Service(), baseRaw, 200, bypassBody) {
+		return false
+	}
+	// 5. causal: the bare request (no identity header) is still forbidden.
+	if !stillForbiddenWithoutHeaders(httpClient, ctx.Service(), baseRaw) {
+		return false
+	}
+	return true
+}
+
+// stillForbiddenWithoutHeaders re-issues the bare request (no injected identity
+// header) and reports whether the resource remains access-controlled, so a 200
+// seen only WITH the header is attributable to the header rather than to the
+// resource having become public. It returns false (drop) ONLY when the bare
+// request is itself authorized now (a 2xx). It fails OPEN (true) on a transient
+// error or any non-2xx status, so a real bypass is never suppressed.
+func stillForbiddenWithoutHeaders(httpClient *http.Requester, service *httpmsg.Service, baseRaw []byte) bool {
+	status, _, ok := modkit.ExecuteRaw(httpClient, service, baseRaw, http.Options{NoRedirects: true, NoClustering: true})
+	if !ok {
+		return true // inconclusive transient error — don't suppress
+	}
+	if status >= 200 && status < 300 {
+		return false // resource is public independent of the header → drop
+	}
+	return true
 }
 
 // bypassMethods are HTTP methods to test for method tampering bypass.

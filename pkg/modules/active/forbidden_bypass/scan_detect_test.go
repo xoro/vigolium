@@ -101,6 +101,104 @@ func TestScanPerRequest_NoFalsePositive_EmptyBodyCatchall(t *testing.T) {
 	assert.Empty(t, res, "an empty-body 200 catch-all must not be reported as a 403 bypass")
 }
 
+// TestScanPerRequest_DetectsTrustedHeaderBypass drives the scan against a backend
+// that 403s the protected resource unless the request carries a spoofed
+// reverse-proxy identity header (X-Forwarded-User: admin), in which case it serves
+// the resource. The bare request stays 403 (causality holds) and an unrelated path
+// 404s (not a catch-all), so the per-header trusted-identity probe is reported.
+func TestScanPerRequest_DetectsTrustedHeaderBypass(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "admin") {
+			if r.Header.Get("X-Forwarded-User") == "admin" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("<html><body>SECRET ADMIN PANEL — welcome admin</body></html>"))
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Forbidden"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seed403(t, srv.URL+"/admin")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a trusted identity-header bypass finding")
+	assert.Equal(t, "x-forwarded-user", res[0].FuzzingParameter, "the trusted-identity phase should attribute the single header")
+	assert.Equal(t, "Trusted Identity Header Authentication Bypass", res[0].Info.Name)
+}
+
+// TestScanPerRequest_DetectsCombinedTrustedHeaderBypass covers a gateway that
+// authorizes only when the FULL proxy identity set is present together (user +
+// email + groups), as oauth2-proxy does. No single header unlocks the resource, so
+// the per-header phase finds nothing and the combined all-headers-at-once probe is
+// what trips the bypass.
+func TestScanPerRequest_DetectsCombinedTrustedHeaderBypass(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "admin") {
+			if r.Header.Get("X-Forwarded-User") == "admin" &&
+				r.Header.Get("X-Forwarded-Email") == "admin" &&
+				r.Header.Get("X-Forwarded-Groups") == "admin" {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("<html><body>SECRET ADMIN PANEL — full identity</body></html>"))
+				return
+			}
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Forbidden"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := seed403(t, srv.URL+"/admin")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a combined trusted identity-header bypass finding")
+	assert.Equal(t, "trusted-identity-headers", res[0].FuzzingParameter, "no single header unlocks it; the combined probe should be credited")
+}
+
+// TestStillForbiddenWithoutHeaders exercises the causality layer in isolation (the
+// generic IP-header phase has no such check, so it cannot be exercised cleanly
+// through ScanPerRequest): a bare request that is STILL access-controlled keeps the
+// finding, while one that is 200 even without the header — a resource that simply
+// went public — drops it.
+func TestStillForbiddenWithoutHeaders(t *testing.T) {
+	t.Parallel()
+
+	t.Run("still forbidden keeps the finding", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("Forbidden"))
+		}))
+		defer srv.Close()
+		client := modtest.Requester(t)
+		rr := modtest.Request(t, srv.URL+"/admin")
+		assert.True(t, stillForbiddenWithoutHeaders(client, rr.Service(), rr.Request().Raw()),
+			"a bare request that is still 403 must not suppress the bypass")
+	})
+
+	t.Run("public resource drops the finding", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("public content"))
+		}))
+		defer srv.Close()
+		client := modtest.Requester(t)
+		rr := modtest.Request(t, srv.URL+"/admin")
+		assert.False(t, stillForbiddenWithoutHeaders(client, rr.Service(), rr.Request().Raw()),
+			"a resource that is 200 even without the header is not header-attributable")
+	})
+}
+
 // TestScanPerRequest_NoFalsePositive_TransientBypass reproduces a transient 200:
 // the very first admin request succeeds (a flap / race / caching edge), but the
 // reproducibility re-fetch returns 404. The bypass does not reproduce, so the

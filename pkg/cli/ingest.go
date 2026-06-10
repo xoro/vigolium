@@ -29,6 +29,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/source"
 	"github.com/vigolium/vigolium/pkg/notify/webhook"
+	"github.com/vigolium/vigolium/pkg/storagesig"
 	"github.com/vigolium/vigolium/pkg/terminal"
 	"github.com/vigolium/vigolium/pkg/types"
 	"go.uber.org/zap"
@@ -341,7 +342,16 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 		}
 		for _, rr := range preloadedWithResp {
 			if staticMatcher.IsStaticFile(rr.Request().Path()) {
-				continue
+				var hg storagesig.HeaderGetter
+				if rr.HasResponse() && rr.Response() != nil {
+					hg = rr.Response()
+				}
+				if !storagesig.KeepStaticAsMeta(rr.Request().Path(), hg) {
+					continue
+				}
+				if rr.Response() != nil {
+					rr.Response().TruncateBody(0) // metadata-only: keep headers, drop body
+				}
 			}
 			if ingestScopeMatcher != nil {
 				if !ingestScopeMatcher.InScopeRequest(
@@ -409,9 +419,12 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 			if nextErr != nil {
 				break
 			}
-			// Always filter static files
+			// Always filter static files (keep object-storage assets as
+			// metadata-only; request-only ingest has no body to strip).
 			if staticMatcher.IsStaticFile(item.Request.Request().Path()) {
-				continue
+				if !storagesig.KeepStaticAsMeta(item.Request.Request().Path(), nil) {
+					continue
+				}
 			}
 			// Request-only scope check (no response available)
 			if scopeMatcher != nil {

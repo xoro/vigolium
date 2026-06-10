@@ -17,6 +17,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_signed_url_leak"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_storage_error_info"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_storage_fingerprint"
+	"github.com/vigolium/vigolium/pkg/modules/passive/cloud_storage_url_harvest"
 	"github.com/vigolium/vigolium/pkg/modules/passive/content_type_mismatch"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cookie_security_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cors_headers_detect"
@@ -179,6 +180,7 @@ func registerPassiveModules(r *Registry) {
 	r.RegisterPassive(firebase_fingerprint.New())
 	// Cloud Storage Security - Passive
 	r.RegisterPassive(cloud_storage_fingerprint.New())
+	r.RegisterPassive(cloud_storage_url_harvest.New())
 	r.RegisterPassive(cloud_signed_url_leak.New())
 	r.RegisterPassive(cloud_storage_error_info.New())
 	// Laravel Security - Passive

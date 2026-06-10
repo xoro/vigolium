@@ -12,6 +12,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/input/formats/curl"
 	"github.com/vigolium/vigolium/pkg/input/formats/openapi"
 	"github.com/vigolium/vigolium/pkg/input/formats/postman"
+	"github.com/vigolium/vigolium/pkg/storagesig"
 	"go.uber.org/zap"
 )
 
@@ -316,9 +317,20 @@ func isExtIngestInScope(scopeMatcher *config.ScopeMatcher, rr *httpmsg.HttpReque
 		return true
 	}
 
-	// Always filter static files
+	// Always filter static files — except object-storage assets, which are kept
+	// as metadata-only (body stripped) so the CDN traversal modules can probe
+	// storage-fronted static URLs.
 	if scopeMatcher.IsStaticFile(rr.Request().Path()) {
-		return false
+		var hg storagesig.HeaderGetter
+		if rr.HasResponse() && rr.Response() != nil {
+			hg = rr.Response()
+		}
+		if !storagesig.KeepStaticAsMeta(rr.Request().Path(), hg) {
+			return false
+		}
+		if rr.Response() != nil {
+			rr.Response().TruncateBody(0)
+		}
 	}
 
 	input := config.ScopeMatchInput{

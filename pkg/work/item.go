@@ -8,7 +8,14 @@ type WorkItem struct {
 	Request       *httpmsg.HttpRequestResponse
 	EnableModules []string // Per-task module selection (empty = use all)
 	RecordUUID    string   // Pre-existing DB record UUID (skip store, use for findings)
-	onComplete    func()
+
+	// StaticMeta marks a static-file request kept by the executor's
+	// object-storage carve-out: it is fetched with HEAD and recorded as a
+	// metadata-only http_record (body stripped) so the CDN traversal modules can
+	// probe storage-fronted static assets without storing their (binary) bodies.
+	StaticMeta bool
+
+	onComplete func()
 }
 
 // NewWithModules creates a WorkItem with EnableModules but no callback.

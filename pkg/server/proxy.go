@@ -17,6 +17,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/server/mitm"
+	"github.com/vigolium/vigolium/pkg/storagesig"
 	"go.uber.org/zap"
 )
 
@@ -400,7 +401,16 @@ func (p *proxyHandler) recordTransaction(r *http.Request, reqBody []byte, resp *
 		matcher := p.getScopeMatcher()
 		if matcher != nil {
 			if matcher.IsStaticFile(rr.Request().Path()) {
-				return
+				var hg storagesig.HeaderGetter
+				if rr.HasResponse() && rr.Response() != nil {
+					hg = rr.Response()
+				}
+				if !storagesig.KeepStaticAsMeta(rr.Request().Path(), hg) {
+					return
+				}
+				if rr.Response() != nil {
+					rr.Response().TruncateBody(0) // metadata-only: keep headers, drop body
+				}
 			}
 			if p.settings.Scope.AppliedOnIngest && !matcher.InScope(buildScopeMatchInput(rr)) {
 				return
