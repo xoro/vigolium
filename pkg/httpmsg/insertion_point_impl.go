@@ -36,6 +36,68 @@ type ParameterInsertionPoint struct {
 	parameter     *Param             // b: parameter object
 	baseRequest   []byte             // original request (for rebuilding)
 	insertionType InsertionPointType // cached insertion point type
+	cl            clRewrite          // cached Content-Length patch layout (hot path)
+}
+
+// clRewrite caches the Content-Length rewrite layout for a body-style insertion
+// point so BuildRequest can patch the length in place instead of calling
+// UpdateContentLength — which re-parses every header (ExtractAllHeaders +
+// BuildHttpMessage) on every payload. It is computed once at construction.
+//
+// fast is true only for the common case: the parameter requires a
+// Content-Length update, the request has exactly one Content-Length header, and
+// that header precedes the body. Anything else (no header, duplicate headers)
+// falls back to UpdateContentLength, preserving the original behaviour exactly.
+type clRewrite struct {
+	fast       bool
+	valueStart int // offset of the Content-Length value in baseRequest
+	valueEnd   int // offset just past the Content-Length value (before CR)
+	bodyOffset int // body offset in baseRequest (after the CRLFCRLF separator)
+}
+
+// computeCLRewrite precomputes the in-place Content-Length patch layout for an
+// insertion point. Eligibility is restricted to the common body/form/xml POST
+// case; ineligible insertion points return a zero clRewrite and fall back to
+// UpdateContentLength in BuildRequest.
+func computeCLRewrite(baseRequest []byte, param *Param) clRewrite {
+	if !param.RequiresContentLengthUpdate() {
+		return clRewrite{}
+	}
+	bodyOffset := findBodyOffsetStrict(baseRequest, 0)
+	if bodyOffset == -1 {
+		return clRewrite{}
+	}
+	// Exactly one Content-Length header: 0 means UpdateContentLength would add
+	// one, >1 means it would collapse duplicates — both need the slow path.
+	if countHeaderOccurrences(baseRequest, "Content-Length") != 1 {
+		return clRewrite{}
+	}
+	offsets := GetHeaderOffsets(baseRequest, "Content-Length")
+	if offsets == nil {
+		return clRewrite{}
+	}
+	valueStart, valueEnd := offsets[1], offsets[2]
+	// The Content-Length value must lie within the header block (before body).
+	if valueEnd > bodyOffset {
+		return clRewrite{}
+	}
+	return clRewrite{fast: true, valueStart: valueStart, valueEnd: valueEnd, bodyOffset: bodyOffset}
+}
+
+// countHeaderOccurrences counts case-insensitive header-name matches in the
+// header block of an HTTP message. Used once at insertion-point construction.
+func countHeaderOccurrences(message []byte, name string) int {
+	headers, _, _, err := ExtractAllHeaders(message)
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for i := 1; i < len(headers); i++ { // index 0 is the request line
+		if EqualsCaseInsensitive(extractHeaderName(headers[i]), name) {
+			count++
+		}
+	}
+	return count
 }
 
 // NewParameterInsertionPoint creates a new parameter-aware insertion point.
@@ -58,6 +120,7 @@ func NewParameterInsertionPoint(request []byte, param *Param) *ParameterInsertio
 		parameter:     param,
 		baseRequest:   requestCopy,
 		insertionType: ipType,
+		cl:            computeCLRewrite(requestCopy, param),
 	}
 }
 
@@ -72,6 +135,7 @@ func newParameterInsertionPointShared(shared *sharedBaseRequest, param *Param) *
 		parameter:     param,
 		baseRequest:   shared.raw, // shared reference, no copy
 		insertionType: ipType,
+		cl:            computeCLRewrite(shared.raw, param),
 	}
 }
 
@@ -100,24 +164,22 @@ func (p *ParameterInsertionPoint) BuildRequest(payload []byte) []byte {
 	// Encode payload based on parameter type
 	encoded := p.encodePayload(payload)
 
-	// Build request by replacing parameter value
 	startOffset := p.parameter.ValueStart()
 	endOffset := p.parameter.ValueEnd()
 
-	// Calculate result size
-	resultSize := len(p.baseRequest) - (endOffset - startOffset) + len(encoded)
-	result := make([]byte, resultSize)
+	// Fast path: splice the payload and patch Content-Length in a single
+	// allocation, avoiding a full header re-parse on every payload. This is the
+	// hot path for body/form/xml fuzzing. valueEnd <= startOffset guarantees the
+	// Content-Length value precedes the mutated parameter (always true for body
+	// parameters, checked defensively).
+	if p.cl.fast && p.cl.valueEnd <= startOffset {
+		return p.buildWithContentLength(encoded, startOffset, endOffset)
+	}
 
-	// Copy prefix
-	copy(result[0:], p.baseRequest[0:startOffset])
+	result := p.splice(encoded, startOffset, endOffset)
 
-	// Copy encoded payload
-	copy(result[startOffset:], encoded)
-
-	// Copy suffix
-	copy(result[startOffset+len(encoded):], p.baseRequest[endOffset:])
-
-	// Update Content-Length if parameter type requires it
+	// Slow path: parameter needs a Content-Length update but wasn't eligible for
+	// the in-place patch (e.g. no existing header, or duplicate headers).
 	if p.parameter.RequiresContentLengthUpdate() {
 		updated, err := UpdateContentLength(result)
 		if err != nil {
@@ -126,6 +188,41 @@ func (p *ParameterInsertionPoint) BuildRequest(payload []byte) []byte {
 		result = updated
 	}
 
+	return result
+}
+
+// splice replaces the parameter value with encoded in a freshly allocated slice.
+func (p *ParameterInsertionPoint) splice(encoded []byte, startOffset, endOffset int) []byte {
+	resultSize := len(p.baseRequest) - (endOffset - startOffset) + len(encoded)
+	result := make([]byte, resultSize)
+	n := copy(result, p.baseRequest[:startOffset])
+	n += copy(result[n:], encoded)
+	copy(result[n:], p.baseRequest[endOffset:])
+	return result
+}
+
+// buildWithContentLength splices the payload and patches the Content-Length
+// value in one allocation, leaving the header in its original position. The new
+// body length is derived analytically from the value-length delta, so the
+// result is byte-identical to splice()+UpdateContentLength() whenever the
+// Content-Length header is the last header (the common case), and otherwise
+// differs only in that Content-Length keeps its original position instead of
+// being moved to the end — an HTTP-semantically irrelevant difference.
+func (p *ParameterInsertionPoint) buildWithContentLength(encoded []byte, startOffset, endOffset int) []byte {
+	base := p.baseRequest
+	cl := p.cl
+
+	// Body length is independent of the Content-Length header's own width.
+	newBodyLen := (len(base) - cl.bodyOffset) + (len(encoded) - (endOffset - startOffset))
+	clStr := intToString(newBodyLen)
+
+	resultSize := cl.valueStart + len(clStr) + (startOffset - cl.valueEnd) + len(encoded) + (len(base) - endOffset)
+	result := make([]byte, resultSize)
+	n := copy(result, base[:cl.valueStart])              // up to old Content-Length value
+	n += copy(result[n:], clStr)                         // new Content-Length value
+	n += copy(result[n:], base[cl.valueEnd:startOffset]) // rest of headers + body prefix
+	n += copy(result[n:], encoded)                       // new parameter value
+	copy(result[n:], base[endOffset:])                   // body suffix
 	return result
 }
 

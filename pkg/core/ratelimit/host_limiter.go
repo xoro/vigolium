@@ -167,16 +167,16 @@ func (h *HostRateLimiter) Acquire(ctx context.Context, host string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case entry.sem <- struct{}{}:
+		// Record use for idle-eviction ordering via the atomic timestamp only —
+		// no shard lock on the hot path. The eviction loop reconciles the heap
+		// lazily: it reloads this atomic and re-fixes stale entries itself
+		// (see evictIdle). Because touch() only ever moves lastUsed forward,
+		// each heap entry's stored value is a lower bound on the real value, so
+		// an up-to-date heap top is provably the globally-oldest host — eviction
+		// stays correct without per-acquire heap maintenance. This keeps Acquire
+		// lock-free in steady state, which matters most when a scan hammers a
+		// single host and every request hashes to the same shard.
 		entry.touch()
-
-		// Update heap entry under write lock to maintain eviction order
-		shard.mu.Lock()
-		if he, ok := shard.heapIndex[host]; ok {
-			he.lastUsed = entry.lastUsed.Load()
-			heap.Fix(&shard.evictionHeap, he.index)
-		}
-		shard.mu.Unlock()
-
 		return nil
 	}
 }

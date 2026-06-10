@@ -11,6 +11,16 @@ import (
 	"go.uber.org/zap"
 )
 
+// FindingWrite bundles the arguments needed to persist a single finding,
+// allowing a batch of findings to be coalesced into one transaction.
+// See Repository.SaveFindingsBatch.
+type FindingWrite struct {
+	Event           *output.ResultEvent
+	HTTPRecordUUIDs []string
+	ScanUUID        string
+	ProjectUUID     string
+}
+
 // SaveFinding stores a vulnerability finding linked to HTTP records by UUIDs.
 // Uses INSERT ON CONFLICT for atomic dedup when finding_hash is non-empty.
 func (r *Repository) SaveFinding(ctx context.Context, event *output.ResultEvent, httpRecordUUIDs []string, scanUUID string, projectUUID string) error {
@@ -27,16 +37,80 @@ func (r *Repository) SaveFinding(ctx context.Context, event *output.ResultEvent,
 		return fmt.Errorf("failed to convert finding: %w", err)
 	}
 
+	return r.saveFindingIDB(ctx, r.db, finding, httpRecordUUIDs)
+}
+
+// SaveFindingsBatch persists a batch of findings in a single transaction,
+// coalescing what would otherwise be one transaction (and fsync) per finding.
+// Findings are converted up front so a conversion error skips just that finding
+// rather than aborting the batch. If the transaction itself fails (e.g. a
+// database-level error), every finding is retried individually so one bad
+// finding can't drop the rest — preserving the error isolation of per-finding
+// SaveFinding while keeping the fast path a single transaction.
+func (r *Repository) SaveFindingsBatch(ctx context.Context, writes []FindingWrite) error {
+	type prepared struct {
+		finding     *Finding
+		recordUUIDs []string
+	}
+	items := make([]prepared, 0, len(writes))
+	for i := range writes {
+		w := &writes[i]
+		if w.Event == nil {
+			continue
+		}
+		f := &Finding{
+			HTTPRecordUUIDs: w.HTTPRecordUUIDs,
+			ScanUUID:        w.ScanUUID,
+			ProjectUUID:     defaultProjectUUID(w.ProjectUUID),
+		}
+		if err := f.FromResultEvent(w.Event); err != nil {
+			zap.L().Warn("SaveFindingsBatch: skipping unconvertible finding", zap.Error(err))
+			continue
+		}
+		items = append(items, prepared{finding: f, recordUUIDs: w.HTTPRecordUUIDs})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	err := r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
+		for _, it := range items {
+			if err := r.saveFindingIDB(ctx, tx, it.finding, it.recordUUIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
+	}
+
+	// Transaction failed — retry each finding on its own so a single bad finding
+	// doesn't sink the whole batch.
+	zap.L().Warn("SaveFindingsBatch: transaction failed, retrying findings individually", zap.Error(err))
+	var firstErr error
+	for _, it := range items {
+		if e := r.saveFindingIDB(ctx, r.db, it.finding, it.recordUUIDs); e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+	return firstErr
+}
+
+// saveFindingIDB inserts a single finding using the given bun.IDB, which may be
+// the shared *DB (single write) or a bun.Tx (batched write). The dedup/append
+// and junction logic is identical in both cases.
+func (r *Repository) saveFindingIDB(ctx context.Context, idb bun.IDB, finding *Finding, httpRecordUUIDs []string) error {
 	// Atomic dedup: INSERT with conflict resolution on finding_hash.
 	// If a duplicate hash exists, the row is silently skipped.
 	var res sql.Result
 	var err error
 	if finding.FindingHash != "" {
-		res, err = r.db.NewInsert().Model(finding).
+		res, err = idb.NewInsert().Model(finding).
 			On("CONFLICT (project_uuid, finding_hash) DO NOTHING").
 			Exec(ctx)
 	} else {
-		res, err = r.db.NewInsert().Model(finding).Exec(ctx)
+		res, err = idb.NewInsert().Model(finding).Exec(ctx)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to insert finding: %w", err)
@@ -45,11 +119,11 @@ func (r *Repository) SaveFinding(ctx context.Context, event *output.ResultEvent,
 	// If ON CONFLICT fired, no row was inserted — append records and evidence to existing finding
 	if finding.FindingHash != "" {
 		if n, _ := res.RowsAffected(); n == 0 {
-			return r.appendRecordsToFinding(ctx, finding.ProjectUUID, finding.FindingHash, httpRecordUUIDs, buildEvidence(finding.Request, finding.Response))
+			return r.appendRecordsToFinding(ctx, idb, finding.ProjectUUID, finding.FindingHash, httpRecordUUIDs, buildEvidence(finding.Request, finding.Response))
 		}
 	}
 
-	r.insertFindingRecords(ctx, finding.ID, httpRecordUUIDs)
+	r.insertFindingRecords(ctx, idb, finding.ID, httpRecordUUIDs)
 
 	return nil
 }
@@ -63,40 +137,21 @@ func (r *Repository) SaveFindingDirect(ctx context.Context, finding *Finding) er
 
 	finding.ProjectUUID = defaultProjectUUID(finding.ProjectUUID)
 
-	// Atomic dedup: INSERT with conflict resolution on finding_hash.
-	var res sql.Result
-	var err error
-	if finding.FindingHash != "" {
-		res, err = r.db.NewInsert().Model(finding).
-			On("CONFLICT (project_uuid, finding_hash) DO NOTHING").
-			Exec(ctx)
-	} else {
-		res, err = r.db.NewInsert().Model(finding).Exec(ctx)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to insert finding: %w", err)
-	}
-
-	// If ON CONFLICT fired, no row was inserted — append records and evidence to existing finding
-	if finding.FindingHash != "" {
-		if n, _ := res.RowsAffected(); n == 0 {
-			return r.appendRecordsToFinding(ctx, finding.ProjectUUID, finding.FindingHash, finding.HTTPRecordUUIDs, buildEvidence(finding.Request, finding.Response))
-		}
-	}
-
-	r.insertFindingRecords(ctx, finding.ID, finding.HTTPRecordUUIDs)
-
-	return nil
+	return r.saveFindingIDB(ctx, r.db, finding, finding.HTTPRecordUUIDs)
 }
 
-// insertFindingRecords batch-inserts finding↔record junction rows in a single statement.
-func (r *Repository) insertFindingRecords(ctx context.Context, findingID int64, recordUUIDs []string) {
+// insertFindingRecords batch-inserts finding↔record junction rows in a single
+// statement using the given bun.IDB (the shared *DB or a transaction).
+func (r *Repository) insertFindingRecords(ctx context.Context, idb bun.IDB, findingID int64, recordUUIDs []string) {
 	if len(recordUUIDs) == 0 {
 		return
 	}
 
+	// Driver is a property of the connection, identical for *DB and any tx.
+	postgres := r.db.Driver() == "postgres"
+
 	var b strings.Builder
-	if r.db.Driver() == "postgres" {
+	if postgres {
 		b.WriteString("INSERT INTO finding_records (finding_id, record_uuid) VALUES ")
 	} else {
 		b.WriteString("INSERT OR IGNORE INTO finding_records (finding_id, record_uuid) VALUES ")
@@ -109,10 +164,10 @@ func (r *Repository) insertFindingRecords(ctx context.Context, findingID int64, 
 		b.WriteString("(?, ?)")
 		args = append(args, findingID, uuid)
 	}
-	if r.db.Driver() == "postgres" {
+	if postgres {
 		b.WriteString(" ON CONFLICT DO NOTHING")
 	}
-	if _, err := r.db.ExecContext(ctx, b.String(), args...); err != nil {
+	if _, err := idb.ExecContext(ctx, b.String(), args...); err != nil {
 		zap.L().Warn("Failed to insert finding_records",
 			zap.Int64("finding_id", findingID),
 			zap.Error(err))
@@ -123,9 +178,9 @@ func (r *Repository) insertFindingRecords(ctx context.Context, findingID int64, 
 // record UUIDs and additional evidence (request/response pair) to it. The lookup is
 // project-scoped so evidence from one project is never merged into another project's
 // finding, even when both share a finding_hash.
-func (r *Repository) appendRecordsToFinding(ctx context.Context, projectUUID, findingHash string, newUUIDs []string, evidence string) error {
+func (r *Repository) appendRecordsToFinding(ctx context.Context, idb bun.IDB, projectUUID, findingHash string, newUUIDs []string, evidence string) error {
 	existing := &Finding{}
-	err := r.db.NewSelect().Model(existing).
+	err := idb.NewSelect().Model(existing).
 		Column("id", "http_record_uuids", "additional_evidence").
 		Where("project_uuid = ?", defaultProjectUUID(projectUUID)).
 		Where("finding_hash = ?", findingHash).
@@ -134,10 +189,10 @@ func (r *Repository) appendRecordsToFinding(ctx context.Context, projectUUID, fi
 		return fmt.Errorf("failed to look up existing finding: %w", err)
 	}
 
-	r.insertFindingRecords(ctx, existing.ID, newUUIDs)
+	r.insertFindingRecords(ctx, idb, existing.ID, newUUIDs)
 
 	merged := mergeUniqueStrings(existing.HTTPRecordUUIDs, newUUIDs)
-	q := r.db.NewUpdate().Model((*Finding)(nil)).
+	q := idb.NewUpdate().Model((*Finding)(nil)).
 		Set("http_record_uuids = ?", merged).
 		Where("id = ?", existing.ID)
 

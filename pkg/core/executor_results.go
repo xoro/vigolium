@@ -211,13 +211,24 @@ func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent) {
 			}
 		}
 
-		if err := e.repo.SaveFinding(ctx, result, recordUUIDs, e.scanUUID, e.projectUUID); err != nil {
+		// Persist via the batched finding writer when available so the worker
+		// isn't blocked on a synchronous database round-trip; fall back to a
+		// direct write otherwise. The record this finding links to was already
+		// persisted synchronously above, so async finding persistence never
+		// races ahead of its http_record.
+		var saveErr error
+		if e.findingWriter != nil {
+			saveErr = e.findingWriter.Save(ctx, result, recordUUIDs, e.scanUUID, e.projectUUID)
+		} else {
+			saveErr = e.repo.SaveFinding(ctx, result, recordUUIDs, e.scanUUID, e.projectUUID)
+		}
+		if saveErr != nil {
 			// A dropped finding is a data-loss event for the operator, not a debug
 			// detail — surface it at Warn with enough context to locate the result.
 			zap.L().Warn("failed to persist finding to database; finding will be missing from stored results",
 				zap.String("module", result.ModuleID),
 				zap.String("url", result.URL),
-				zap.Error(err))
+				zap.Error(saveErr))
 		}
 	}
 

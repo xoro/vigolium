@@ -122,8 +122,9 @@ type ExecutorConfig struct {
 	OnTraffic             func(method, url string, statusCode int, contentType string) // Optional: called for each processed item
 	Services              *services.Services
 	HTTPRequester         *http.Requester
-	Repository            *database.Repository   // Optional: database storage
-	RecordWriter          *database.RecordWriter // Optional: batched record writer (preferred over Repository.SaveRecord)
+	Repository            *database.Repository    // Optional: database storage
+	RecordWriter          *database.RecordWriter  // Optional: batched record writer (preferred over Repository.SaveRecord)
+	FindingWriter         *database.FindingWriter // Optional: batched finding writer (preferred over Repository.SaveFinding)
 	ScanUUID              string
 	ProjectUUID           string                                                                                                              // Optional: scan session UUID
 	Hooks                 HookRunner                                                                                                          // Optional: pre/post hooks
@@ -235,10 +236,11 @@ type Executor struct {
 	suppressedFindings atomic.Int64
 
 	// Database storage (optional)
-	repo         *database.Repository
-	recordWriter *database.RecordWriter // batched record writer (preferred over repo.SaveRecord)
-	scanUUID     string
-	projectUUID  string
+	repo          *database.Repository
+	recordWriter  *database.RecordWriter  // batched record writer (preferred over repo.SaveRecord)
+	findingWriter *database.FindingWriter // batched finding writer (preferred over repo.SaveFinding)
+	scanUUID      string
+	projectUUID   string
 
 	// caches groups the per-scan lookup/dedup bookkeeping; pool groups the
 	// worker-pool concurrency state. Both are split out of Executor to keep
@@ -352,6 +354,7 @@ func NewExecutor(
 		hooks:          cfg.Hooks,
 		repo:           cfg.Repository,
 		recordWriter:   cfg.RecordWriter,
+		findingWriter:  cfg.FindingWriter,
 		scanUUID:       cfg.ScanUUID,
 		projectUUID:    cfg.ProjectUUID,
 		caches: scanCaches{

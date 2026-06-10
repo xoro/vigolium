@@ -999,9 +999,15 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 	}
 
 	var recordWriter *database.RecordWriter
+	var findingWriter *database.FindingWriter
 	if r.repository != nil {
 		recordWriter = database.NewRecordWriter(r.repository, database.RecordWriterConfig{})
 		defer recordWriter.Close()
+		// Batched, async finding persistence so module workers aren't blocked on
+		// a synchronous SaveFinding round-trip. Closed before recordWriter (LIFO)
+		// so buffered findings drain first.
+		findingWriter = database.NewFindingWriter(r.repository, database.FindingWriterConfig{})
+		defer findingWriter.Close()
 	}
 
 	// phaseModuleTimeouts is shared across every per-round executor so the
@@ -1015,6 +1021,7 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		HTTPRequester:        infra.httpRequester,
 		Repository:           r.repository,
 		RecordWriter:         recordWriter,
+		FindingWriter:        findingWriter,
 		ScanUUID:             infra.scanUUID,
 		ScopeMatcher:         infra.scopeMatcher,
 		ModuleTimeouts:       &phaseModuleTimeouts,
