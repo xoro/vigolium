@@ -72,3 +72,14 @@ func TestScanPerRequest_Benign(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// TestScanPerRequest_WeakETagNoFP verifies a weak ETag alone — emitted by nginx,
+// CDNs and many static servers — does NOT fingerprint Express.
+func TestScanPerRequest_WeakETagNoFP(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx("HTTP/1.1 200 OK", "Content-Type: text/html\r\nServer: nginx\r\nETag: W/\"6a2ce8de-72e1\"\r\n", "<html></html>")
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "weak ETag alone must not fingerprint Express")
+}

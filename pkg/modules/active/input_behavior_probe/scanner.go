@@ -74,7 +74,10 @@ func (m *Module) ScanPerRequest(
 	results = append(results, probePaths(ctx, httpClient, baseline)...)
 	results = append(results, probeDebugParams(ctx, httpClient, baseline)...)
 
-	return results, nil
+	// Collapse every probe that diverged for this endpoint into ONE finding so the
+	// run writes a single http_record instead of one per probe (the rest ride along
+	// as inline AdditionalEvidence) — keeps probe traffic from flooding the table.
+	return collapseProbeFindings(results), nil
 }
 
 // ScanPerInsertionPoint tests a single insertion point for HTML structure
@@ -116,7 +119,9 @@ func (m *Module) ScanPerInsertionPoint(
 	// Per-char param fuzzing
 	results = append(results, probeParamFuzz(ctx, ip, httpClient, baseline)...)
 
-	return results, nil
+	// Collapse to a single finding (one http_record) per insertion point; the other
+	// diverging char/polyglot probes become inline AdditionalEvidence.
+	return collapseProbeFindings(results), nil
 }
 
 // probePolyglot sends a polyglot payload to detect HTML tag structure changes.

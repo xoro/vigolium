@@ -443,6 +443,10 @@ func (r *Runner) buildDeparosConfig(additionalTargets []string) source.DeparosDi
 		cfg.Candidates = dc.Extensions.Candidates
 		cfg.ProbeFilenames = dc.Extensions.ProbeFilenames
 
+		// SPA-gated JS-bundle name sweep (pointer-bool: nil = default true)
+		cfg.JSBundleSweep = boolPtrOr(dc.Extensions.JSBundleSweep, true)
+		cfg.JSBundleNames = dc.Extensions.JSBundleNames
+
 		// Engine
 		cfg.CaseSensitivity = dc.Engine.CaseSensitivity
 		cfg.EngineTimeout = dc.EngineTimeoutParsed()

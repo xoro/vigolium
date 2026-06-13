@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/net/publicsuffix"
 )
@@ -48,6 +49,8 @@ type originTarget struct {
 type ScopeMatcher struct {
 	cfg           ScopeConfig
 	hostCache     sync.Map        // cache: host string -> bool (result of host scope check)
+	dynamicHosts  sync.Map        // hosts allowed at runtime (exact match, lowercased) -> struct{}
+	hasDynamic    atomic.Bool     // true once AllowHost is called; gates the dynamicHosts lookup off the hot path
 	staticExts    map[string]bool // flattened set of static file extensions (lowercase, with leading dot)
 	originMode    string          // "all", "strict", "balanced", "relaxed"
 	originTargets []originTarget  // parsed targets for origin matching
@@ -90,9 +93,31 @@ func (m *ScopeMatcher) InvalidateCache() {
 	m.hostCache = sync.Map{}
 }
 
+// AllowHost adds an exact host to the runtime allow-set so it passes the host
+// scope check regardless of the configured Host rule or origin mode. Used by the
+// subdomain_harvest module under --follow-subdomains to pull specific discovered
+// subdomains into scope WITHOUT wildcarding the apex. Safe for concurrent use.
+func (m *ScopeMatcher) AllowHost(host string) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "" {
+		return
+	}
+	m.dynamicHosts.Store(h, struct{}{})
+	m.hasDynamic.Store(true)
+}
+
 // hostInScope checks host against the Host scope rule AND origin mode with caching.
 // Safe for concurrent use — sync.Map handles its own locking.
 func (m *ScopeMatcher) hostInScope(host string) bool {
+	// Runtime allow-set wins over the configured rule and any cached negative —
+	// checked first so a host that was rejected before AllowHost still passes.
+	// Gated on hasDynamic so the default scan (no AllowHost) skips the ToLower
+	// + map lookup on this hot path entirely.
+	if m.hasDynamic.Load() {
+		if _, ok := m.dynamicHosts.Load(strings.ToLower(host)); ok {
+			return true
+		}
+	}
 	if v, ok := m.hostCache.Load(host); ok {
 		return v.(bool)
 	}

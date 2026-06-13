@@ -114,7 +114,12 @@ func (m *Module) ScanPerRequest(
 		results = append(results, rs...)
 	}
 
-	return results, nil
+	// All three probes prove the SAME signal — this host leaks debug info — so
+	// collapse them into one finding (one http_record per host); the other probes
+	// ride along as inline evidence instead of each writing their own record.
+	return modkit.CollapseFindings(results, modkit.CollapseSpec{
+		Key: func(*output.ResultEvent) string { return host },
+	}), nil
 }
 
 // probeRandomEndpoint sends a GET to a non-existent path to trigger the default error handler.

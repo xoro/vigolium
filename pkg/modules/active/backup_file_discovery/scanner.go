@@ -61,6 +61,12 @@ func (m *Module) CanProcess(ctx *httpmsg.HttpRequestResponse) bool {
 	return ctx.Response() != nil
 }
 
+// maxBackupContextBases caps how many base paths the backup walk probes (the web
+// root plus the shallowest context-path prefix). It is deliberately small:
+// generatePaths already emits hundreds of hostname-derived candidates, so each
+// extra base multiplies request volume.
+const maxBackupContextBases = 2
+
 // ScanPerHost probes the host for backup files.
 func (m *Module) ScanPerHost(
 	ctx *httpmsg.HttpRequestResponse,
@@ -84,12 +90,27 @@ func (m *Module) ScanPerHost(
 	fp := m.fingerprint404(ctx, httpClient)
 
 	paths := generatePaths(host)
+
+	// Probe the web root plus the shallowest non-static context-path prefix of the
+	// observed request (e.g. /app), so a backup dropped inside an app mounted under
+	// a sub-path is found too. Bounded to maxBackupContextBases: generatePaths
+	// already yields hundreds of hostname-derived candidates, so a wider walk would
+	// multiply request volume far beyond how webroot backups are typically laid out.
+	bases := []string{""}
+	if urlx, err := ctx.URL(); err == nil {
+		if cb := modkit.CandidateBasePaths(urlx.Path); len(cb) >= maxBackupContextBases {
+			bases = cb[:maxBackupContextBases]
+		}
+	}
+
 	var results []*output.ResultEvent
 
-	for _, path := range paths {
-		result := m.probePath(ctx, httpClient, scanCtx, path, fp)
-		if result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, path := range paths {
+			result := m.probePath(ctx, httpClient, scanCtx, base+path, fp)
+			if result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 
@@ -317,6 +338,22 @@ func (m *Module) probePath(
 	// response to a random path.
 	location := resp.Response().Header.Get("Location")
 	if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, status, []byte(body), location) {
+		return nil
+	}
+
+	// Round 2 — reproduce: re-fetch the same path with the cache bypassed; it must
+	// still return a 200 whose body is textually stable, so a one-shot or flapping
+	// response cannot forge a finding.
+	if repStatus, repBody, repOK := modkit.FetchPath(ctx, httpClient, path); !repOK || repStatus != 200 || !modkit.BodiesSimilar(body, repBody) {
+		return nil
+	}
+
+	// Round 3 — decoy baseline: a same-extension random sibling under the same
+	// directory must NOT return an equivalent body. ConfirmNotSoft404 above probes
+	// a no-extension random path and so cannot see an extension-scoped catch-all (a
+	// wildcard that hands back the same archive/dump for every *.zip / *.sql); the
+	// same-extension decoy can.
+	if decoyStatus, decoyBody, served := modkit.DecoyFileBaseline(ctx, httpClient, path); served && decoyStatus == status && modkit.BodiesSimilar(body, decoyBody) {
 		return nil
 	}
 

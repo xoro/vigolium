@@ -183,6 +183,8 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 	// Build survivor map and collect evidence from duplicates per group.
 	type groupData struct {
 		survivorID       int64
+		survivorRequest  string
+		survivorResponse string
 		existingEvidence []string
 		newEvidence      []string
 		dupIDs           []int64
@@ -196,6 +198,8 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 		}
 		if row.RN == 1 {
 			g.survivorID = row.ID
+			g.survivorRequest = row.Request
+			g.survivorResponse = row.Response
 			g.existingEvidence = row.AdditionalEvidence
 		} else {
 			g.dupIDs = append(g.dupIDs, row.ID)
@@ -229,8 +233,11 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 			if len(g.newEvidence) == 0 {
 				continue
 			}
-			merged := append(g.existingEvidence, g.newEvidence...)
-			const maxAdditionalEvidence = 10
+			primary := buildEvidence(g.survivorRequest, g.survivorResponse)
+			merged := appendUniqueEvidence(g.existingEvidence, primary, g.newEvidence...)
+			if len(merged) == len(g.existingEvidence) {
+				continue // nothing new after dropping duplicates of the primary pair
+			}
 			if len(merged) > maxAdditionalEvidence {
 				merged = merged[:maxAdditionalEvidence]
 			}
@@ -265,6 +272,12 @@ type GroupFindingOptions struct {
 	// Tags, when non-empty, restricts grouping to findings carrying at least one
 	// matching tag (case-insensitive).
 	Tags []string
+	// ByModule lists module IDs whose findings collapse to a single finding per
+	// (module, severity[, host]) regardless of the per-URL extracted value — for
+	// modules that fire once per asset (e.g. sourcemap-detect, one .map filename
+	// per JS bundle). These bypass the value-identity requirement and the Tags
+	// gate; module + severity is the guardrail.
+	ByModule []string
 	// MaxURLs caps the merged matched-URL list on the survivor (0 = unlimited).
 	MaxURLs int
 }
@@ -276,8 +289,16 @@ type GroupFindingOptions struct {
 // the duplicates are then deleted. Grouping is keyed on
 // (module_id, severity[, hostname], normalized extracted_results) — the value
 // must match byte-for-byte, so findings with distinct or empty extracted values
-// are never merged. Returns the count of deleted findings and the number of
-// groups that were collapsed.
+// are never merged.
+//
+// Modules listed in opts.ByModule are an exception: their findings collapse on
+// (module_id, severity[, hostname]) alone, regardless of (or absent) an extracted
+// value, and skip the Tags gate. This is for modules that fire once per asset
+// where the per-URL value is noise (e.g. sourcemap-detect, a distinct .map
+// filename per JS bundle).
+//
+// Returns the count of deleted findings and the number of groups that were
+// collapsed.
 func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID string, opts GroupFindingOptions) (deleted int64, grouped int64, err error) {
 	projectUUID = defaultProjectUUID(projectUUID)
 
@@ -294,31 +315,45 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		AdditionalEvidence []string `bun:"additional_evidence,type:jsonb"`
 	}
 
-	// Only findings with a non-empty extracted value can be value-grouped. Order
-	// by created_at so the earliest finding in each group becomes the survivor.
+	// Only findings with a non-empty extracted value can be value-grouped — except
+	// by-module modules, which group regardless of value (so they are pulled in
+	// even with an empty extracted_results). Order by created_at so the earliest
+	// finding in each group becomes the survivor.
+	byModule := output.NormalizeStringSet(opts.ByModule)
+	const valueCond = "(extracted_results IS NOT NULL AND extracted_results != '[]' AND extracted_results != '')"
+	where := valueCond
+	queryArgs := []any{projectUUID}
+	if len(byModule) > 0 {
+		moduleList := make([]string, 0, len(byModule))
+		for id := range byModule {
+			moduleList = append(moduleList, id)
+		}
+		where = "(" + valueCond + " OR module_id IN (?))"
+		queryArgs = append(queryArgs, bun.In(moduleList))
+	}
 	loadQuery := `
 		SELECT id, hostname, module_id, severity, matched_at, extracted_results, tags,
 		       request, response, additional_evidence
 		FROM findings
-		WHERE project_uuid = ?
-		  AND extracted_results IS NOT NULL
-		  AND extracted_results != '[]'
-		  AND extracted_results != ''
+		WHERE project_uuid = ? AND ` + where + `
 		ORDER BY created_at ASC, id ASC`
 
 	var rows []findingRow
-	if err := r.db.NewRaw(loadQuery, projectUUID).Scan(ctx, &rows); err != nil {
+	if err := r.db.NewRaw(loadQuery, queryArgs...).Scan(ctx, &rows); err != nil {
 		return 0, 0, fmt.Errorf("failed to load findings for value grouping: %w", err)
 	}
 
 	tagFilter := output.NormalizeTagSet(opts.Tags)
 
 	type groupData struct {
-		survivorID      int64
-		survivorMatched []string
-		evidence        []string
-		extraMatched    []string
-		dupIDs          []int64
+		survivorID       int64
+		survivorRequest  string
+		survivorResponse string
+		survivorMatched  []string
+		existingEvidence []string
+		dupEvidence      []string
+		extraMatched     []string
+		dupIDs           []int64
 	}
 	groups := make(map[string]*groupData)
 	var order []string
@@ -326,22 +361,26 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 	for i := range rows {
 		row := &rows[i]
 		valueKey := output.NormalizedValueKey(row.ExtractedResults)
-		if valueKey == "" {
-			continue // no stable extracted value to group on
+		_, isByModule := byModule[row.ModuleID]
+		if isByModule {
+			valueKey = "" // collapse every value from this module into one finding
+		} else {
+			if valueKey == "" {
+				continue // no stable extracted value to group on
+			}
+			if len(tagFilter) > 0 && !output.TagsIntersect(row.Tags, tagFilter) {
+				continue
+			}
 		}
-		if len(tagFilter) > 0 && !output.TagsIntersect(row.Tags, tagFilter) {
-			continue
-		}
-		key := row.ModuleID + "\x1f" + row.Severity + "\x1f" + valueKey
-		if opts.PerHost {
-			key = row.Hostname + "\x1f" + key
-		}
+		key := output.GroupingKey(row.ModuleID, row.Severity, valueKey, row.Hostname, opts.PerHost)
 		g, ok := groups[key]
 		if !ok {
 			groups[key] = &groupData{
-				survivorID:      row.ID,
-				survivorMatched: row.MatchedAt,
-				evidence:        row.AdditionalEvidence,
+				survivorID:       row.ID,
+				survivorRequest:  row.Request,
+				survivorResponse: row.Response,
+				survivorMatched:  row.MatchedAt,
+				existingEvidence: row.AdditionalEvidence,
 			}
 			order = append(order, key)
 			continue
@@ -350,9 +389,9 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 		g.dupIDs = append(g.dupIDs, row.ID)
 		g.extraMatched = append(g.extraMatched, row.MatchedAt...)
 		if ev := buildEvidence(row.Request, row.Response); ev != "" {
-			g.evidence = append(g.evidence, ev)
+			g.dupEvidence = append(g.dupEvidence, ev)
 		}
-		g.evidence = append(g.evidence, row.AdditionalEvidence...)
+		g.dupEvidence = append(g.dupEvidence, row.AdditionalEvidence...)
 	}
 
 	var allDupIDs []int64
@@ -377,8 +416,8 @@ func (r *Repository) GroupFindingsByValue(ctx context.Context, projectUUID strin
 			if opts.MaxURLs > 0 && len(mergedMatched) > opts.MaxURLs {
 				mergedMatched = mergedMatched[:opts.MaxURLs]
 			}
-			const maxAdditionalEvidence = 10
-			mergedEvidence := g.evidence
+			primary := buildEvidence(g.survivorRequest, g.survivorResponse)
+			mergedEvidence := appendUniqueEvidence(g.existingEvidence, primary, g.dupEvidence...)
 			if len(mergedEvidence) > maxAdditionalEvidence {
 				mergedEvidence = mergedEvidence[:maxAdditionalEvidence]
 			}

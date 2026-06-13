@@ -19,6 +19,13 @@ discovery:
   scope_mode: subdomain
   save_response_body: true
   enable_malformed_path_probe: false
+  # Fuzz each ancestor directory of the seed URL (e.g. /api/v1/auth/x ->
+  # /, /api/, /api/v1/, /api/v1/auth/) with the short file+dir lists and observed
+  # words. Long lists / FUZZ brute stay off at balanced intensity.
+  expand_seed_parents: true
+  # Keep scope to the seed's own path structure + live crawl breadcrumbs; do not
+  # re-seed discovery from paths prior phases wrote to the DB.
+  enrich_targets: false
   recursion:
     enabled: true
     max_depth: 5

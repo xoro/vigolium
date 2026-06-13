@@ -132,6 +132,7 @@ type ExecutorConfig struct {
 	ScopeMatcher          *config.ScopeMatcher                                                                                                // Optional: scope filtering
 	ScopeOnIngest         bool                                                                                                                // When true, skip both save and scan for out-of-scope items
 	StaticFileMatcher     *config.ScopeMatcher                                                                                                // Optional: always-on static file filtering (independent of ScopeMatcher)
+	FollowSubdomains      bool                                                                                                                // When true, subdomain_harvest adds discovered subdomains to scope and feeds them (needs ScopeMatcher + feedback)
 	SkipBaseline          bool                                                                                                                // When true, skip HTTP fetch if response already attached (Phase 3 DB source)
 	OASTProvider          modkit.OASTProvider                                                                                                 // Optional: OAST callback URL generator for blind vuln detection
 	OASTService           OASTFlusher                                                                                                         // Optional: OAST service to flush after scanning
@@ -175,6 +176,9 @@ type ExecutorConfig struct {
 	// OnTechDetected fires once per (host, tag) when a passive fingerprint
 	// module first publishes a stack detection.
 	OnTechDetected func(host, tag string)
+	// DeepScan mirrors --intensity=deep into ScanContext so modules can unlock
+	// heavier probing (e.g. dashboard_exposure's full mount-path sweep).
+	DeepScan bool
 }
 
 // DefaultExecutorConfig returns sensible defaults.
@@ -440,6 +444,14 @@ func NewExecutor(
 		e.pool.feeder = &executorFeeder{ch: e.pool.feedbackCh}
 		e.scanCtx.RequestFeeder = e.pool.feeder
 	}
+	// Wire scope expander + follow-subdomains toggle (subdomain_harvest feed-back).
+	// Requires a real scope matcher and live feedback; otherwise the module stays
+	// recon-only because ShouldFollowSubdomains() sees no expander/feeder.
+	if cfg.FollowSubdomains && cfg.ScopeMatcher != nil && !cfg.DisableFeedback {
+		e.scanCtx.ScopeExpander = &executorScopeExpander{matcher: cfg.ScopeMatcher}
+		e.scanCtx.FollowSubdomains = true
+	}
+	e.scanCtx.DeepScan = cfg.DeepScan
 	e.scanCtx.ParamFindings = &modkit.ParameterFindingRegistry{}
 	e.scanCtx.TechStack = modkit.NewTechRegistry()
 	e.scanCtx.TechStack.OnDetect = cfg.OnTechDetected

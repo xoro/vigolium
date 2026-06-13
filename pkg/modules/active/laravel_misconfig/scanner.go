@@ -45,7 +45,7 @@ var probes = []probe{
 	{
 		path:    "/_debugbar/open",
 		name:    "Laravel Debugbar Open",
-		markers: []string{"debugbar", "queries", "route", "PhpDebugBar"},
+		markers: []string{"debugbar", "PhpDebugBar", "phpdebugbar"},
 		sev:     severity.High,
 		desc:    "Laravel Debugbar open endpoint exposed, potentially leaking SQL queries, routes, and request data",
 	},
@@ -76,7 +76,7 @@ var probes = []probe{
 	{
 		path:        "/telescope",
 		name:        "Laravel Telescope Dashboard",
-		markers:     []string{"telescope", "Laravel Telescope", "app.js"},
+		markers:     []string{"Laravel Telescope", "telescope-data", "window.Telescope"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
 		desc:        "Laravel Telescope debugging dashboard exposed, revealing requests, queries, and application internals",
@@ -84,7 +84,7 @@ var probes = []probe{
 	{
 		path:    "/telescope/requests",
 		name:    "Laravel Telescope Requests",
-		markers: []string{"telescope", "entries", "content"},
+		markers: []string{"Laravel Telescope", "telescope-data", "\"entries\":"},
 		sev:     severity.High,
 		desc:    "Laravel Telescope requests endpoint exposed, revealing all HTTP request/response pairs",
 	},
@@ -92,7 +92,7 @@ var probes = []probe{
 	{
 		path:        "/horizon",
 		name:        "Laravel Horizon Dashboard",
-		markers:     []string{"horizon", "Laravel Horizon", "app.js"},
+		markers:     []string{"Laravel Horizon", "window.Horizon", "horizon-data"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.Medium,
 		desc:        "Laravel Horizon queue dashboard exposed, revealing job queue configuration and status",
@@ -110,7 +110,7 @@ var probes = []probe{
 	{
 		path:        "/storage/logs/debug.log",
 		name:        "Laravel Debug Log",
-		markers:     []string{"[stacktrace]", "DEBUG", "ERROR", "Illuminate\\"},
+		markers:     []string{"[stacktrace]", "local.DEBUG", "local.ERROR", "production.ERROR", "Illuminate\\"},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Laravel debug log exposed, potentially containing sensitive debugging information",
@@ -301,6 +301,12 @@ func (m *Module) probeFile(
 				return nil // body length within 5% of 404 page
 			}
 		}
+	}
+
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
 	}
 
 	// Check anti-markers

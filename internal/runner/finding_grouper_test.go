@@ -100,6 +100,50 @@ func TestFindingGrouper_DisabledShowsEverything(t *testing.T) {
 	}
 }
 
+func sourcemapEvent(host, url, mapName string, sev severity.Severity) *output.ResultEvent {
+	return &output.ResultEvent{
+		ModuleID:         "sourcemap-detect",
+		Info:             output.Info{Severity: sev, Tags: []string{"sourcemap"}},
+		Host:             host,
+		Matched:          url,
+		URL:              url,
+		ExtractedResults: []string{mapName},
+	}
+}
+
+func TestFindingGrouper_ByModuleCollapsesDistinctValues(t *testing.T) {
+	g := newFindingGrouper(config.FindingGroupingConfig{
+		Enabled:  true,
+		PerHost:  true,
+		ByModule: []string{"sourcemap-detect"},
+	})
+
+	// Each JS bundle advertises a DISTINCT .map filename, but the module is
+	// by-module, so only the first shows and the rest collapse to file-only.
+	if !g.observe(sourcemapEvent("app.x.com", "https://app.x.com/main.111.js", "main.111.js.map", severity.Low)) {
+		t.Error("first sourcemap finding should show")
+	}
+	if g.observe(sourcemapEvent("app.x.com", "https://app.x.com/polyfills.222.js", "polyfills.222.js.map", severity.Low)) {
+		t.Error("distinct-value repeat from a by-module module should be suppressed")
+	}
+	if g.observe(sourcemapEvent("app.x.com", "https://app.x.com/runtime.333.js", "runtime.333.js.map", severity.Low)) {
+		t.Error("distinct-value repeat from a by-module module should be suppressed")
+	}
+
+	// A higher-severity sourcemap finding is a separate group (severity in key).
+	if !g.observe(sourcemapEvent("app.x.com", "https://app.x.com/main.111.js.map", "src/secret.ts", severity.High)) {
+		t.Error("different-severity sourcemap finding should show as its own group")
+	}
+	// Different host stays separate under PerHost.
+	if !g.observe(sourcemapEvent("api.x.com", "https://api.x.com/app.444.js", "app.444.js.map", severity.Low)) {
+		t.Error("by-module finding on a different host should show under PerHost")
+	}
+
+	if c := g.summaryCounts(); c[severity.Low] != 2 || c[severity.High] != 1 {
+		t.Errorf("expected 2 low groups + 1 high group, got low=%d high=%d", c[severity.Low], c[severity.High])
+	}
+}
+
 func TestFindingGrouper_EmptyValueAlwaysShows(t *testing.T) {
 	g := newFindingGrouper(config.FindingGroupingConfig{Enabled: true, PerHost: true})
 	// No extracted value → ungroupable → every occurrence shows.

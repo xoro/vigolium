@@ -81,6 +81,11 @@ func (e *Engine) initSession() error {
 	// active soft-404 differential probe). No-op unless ConfirmRequired.
 	e.confirmStartURLExtensions()
 
+	// On a monolith / server-rendered app, sweep common JavaScript bundle names
+	// (main.js, admin.js, config.js, …) and feed confirmed hits to jsscan. No-op
+	// on JS-shell SPAs (content-hashed, unguessable bundles) and when disabled.
+	e.sweepJSBundles()
+
 	logger.Info("Session initialization complete")
 	return nil
 }
@@ -257,9 +262,11 @@ func (e *Engine) probeStartURL(targetURL *url.URL) error {
 	resp := rc.Response()
 	body := rc.BodyBytes()
 
-	// Snapshot response headers for fingerprint-based extension confirmation.
+	// Snapshot response headers for fingerprint-based extension confirmation, and
+	// record the landing page's shape (HTML? JS-shell SPA?) for the JS-bundle sweep.
 	if resp != nil {
 		e.startURLHeader = resp.Header.Clone()
+		e.captureStartURLAppShape(targetURL.Path, resp.Header.Get("Content-Type"), body)
 	}
 
 	found, err := e.analyzer.Analyze(e.ctx, req, rc)

@@ -145,12 +145,18 @@ func (m *Module) ScanPerRequest(
 	return results, nil
 }
 
-// discoverEndpoint probes common GraphQL paths and returns the first working endpoint.
+// discoverEndpoint probes common GraphQL paths and returns the first working
+// endpoint. Each known path is tried under the web root and under every
+// context-path prefix of the observed URL (e.g. /orders/graphql when the spider
+// hit /orders/items), so a GraphQL endpoint mounted behind a service/gateway
+// prefix is discovered, not only one at the web root.
 func (m *Module) discoverEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 ) (string, error) {
-	for _, path := range graphqlPaths {
+	candidates := m.candidatePaths(ctx)
+
+	for _, path := range candidates {
 		body, err := m.sendGraphQLQuery(ctx, httpClient, path, typenameQuery)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
@@ -164,7 +170,7 @@ func (m *Module) discoverEndpoint(
 	}
 
 	// Fallback: try GET method with query parameter
-	for _, path := range graphqlPaths {
+	for _, path := range candidates {
 		body, err := m.sendGraphQLGET(ctx, httpClient, path, "{ __typename }")
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
@@ -177,6 +183,29 @@ func (m *Module) discoverEndpoint(
 		}
 	}
 	return "", nil
+}
+
+// candidatePaths expands the known GraphQL paths across the web root plus every
+// context-path prefix of the observed URL, de-duplicated and order-stable (root
+// paths first). A failure to read the URL degrades gracefully to the root paths.
+func (m *Module) candidatePaths(ctx *httpmsg.HttpRequestResponse) []string {
+	bases := []string{""}
+	if urlx, err := ctx.URL(); err == nil {
+		bases = modkit.CandidateBasePaths(urlx.Path)
+	}
+	seen := make(map[string]bool, len(bases)*len(graphqlPaths))
+	candidates := make([]string, 0, len(bases)*len(graphqlPaths))
+	for _, base := range bases {
+		for _, p := range graphqlPaths {
+			cp := base + p
+			if seen[cp] {
+				continue
+			}
+			seen[cp] = true
+			candidates = append(candidates, cp)
+		}
+	}
+	return candidates
 }
 
 // testInjection tests SQL injection through GraphQL field arguments.

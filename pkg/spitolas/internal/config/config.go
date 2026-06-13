@@ -154,6 +154,15 @@ type Config struct {
 	IncludeResponseBody    bool // Include response body in HTTP traffic capture
 	IncludeResponseHeaders bool // Include response headers in HTTP traffic capture
 
+	// Service-worker asset priming. After the index page loads, the crawler
+	// discovers service-worker scripts + the web-app/ngsw manifest and fetches
+	// the assets the service worker would pre-cache (e.g. Angular's lazy webpack
+	// chunks listed in ngsw.json). The browser captures these in-page fetches so
+	// they become spidering records — otherwise they are only loaded when the
+	// service-worker runtime runs, which a short headless visit does not trigger.
+	ServiceWorkerPriming   bool // Enable service-worker asset priming (default on)
+	ServiceWorkerMaxAssets int  // Cap on primed asset fetches (0 = default)
+
 	CrawlScope CrawlScope // Custom URL scope filter (nil = default same-domain check)
 
 	// Crawl strategy - determines both state selection and action selection
@@ -276,8 +285,19 @@ func New(targetURL string) (*Config, error) {
 
 		// Crawl strategy default
 		CrawlStrategy: CrawlStrategyNormal, // BFS state + FIFO action (default)
+
+		// Service-worker asset priming on by default; bounded to keep a
+		// precache-everything manifest from ballooning the crawl.
+		ServiceWorkerPriming:   true,
+		ServiceWorkerMaxAssets: defaultServiceWorkerMaxAssets,
 	}, nil
 }
+
+// defaultServiceWorkerMaxAssets bounds how many service-worker-listed assets the
+// priming step fetches. Angular ngsw.json manifests routinely list a few dozen
+// chunks; the cap guards against a pathological manifest without truncating
+// real-world apps.
+const defaultServiceWorkerMaxAssets = 600
 
 // Validate checks the configuration for errors.
 func (c *Config) Validate() error {

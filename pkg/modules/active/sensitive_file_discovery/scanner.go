@@ -80,28 +80,46 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
-	// Dedup by host
-	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	urlx, err := ctx.URL()
+	if err != nil {
 		return nil, nil
 	}
+
+	// Walk the web root plus every observed path prefix — INCLUDING static/asset
+	// and CDN-style directories (/assets, /static, ...), where a misconfigured
+	// server or object-storage front may serve an exposed .env/.git/backup that a
+	// root-only probe never reaches. Claim each (host, base) pair up front so a
+	// fully-deduped request issues no traffic, including the soft-404 fingerprint.
+	diskSet := m.ds.Get(scanCtx.DedupMgr())
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePathsIncludingStatic(urlx.Path))
+	if len(bases) == 0 {
+		return nil, nil
+	}
+	// Generic content-type probing is root-only and runs once per host — only when
+	// the root base "" was unclaimed in this batch (it is always first when present).
+	probeRoot := bases[0] == ""
 
 	// Fingerprint 404 page
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
 
-	for _, sf := range sensitiveFiles {
-		result := m.probeFile(ctx, httpClient, sf, fp)
-		if result != nil {
-			results = append(results, result)
+	// Marker-based sensitive files: probed under every candidate base path so a
+	// /<context>/.git/config or /assets/.env is found, not only the web root.
+	for _, base := range bases {
+		for _, sf := range sensitiveFiles {
+			result := m.probeFile(ctx, httpClient, sf, base+sf.path, fp)
+			if result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 
-	// Generic file probing (content-type + body differencing).
-	// Skip if 404 fingerprinting failed or if the 404 page itself returns
+	// Generic file probing (content-type + body differencing) stays root-anchored
+	// and runs once per host — only when the root base was first claimed in this
+	// batch. Skip if 404 fingerprinting failed or if the 404 page itself returns
 	// text/plain or octet-stream (we can't distinguish real files).
-	if fp != nil {
+	if probeRoot && fp != nil {
 		fpCT := fp.contentType
 		if !strings.Contains(fpCT, "text/plain") && !strings.Contains(fpCT, "application/octet-stream") {
 			for _, cat := range genericFileCategories {
@@ -164,18 +182,55 @@ func (m *Module) fingerprint404(
 	}
 }
 
+// confirms reports whether body is a genuine match for sf: no anti-marker is
+// present, at least one exact content marker matches, and — for a .env file — a
+// real KEY=VALUE assignment line exists (the credential markers DB_/SECRET/… only
+// corroborate; prose mentioning "SECRET" must not forge a Critical finding). It
+// is the single source of truth used by all three confirmation rounds and the
+// decoy-baseline check, so they stay consistent. matched carries the evidence
+// substrings; ok is false (and matched nil) when the body is not a real match.
+func (sf sensitiveFile) confirms(body string) (matched []string, ok bool) {
+	for _, anti := range sf.antiMarkers {
+		if strings.Contains(body, anti) {
+			return nil, false
+		}
+	}
+	// Strip the reflected probe path before marker matching so a marker that is
+	// also the path slug (e.g. "draft" for /api/draft, "preview" for /api/preview)
+	// cannot match on a page that merely echoes the requested URL into an href,
+	// breadcrumb, or JSON "path" field. Content-signature markers (KEY names, JSON
+	// keys) are unaffected — they don't appear inside the probe path.
+	matchBody := modkit.StripReflectedProbePath(body, sf.path)
+	for _, marker := range sf.markers {
+		if strings.Contains(matchBody, marker) {
+			matched = append(matched, marker)
+		}
+	}
+	if strings.HasPrefix(sf.path, "/.env") {
+		if !envAssignmentPattern.MatchString(body) {
+			return nil, false
+		}
+		if len(matched) == 0 {
+			matched = append(matched, "env assignment (KEY=VALUE)")
+		}
+		return matched, true
+	}
+	return matched, len(matched) > 0
+}
+
 // probeFile sends a GET request for a sensitive file and validates the response.
 func (m *Module) probeFile(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	sf sensitiveFile,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, sf.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -227,47 +282,44 @@ func (m *Module) probeFile(
 		}
 	}
 
-	// Check anti-markers
-	for _, anti := range sf.antiMarkers {
-		if strings.Contains(body, anti) {
-			return nil
-		}
-	}
-
-	// Require status 200 and at least one marker match
+	// Round 1 — content confirmation: status 200, no anti-marker, an exact content
+	// marker present (.env gated on a real KEY=VALUE assignment line).
 	if status != 200 {
 		return nil
 	}
-
-	matched := false
-	var matchedMarkers []string
-	for _, marker := range sf.markers {
-		if strings.Contains(body, marker) {
-			matched = true
-			matchedMarkers = append(matchedMarkers, marker)
-		}
-	}
-
-	// .env files: confirm on a genuine KEY=VALUE assignment line. The credential
-	// markers above (DB_, SECRET, …) only corroborate — a real .env may use
-	// app-specific keys, while a non-env body that merely contains "SECRET" in
-	// prose must not forge a Critical finding. The assignment pattern is the gate.
-	if strings.HasPrefix(sf.path, "/.env") {
-		if !envAssignmentPattern.MatchString(body) {
-			return nil
-		}
-		matched = true
-		if len(matchedMarkers) == 0 {
-			matchedMarkers = append(matchedMarkers, "env assignment (KEY=VALUE)")
-		}
-	}
-
-	if !matched {
+	matchedMarkers, ok := sf.confirms(body)
+	if !ok {
 		return nil
 	}
 
+	// Round 2 — reproduce: re-fetch the same path with the response cache bypassed.
+	// The body must stay a confirmed match AND remain textually stable, so a
+	// random / load-balanced / one-shot 200 cannot forge a finding.
+	repStatus, repBody, repOK := modkit.FetchPath(ctx, httpClient, probePath)
+	if !repOK || repStatus != 200 || !modkit.BodiesSimilar(body, repBody) {
+		return nil
+	}
+	if _, ok := sf.confirms(repBody); !ok {
+		return nil
+	}
+
+	// Round 3 — decoy baseline: a same-extension random sibling under the same
+	// directory must NOT return a body equivalent to the candidate, and must not
+	// itself satisfy the markers. This subtracts sub-directory catch-alls (a SPA
+	// fallback, a logging proxy, an object-store wildcard) that serve identical
+	// content for every <dir>/*.<ext> — the "/orders/run.log equals
+	// /orders/<random>.log" false positive.
+	if decoyStatus, decoyBody, served := modkit.DecoyFileBaseline(ctx, httpClient, probePath); served && decoyStatus == status {
+		if modkit.BodiesSimilar(body, decoyBody) {
+			return nil
+		}
+		if _, ok := sf.confirms(decoyBody); ok {
+			return nil
+		}
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + sf.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

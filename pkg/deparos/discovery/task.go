@@ -73,6 +73,12 @@ type Callbacks struct {
 	// AddObservedPath adds a path to observed collection (from JS path extraction).
 	AddObservedPath func(path string)
 
+	// QueueJSFetch enqueues additional JS/JSON URLs for fetching through the same
+	// JSFetch pipeline. Used to fan out from a parsed manifest (e.g. the assets an
+	// Angular ngsw.json enumerates) so the listed files are fetched and recorded.
+	// May be nil.
+	QueueJSFetch func(urls []*url.URL)
+
 	// HTTPClient is the client used for HTTP requests.
 	HTTPClient http.HTTPClient
 

@@ -27,13 +27,14 @@ type liveFindingGroup struct {
 // per unique value instead of one per URL. It also owns the grouped severity
 // tallies used for the phase summary. Safe for concurrent OnResult callbacks.
 type findingGrouper struct {
-	mu      sync.Mutex
-	cfg     config.FindingGroupingConfig
-	tagSet  map[string]struct{}
-	groups  map[string]*liveFindingGroup
-	order   []string
-	grouped map[severity.Severity]int // unique groups + each ungroupable finding
-	raw     map[severity.Severity]int // every occurrence (for processed-count bookkeeping)
+	mu        sync.Mutex
+	cfg       config.FindingGroupingConfig
+	tagSet    map[string]struct{}
+	moduleSet map[string]struct{} // module IDs grouped by (module, severity[, host]) regardless of value
+	groups    map[string]*liveFindingGroup
+	order     []string
+	grouped   map[severity.Severity]int // unique groups + each ungroupable finding
+	raw       map[severity.Severity]int // every occurrence (for processed-count bookkeeping)
 }
 
 // maxLiveGroupSample bounds how many URLs a live group remembers for its rollup.
@@ -41,11 +42,12 @@ const maxLiveGroupSample = 3
 
 func newFindingGrouper(cfg config.FindingGroupingConfig) *findingGrouper {
 	return &findingGrouper{
-		cfg:     cfg,
-		tagSet:  output.NormalizeTagSet(cfg.Tags),
-		groups:  make(map[string]*liveFindingGroup),
-		grouped: make(map[severity.Severity]int),
-		raw:     make(map[severity.Severity]int),
+		cfg:       cfg,
+		tagSet:    output.NormalizeTagSet(cfg.Tags),
+		moduleSet: output.NormalizeStringSet(cfg.ByModule),
+		groups:    make(map[string]*liveFindingGroup),
+		grouped:   make(map[severity.Severity]int),
+		raw:       make(map[severity.Severity]int),
 	}
 }
 
@@ -88,16 +90,18 @@ func (g *findingGrouper) groupKey(result *output.ResultEvent) (key, value string
 		return "", "", false
 	}
 	value = output.NormalizedValueKey(result.ExtractedResults)
-	if value == "" {
-		return "", "", false
+	keyValue := value
+	if _, byModule := g.moduleSet[result.ModuleID]; byModule {
+		keyValue = "" // collapse every value from this module into one group
+	} else {
+		if value == "" {
+			return "", "", false
+		}
+		if len(g.tagSet) > 0 && !output.TagsIntersect(result.Info.Tags, g.tagSet) {
+			return "", "", false
+		}
 	}
-	if len(g.tagSet) > 0 && !output.TagsIntersect(result.Info.Tags, g.tagSet) {
-		return "", "", false
-	}
-	key = result.ModuleID + "\x1f" + result.Info.Severity.String() + "\x1f" + value
-	if g.cfg.PerHost {
-		key = result.Host + "\x1f" + key
-	}
+	key = output.GroupingKey(result.ModuleID, result.Info.Severity.String(), keyValue, result.Host, g.cfg.PerHost)
 	return key, value, true
 }
 

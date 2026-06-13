@@ -143,6 +143,12 @@ type Options struct {
 	FuzzWordlistPath    string // CLI override for discovery fuzz wordlist (also enables fuzzing)
 	NoPrefixBreaker     bool   // Disable per-prefix circuit breaker (default: enabled)
 
+	// FollowSubdomains, when set, lets the subdomain_harvest passive module pull
+	// the exact in-scope subdomains it discovers in responses into the scan:
+	// each discovered host is added to a dynamic scope allow-set and fed back for
+	// scanning (the apex itself is NOT wildcarded). Auto-enabled at Intensity "deep".
+	FollowSubdomains bool
+
 	// Browser-based spidering options
 	SpideringEnabled       bool
 	SpideringMaxDuration   time.Duration

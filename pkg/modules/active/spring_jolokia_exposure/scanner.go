@@ -22,6 +22,7 @@ type probe struct {
 	antiMarkers []string
 	sev         severity.Severity
 	desc        string
+	bypass      bool // if true, also probe reverse-proxy path-normalization bypasses
 }
 
 var probes = []probe{
@@ -32,6 +33,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia JMX agent exposed, providing HTTP access to Java Management Extensions with potential for sensitive data disclosure and remote operations",
+		bypass:      true,
 	},
 	{
 		path:        "/jolokia/list",
@@ -40,6 +42,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia MBean listing exposed, revealing all registered JMX MBeans including runtime, memory, and application-specific beans",
+		bypass:      true,
 	},
 	{
 		path:        "/jolokia/version",
@@ -48,6 +51,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "Jolokia version endpoint exposed, revealing agent version and configuration details",
+		bypass:      true,
 	},
 	{
 		path:        "/actuator/jolokia",
@@ -56,6 +60,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia exposed through Spring Boot Actuator path, providing JMX access via actuator management interface",
+		bypass:      true,
 	},
 	{
 		path:        "/actuator/jolokia/list",
@@ -64,6 +69,7 @@ var probes = []probe{
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.High,
 		desc:        "Jolokia MBean listing exposed through actuator path, revealing all JMX beans",
+		bypass:      true,
 	},
 }
 
@@ -120,19 +126,35 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so an
+	// endpoint mounted under server.servlet.context-path (e.g. /api/<endpoint>)
+	// is reached, not just the root path. Claim each (host, base) pair up front
+	// so a fully-deduped request issues no traffic — including the soft-404
+	// fingerprint below.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
-	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
-		}
-	}
+	// Walk the bases and, once per host, fall back to the reverse-proxy path-
+	// normalization bypass for any bypass-eligible endpoint the direct root probe
+	// found blocked. The shared driver owns the status/hit bookkeeping and the
+	// once-per-host + blocked-status gating.
+	results := modkit.DriveProbesWithBypass(bases, probes, urlx.Path,
+		func(p probe) string { return p.name },
+		func(p probe) string { return p.path },
+		func(p probe) bool { return p.bypass },
+		func(p probe, probePath string) (*output.ResultEvent, int) {
+			return m.probeEndpoint(ctx, httpClient, p, probePath, fp)
+		})
 
 	return results, nil
 }
@@ -175,42 +197,43 @@ func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
-) *output.ResultEvent {
+) (*output.ResultEvent, int) {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
-		return nil
+		return nil, 0
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 
 	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer resp.Close()
 
 	if resp.Response() == nil {
-		return nil
+		return nil, 0
 	}
 
 	status := resp.Response().StatusCode
 	if status == 404 || status == 500 || status == 502 || status == 503 || status == 403 || status == 401 {
-		return nil
+		return nil, status
 	}
 
 	if status == 301 || status == 302 {
 		location := resp.Response().Header.Get("Location")
 		if strings.Contains(strings.ToLower(location), "login") || strings.Contains(strings.ToLower(location), "user") {
-			return nil
+			return nil, status
 		}
 	}
 
@@ -219,37 +242,37 @@ func (m *Module) probeEndpoint(
 	if fp != nil {
 		bodyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
 		if bodyHash == fp.bodyHash {
-			return nil
+			return nil, status
 		}
 		if fp.bodyLen > 0 {
 			ratio := math.Abs(float64(len(body)-fp.bodyLen)) / float64(fp.bodyLen)
 			if ratio < 0.05 {
-				return nil
+				return nil, status
 			}
 		}
 	}
 
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
-			return nil
+			return nil, status
 		}
 	}
 
 	if status != 200 {
-		return nil
+		return nil, status
 	}
 
 	// Confirm the marker groups, then drop the finding if a sub-directory
 	// catch-all serves the same markers for a nonexistent sibling (a handler that
 	// 200s every child path). Root-level probes are covered by the random-path 404
 	// fingerprint above, so the sibling probe is a no-op for them.
-	matchedMarkers, ok := modkit.MatchAndConfirmSibling(ctx, httpClient, p.path, body, p.markers)
+	matchedMarkers, ok := modkit.MatchAndConfirmSibling(ctx, httpClient, probePath, body, p.markers)
 	if !ok {
-		return nil
+		return nil, status
 	}
 
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,
@@ -265,5 +288,5 @@ func (m *Module) probeEndpoint(
 			Tags:        []string{"spring", "java", "jolokia", "jmx", "misconfiguration"},
 			Reference:   []string{"https://jolokia.org/reference/html/index.html"},
 		},
-	}
+	}, status
 }

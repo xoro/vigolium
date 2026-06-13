@@ -78,6 +78,17 @@ func (r *HttpResponse) BodyOffset() int {
 	return r.bodyOffset
 }
 
+// Head returns the response head — the status line and headers up to and
+// including the blank-line separator, without the body. Returns nil when the
+// body offset can't be determined (e.g. an empty or unparsable response).
+func (r *HttpResponse) Head() []byte {
+	r.ensureParsed()
+	if r.bodyOffset <= 0 || r.bodyOffset > len(r.raw) {
+		return nil
+	}
+	return r.raw[:r.bodyOffset]
+}
+
 // BodyToString returns the body as a string.
 func (r *HttpResponse) BodyToString() string {
 	body := r.Body()

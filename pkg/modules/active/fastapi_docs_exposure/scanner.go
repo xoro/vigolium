@@ -24,15 +24,19 @@ type probe struct {
 
 var probes = []probe{
 	{
-		path:    "/docs",
-		name:    "Swagger UI",
-		markers: []string{"swagger-ui", "SwaggerUIBundle", "openapi"},
+		path: "/docs",
+		name: "Swagger UI",
+		// Swagger-UNIQUE markers only — bare "openapi" is a generic token present in
+		// many JS bundles/SPA shells.
+		markers: []string{"swagger-ui", "SwaggerUIBundle"},
 		desc:    "FastAPI Swagger UI documentation is publicly accessible, revealing all API endpoints and schemas",
 	},
 	{
-		path:    "/redoc",
-		name:    "ReDoc",
-		markers: []string{"redoc", "ReDoc", "openapi"},
+		path: "/redoc",
+		name: "ReDoc",
+		// Drop generic "openapi"; keep "redoc"/"ReDoc" (the <redoc> element survives
+		// the reflected-path strip while a reflected href "/redoc" does not).
+		markers: []string{"redoc", "ReDoc"},
 		desc:    "FastAPI ReDoc documentation is publicly accessible, revealing all API endpoints and schemas",
 	},
 	{
@@ -96,17 +100,29 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// FastAPI sub-app mounted under a prefix (e.g. /api/docs, /v1/openapi.json) is
+	// reached, not just the root. Claim each (host, base) pair up front so a
+	// fully-deduped request issues no traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeEndpoint(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 
@@ -151,13 +167,14 @@ func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -206,14 +223,27 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Catch-all / SPA-shell guard: a body textually equivalent to the originally
+	// observed page means the app returned its standard shell for this path —
+	// "the same body with or without the probe" — not a real docs surface.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	if status != 200 {
 		return nil
 	}
 
+	// Strip the reflected probe path before matching: the /redoc marker "redoc" is
+	// the path slug, so a page echoing a href/canonical "/redoc" would otherwise
+	// match. The real ReDoc page still matches via its <redoc> element (no leading
+	// slash), which the strip leaves intact.
+	matchBody := modkit.StripReflectedProbePath(body, probePath)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}
@@ -222,8 +252,17 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes
+	// (e.g. /api/docs), a handler that 200s every child of /api/ with a page that
+	// happens to contain a marker would forge a finding. Drop it if a nonexistent
+	// sibling under the same parent returns the same markers. Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

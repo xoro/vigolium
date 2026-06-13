@@ -195,9 +195,18 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
-	// Dedup by host
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// sub-directory CMS install (e.g. /blog/<file>) is reached, not just the root.
+	// Claim each (host, base) pair up front so a fully-deduped request issues no
+	// traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
@@ -205,9 +214,11 @@ func (m *Module) ScanPerRequest(
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeFile(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeFile(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 	return results, nil
@@ -254,13 +265,14 @@ func (m *Module) probeFile(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -336,8 +348,16 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes,
+	// drop the finding if a nonexistent sibling under the same parent returns the
+	// same markers (a handler that 200s every child path). Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

@@ -63,17 +63,30 @@ func (m *Module) ScanPerRequest(
 	}
 
 	host := service.Host()
+
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// sub-directory WordPress install (e.g. /blog/wp-login.php) is reached, not
+	// just the root. Claim each (host, base) pair up front so a fully-deduped
+	// request issues no traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, probe := range wpProbes {
-		if result := m.probeFile(ctx, httpClient, scanCtx, probe, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, probe := range wpProbes {
+			if result := m.probeFile(ctx, httpClient, scanCtx, probe, base+probe.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 	return results, nil
@@ -148,13 +161,14 @@ func (m *Module) probeFile(
 	httpClient *http.Requester,
 	scanCtx *modkit.ScanContext,
 	probe wpProbe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probe.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -201,6 +215,13 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Catch-all / shell guard: a body textually equivalent to the originally
+	// observed page means the app served its standard shell for this path —
+	// "the same body with or without the probe".
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	// Check anti-markers
 	for _, anti := range probe.antiMarkers {
 		if strings.Contains(body, anti) {
@@ -219,7 +240,7 @@ func (m *Module) probeFile(
 	if probe.path == "/wp-cron.php" {
 		if len(strings.TrimSpace(body)) == 0 && m.wpCronEmptyIsSpecific(ctx, httpClient) {
 			urlx, _ := ctx.URL()
-			targetURL := urlx.Scheme + "://" + urlx.Host + probe.path
+			targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 			return &output.ResultEvent{
 				URL:     targetURL,
 				Matched: targetURL,
@@ -258,8 +279,16 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: ConfirmNotSoft404 above compares against a
+	// host-wide random path, which cannot see a catch-all scoped to a sub-directory
+	// prefix (now that we probe under context paths). Drop the finding if a
+	// nonexistent sibling under the same parent returns the same markers.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, probe.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + probe.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

@@ -139,11 +139,14 @@ func (m *Module) runInternalOracle(
 			if !ok || blocked || !is2xx(status) {
 				continue
 			}
-			marker := firstFreshMarker(body, baselineBody, tgt.Markers)
-			if marker == "" {
+			// A real metadata endpoint answers with a plain (non-HTML) body carrying a
+			// cluster of distinct self-evidencing tokens; one common word like
+			// "hostname" echoed by the app's own HTML page is not evidence.
+			markers, ok := infra.ConfirmFreshMetadata(body, baselineBody, tgt.Markers)
+			if !ok {
 				continue
 			}
-			if ev := m.confirmInternal(httpClient, service, baseRaw, baselineBody, urlx, victimHost, tgt, f, marker, fullResp); ev != nil {
+			if ev := m.confirmInternal(httpClient, service, baseRaw, baselineBody, urlx, victimHost, tgt, f, markers, fullResp); ev != nil {
 				return ev
 			}
 		}
@@ -165,27 +168,28 @@ func (m *Module) confirmInternal(
 	victimHost string,
 	tgt infra.SSRFInternalTarget,
 	f infra.RoutingTarget,
-	marker string,
+	markers []string,
 	candidateResp string,
 ) *output.ResultEvent {
 	ev := modkit.NewEvidenceCollector()
 	ev.Add("candidate", displayRequest(baseRaw, f.Target), candidateResp)
 
-	// (1) Reproducible: the marker must reappear on a 2xx, non-blocked response.
+	// (1) Reproducible: the SAME multi-marker cluster must reappear on a 2xx,
+	// non-blocked, non-HTML response. Fails closed on any miss.
 	for i := 0; i < confirmRounds; i++ {
 		status, body, fullResp, blocked, ok, fatal := m.fireTarget(httpClient, service, baseRaw, f.Target, tgt.ExtraHeaders)
-		if fatal || !ok || blocked || !is2xx(status) || !containsFold(body, marker) {
+		if fatal || !ok || blocked || !is2xx(status) || !infra.MetadataBodyReproduces(body, markers) {
 			return nil // fail closed
 		}
 		ev.Add(fmt.Sprintf("reproduce-%d", i+1), displayRequest(baseRaw, f.Target), fullResp)
 	}
 
 	// (2) Decoy-negative: the SAME request-line quirk around an unrelated TEST-NET
-	// host must NOT yield the marker. If it does, the proxy serves this content for
+	// host must NOT yield the markers. If it does, the proxy serves this content for
 	// any absolute target (a catch-all / canned error page) — not a reached endpoint.
 	if decoy := decoyTargetLike(f, victimHost); decoy != "" {
 		status, body, fullResp, blocked, ok, _ := m.fireTarget(httpClient, service, baseRaw, decoy, tgt.ExtraHeaders)
-		if ok && !blocked && is2xx(status) && containsFold(body, marker) {
+		if ok && !blocked && is2xx(status) && infra.BodyContainsAllMarkers(body, markers) {
 			return nil // catch-all → false positive
 		}
 		ev.Add("decoy-negative", displayRequest(baseRaw, decoy), fullResp)
@@ -194,22 +198,23 @@ func (m *Module) confirmInternal(
 	// (3) Baseline-absence was established before reporting; record it as evidence.
 	ev.Add("baseline (original request)", string(baseRaw), baselineBody)
 
+	markerList := strings.Join(markers, ", ")
 	desc := fmt.Sprintf(
-		"Routing-based SSRF: the proxy reached %s and returned marker %q when the request line named it via %s (%q) — while the connection and Host header were the victim. Blocked/absent for the victim baseline and a benign decoy.",
-		tgt.Label, marker, f.Label, f.Target,
+		"Routing-based SSRF: the proxy reached %s and returned internal-metadata markers (%s) when the request line named it via %s (%q) — while the connection and Host header were the victim. The response is a plain metadata body (not the app's HTML page), reproduces, and is absent for the victim baseline and a benign decoy.",
+		tgt.Label, markerList, f.Label, f.Target,
 	)
 	return &output.ResultEvent{
 		URL:                urlx.String(),
 		Request:            displayRequest(baseRaw, f.Target),
 		Response:           candidateResp,
 		FuzzingParameter:   "request-line",
-		ExtractedResults:   []string{f.Target, tgt.Label, "marker=" + marker, f.Label},
+		ExtractedResults:   []string{f.Target, tgt.Label, "markers=" + markerList, f.Label},
 		AdditionalEvidence: ev.Entries(),
 		Info: output.Info{
 			Name:        "Routing-Based SSRF (Internal Metadata Reached)",
 			Description: desc,
 			Severity:    severity.High,
-			Confidence:  severity.Firm,
+			Confidence:  severity.Tentative,
 		},
 	}
 }
@@ -289,21 +294,6 @@ func decoyTargetLike(f infra.RoutingTarget, victimHost string) string {
 		}
 	}
 	return ""
-}
-
-// firstFreshMarker returns the first marker present in body but absent from the
-// baseline (case-insensitive), or "" when none qualify.
-func firstFreshMarker(body, baseline string, markers []string) string {
-	for _, mk := range markers {
-		if containsFold(body, mk) && !containsFold(baseline, mk) {
-			return mk
-		}
-	}
-	return ""
-}
-
-func containsFold(haystack, needle string) bool {
-	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
 }
 
 func is2xx(status int) bool { return status >= 200 && status < 300 }

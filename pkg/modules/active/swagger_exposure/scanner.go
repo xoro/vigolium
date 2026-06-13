@@ -104,10 +104,15 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
-	// Host-level dedup: only probe once per host (IsSeen is test-and-set).
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// docs UI/spec mounted under an API gateway or service prefix (e.g.
+	// /api/swagger-ui.html, /orders/v3/api-docs) is reached, not just the root.
+	// Dedup per (host, base) — IsSeen is test-and-set — so each base is probed
+	// once per host across all requests.
 	hostKey := urlx.Scheme + "|" + urlx.Host
 	hostDS := m.hostDS.Get(scanCtx.DedupMgr())
-	if hostDS != nil && hostDS.IsSeen(hostKey) {
+	bases := modkit.UnclaimedBasePaths(hostDS, hostKey, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
@@ -124,61 +129,63 @@ func (m *Module) ScanPerRequest(
 
 	baseURL := urlx.Scheme + "://" + urlx.Host
 
-	for _, path := range probePaths {
-		probePath := "/" + path
+	for _, base := range bases {
+		for _, path := range probePaths {
+			probePath := base + "/" + path
 
-		modifiedRaw, err := httpmsg.SetPath(rawHTTP, probePath)
-		if err != nil {
-			continue
-		}
+			modifiedRaw, err := httpmsg.SetPath(rawHTTP, probePath)
+			if err != nil {
+				continue
+			}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+			fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
+			if err != nil {
+				continue
+			}
+			fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
-		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
-		if err != nil {
-			continue
-		}
+			resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+			if err != nil {
+				continue
+			}
 
-		statusCode := resp.Response().StatusCode
-		// Copy the body before Close: resp.Body().Bytes() aliases the pooled
-		// *bytes.Buffer that Close() returns to a process-global pool, so reading
-		// `body` afterwards (DetectSpecType, looksLikeSwaggerUI) races with a
-		// concurrent request reusing that buffer. (Same fix as idor_detection.)
-		body := append([]byte(nil), resp.Body().Bytes()...)
-		resp.Close()
+			statusCode := resp.Response().StatusCode
+			// Copy the body before Close: resp.Body().Bytes() aliases the pooled
+			// *bytes.Buffer that Close() returns to a process-global pool, so reading
+			// `body` afterwards (DetectSpecType, looksLikeSwaggerUI) races with a
+			// concurrent request reusing that buffer. (Same fix as idor_detection.)
+			body := append([]byte(nil), resp.Body().Bytes()...)
+			resp.Close()
 
-		if statusCode != 200 || len(body) < 32 {
-			continue
-		}
+			if statusCode != 200 || len(body) < 32 {
+				continue
+			}
 
-		var kind string
-		switch {
-		case specutil.DetectSpecType(body) != specutil.Unknown:
-			kind = "OpenAPI/Swagger specification document"
-		case looksLikeSwaggerUI(body):
-			kind = "interactive API documentation UI"
-		default:
-			continue
-		}
+			var kind string
+			switch {
+			case specutil.DetectSpecType(body) != specutil.Unknown:
+				kind = "OpenAPI/Swagger specification document"
+			case looksLikeSwaggerUI(body):
+				kind = "interactive API documentation UI"
+			default:
+				continue
+			}
 
-		// First confirmed exposure is sufficient — stop probing this host.
-		hit := baseURL + probePath
-		return []*output.ResultEvent{
-			{
-				URL:     hit,
-				Matched: hit,
-				Info: output.Info{
-					Name: ModuleName,
-					Description: "Publicly accessible " + kind + " exposed at " + probePath +
-						". This discloses the API attack surface (endpoints, parameters, " +
-						"authentication scheme) to unauthenticated users.",
+			// First confirmed exposure is sufficient — stop probing this host.
+			hit := baseURL + probePath
+			return []*output.ResultEvent{
+				{
+					URL:     hit,
+					Matched: hit,
+					Info: output.Info{
+						Name: ModuleName,
+						Description: "Publicly accessible " + kind + " exposed at " + probePath +
+							". This discloses the API attack surface (endpoints, parameters, " +
+							"authentication scheme) to unauthenticated users.",
+					},
 				},
-			},
-		}, nil
+			}, nil
+		}
 	}
 
 	return nil, nil

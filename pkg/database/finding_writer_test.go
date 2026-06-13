@@ -72,6 +72,64 @@ func TestSaveFindingsBatch_DedupsWithinBatch(t *testing.T) {
 	}
 }
 
+// TestSaveFinding_ReSaveDoesNotDuplicateOwnEvidence reproduces the secret-scan
+// report bug where the same finding (same hash, same request/response) is emitted
+// across multiple scan passes: the conflict-append path used to fold the
+// duplicate's request/response into AdditionalEvidence, so the report printed the
+// response twice (once as primary, once under "Additional Evidence"). The append
+// must drop a pair that's byte-identical to the survivor's own primary pair.
+func TestSaveFinding_ReSaveDoesNotDuplicateOwnEvidence(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	recA := insertRecordP(t, repo, DefaultProjectUUID, "GET", "t.example.com", "/app.js", 200)
+	recB := insertRecordP(t, repo, DefaultProjectUUID, "GET", "t.example.com", "/app.js", 200)
+
+	// Same secret, same URL → same finding_hash, same request/response.
+	ev := makeFindingEvent("secret-detect", "/app.js", severity.High)
+	if err := repo.SaveFinding(ctx, ev, []string{recA}, "", DefaultProjectUUID); err != nil {
+		t.Fatalf("SaveFinding (first): %v", err)
+	}
+	// Re-detected on a second stored copy of the same response.
+	if err := repo.SaveFinding(ctx, ev, []string{recB}, "", DefaultProjectUUID); err != nil {
+		t.Fatalf("SaveFinding (re-save): %v", err)
+	}
+
+	// ListFindings excludes the evidence columns; read the row back in full.
+	loadEvidence := func() []string {
+		f := &Finding{}
+		if err := db.NewSelect().Model(f).
+			Where("project_uuid = ?", DefaultProjectUUID).
+			Where("module_id = ?", "secret-detect").Scan(ctx); err != nil {
+			t.Fatalf("select finding: %v", err)
+		}
+		return f.AdditionalEvidence
+	}
+
+	_, total, err := repo.ListFindings(ctx, QueryFilters{ProjectUUID: DefaultProjectUUID})
+	if err != nil {
+		t.Fatalf("ListFindings: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total findings = %d, want 1 (re-save should merge)", total)
+	}
+	if n := len(loadEvidence()); n != 0 {
+		t.Fatalf("AdditionalEvidence = %d entries, want 0 (re-save duplicates the primary pair)", n)
+	}
+
+	// A genuinely different request/response, however, is still recorded.
+	ev2 := makeFindingEvent("secret-detect", "/app.js", severity.High)
+	ev2.Request = "GET /app.js?v=2 HTTP/1.1\r\nHost: t.example.com\r\n\r\n"
+	ev2.Response = "HTTP/1.1 200 OK\r\nETag: \"different\"\r\n\r\nvar k='AIza...'"
+	if err := repo.SaveFinding(ctx, ev2, []string{recA}, "", DefaultProjectUUID); err != nil {
+		t.Fatalf("SaveFinding (distinct evidence): %v", err)
+	}
+	if n := len(loadEvidence()); n != 1 {
+		t.Fatalf("AdditionalEvidence = %d entries, want 1 (distinct pair kept)", n)
+	}
+}
+
 // TestSaveFindingsBatch_MatchesSequentialSaves checks that a batched save and a
 // sequence of individual SaveFinding calls produce the same finding rows.
 func TestSaveFindingsBatch_MatchesSequentialSaves(t *testing.T) {

@@ -31,7 +31,7 @@ var probes = []probe{
 	{
 		path:    "/__debug__/render_panel/",
 		name:    "Django Debug Toolbar Render Panel",
-		markers: []string{"djDebug", "panel"},
+		markers: []string{"djDebug", "djdt"},
 		desc:    "Django Debug Toolbar panel render endpoint is accessible, allowing retrieval of debug panel data",
 	},
 }
@@ -199,14 +199,25 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Catch-all / SPA-shell guard: a body textually equivalent to the originally
+	// observed page means the app served its standard shell for this path —
+	// "the same body with or without the probe".
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	if status != 200 {
 		return nil
 	}
 
+	// Strip the reflected probe path before matching so a marker that echoes the
+	// requested path can't satisfy the check on a reflected href/breadcrumb alone.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}

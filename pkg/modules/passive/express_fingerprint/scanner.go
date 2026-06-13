@@ -164,30 +164,10 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		}
 	}
 
-	// Signal 4: ETag format — Express default weak ETags (W/"...")
-	etag := hdr("ETag")
-	if strings.HasPrefix(etag, `W/"`) {
-		results = append(results, &output.ResultEvent{
-			ModuleID: ModuleID,
-			Host:     host,
-			URL:      urlx.String(),
-			Matched:  urlx.String(),
-			ExtractedResults: []string{
-				fmt.Sprintf("ETag: %s", etag),
-			},
-			Info: output.Info{
-				Name:        "Express.js Likely (Weak ETag)",
-				Description: "Express.js likely detected via default weak ETag format",
-				Severity:    severity.Info,
-				Confidence:  severity.Tentative,
-				Tags:        []string{"express", "node", "fingerprint", "etag"},
-			},
-			Metadata: map[string]any{
-				"platform":  "express",
-				"detection": "weak-etag",
-			},
-		})
-	}
+	// NB: a weak ETag (W/"...") is deliberately NOT a signal — that format is
+	// emitted by nginx, CDNs, Next.js and many static-file servers, so it false-
+	// positived Express on unrelated sites. A genuine Express app surfaces via the
+	// X-Powered-By / connect.sid / NestJS signals above.
 
 	return results, nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/spitolas/loginsig"
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
@@ -26,18 +27,24 @@ type probe struct {
 	sev         severity.Severity
 	desc        string
 	refs        []string
+	// requireUnauth marks a probe that claims unauthenticated access to a
+	// privileged surface (an admin panel). A page that renders a login form is
+	// gated, not exposed, so for these probes a login wall is a false positive —
+	// the separate "*/login" probes cover the "framework is installed" signal.
+	requireUnauth bool
 }
 
 var probes = []probe{
 	// Admin panels
 	{
-		path:        "/nova",
-		name:        "Laravel Nova",
-		markers:     []string{"Nova", "nova", "laravel-nova", "inertia"},
-		antiMarkers: []string{"404 Not Found"},
-		sev:         severity.High,
-		desc:        "Laravel Nova admin panel is accessible without authentication",
-		refs:        []string{"https://nova.laravel.com/docs"},
+		path:          "/nova",
+		name:          "Laravel Nova",
+		markers:       []string{"Nova", "nova", "laravel-nova", "inertia"},
+		antiMarkers:   []string{"404 Not Found"},
+		sev:           severity.High,
+		desc:          "Laravel Nova admin panel is accessible without authentication",
+		refs:          []string{"https://nova.laravel.com/docs"},
+		requireUnauth: true,
 	},
 	{
 		path:        "/nova/login",
@@ -49,13 +56,14 @@ var probes = []probe{
 		refs:        []string{"https://nova.laravel.com/docs"},
 	},
 	{
-		path:        "/filament",
-		name:        "Laravel Filament",
-		markers:     []string{"filament", "Filament", "filament-panels", "livewire"},
-		antiMarkers: []string{"404 Not Found"},
-		sev:         severity.High,
-		desc:        "Laravel Filament admin panel is accessible without authentication",
-		refs:        []string{"https://filamentphp.com/docs"},
+		path:          "/filament",
+		name:          "Laravel Filament",
+		markers:       []string{"filament", "Filament", "filament-panels", "livewire"},
+		antiMarkers:   []string{"404 Not Found"},
+		sev:           severity.High,
+		desc:          "Laravel Filament admin panel is accessible without authentication",
+		refs:          []string{"https://filamentphp.com/docs"},
+		requireUnauth: true,
 	},
 	{
 		path:        "/filament/login",
@@ -67,20 +75,27 @@ var probes = []probe{
 		refs:        []string{"https://filamentphp.com/docs"},
 	},
 	{
-		path:        "/admin",
-		name:        "Admin Panel (generic)",
-		markers:     []string{"dashboard", "Dashboard", "admin", "Admin", "backpack", "Backpack", "voyager", "Voyager"},
-		antiMarkers: []string{"404 Not Found"},
-		sev:         severity.High,
-		desc:        "Admin panel at /admin is accessible without authentication",
+		path: "/admin",
+		name: "Admin Panel (generic)",
+		// A bare "admin"/"dashboard" word is weak — a path-routing app reflects the
+		// probe path ("/.../admin") straight into a <form action>/breadcrumb, so the
+		// token appears on an unrelated page. The reflected probe path is stripped
+		// before matching (see probeEndpoint) so a marker only counts when it comes
+		// from the endpoint's own content.
+		markers:       []string{"dashboard", "Dashboard", "admin", "Admin", "backpack", "Backpack", "voyager", "Voyager", "wp-admin"},
+		antiMarkers:   []string{"404 Not Found"},
+		sev:           severity.High,
+		desc:          "Admin panel at /admin is accessible without authentication",
+		requireUnauth: true,
 	},
 	{
-		path:        "/backoffice",
-		name:        "Back Office",
-		markers:     []string{"dashboard", "Dashboard", "admin", "backoffice"},
-		antiMarkers: []string{"404 Not Found"},
-		sev:         severity.High,
-		desc:        "Back office panel is accessible without authentication",
+		path:          "/backoffice",
+		name:          "Back Office",
+		markers:       []string{"dashboard", "Dashboard", "admin", "backoffice"},
+		antiMarkers:   []string{"404 Not Found"},
+		sev:           severity.High,
+		desc:          "Back office panel is accessible without authentication",
+		requireUnauth: true,
 	},
 	// API documentation
 	{
@@ -185,17 +200,29 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so an
+	// admin panel mounted under a sub-directory install (e.g. /blog/admin) is
+	// reached, not just the root. Claim each (host, base) pair up front so a
+	// fully-deduped request issues no traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeEndpoint(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 	return results, nil
@@ -247,6 +274,7 @@ func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	method := p.method
@@ -258,7 +286,7 @@ func (m *Module) probeEndpoint(
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -321,6 +349,16 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Catch-all / shell guard: a body textually equivalent to the page originally
+	// observed means "the same with or without the probe" — the app routed this
+	// sub-path back to its standard shell (a login wall, a landing page) rather
+	// than serving a distinct admin surface. The soft-404 fingerprint above only
+	// catches a random *root* path; this catches a sub-path that re-renders the
+	// observed page (e.g. /tai-khoan/dang-nhap/admin == /tai-khoan/dang-nhap/).
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil
@@ -331,10 +369,26 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Login-wall guard: an admin-panel probe claims unauthenticated access, but a
+	// page rendering a password field is gated — reaching the login form is not
+	// reaching the panel. The "*/login" probes intentionally match these at low
+	// severity, so only drop for the unauthenticated-access probes.
+	if p.requireUnauth && loginsig.BodyLooksLikeLogin([]byte(body)) {
+		return nil
+	}
+
+	// Self-reflection guard: a path-routing app echoes the probe path back into the
+	// page (a <form action>, a canonical link, a breadcrumb), so the literal path
+	// segment — e.g. "admin" inside action="/.../admin" — appears in the body of an
+	// unrelated page and trips a weak marker. Strip the reflected probe path before
+	// matching so a marker only counts when it comes from the endpoint's own
+	// content, not from our own request.
+	matchBody := modkit.StripReflectedProbePath(body, probePath)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}
@@ -343,8 +397,16 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes,
+	// drop the finding if a nonexistent sibling under the same parent returns the
+	// same markers (a handler that 200s every child path). Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	refs := p.refs
 	if len(refs) == 0 {

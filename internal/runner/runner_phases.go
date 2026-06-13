@@ -34,7 +34,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/terminal"
 	"github.com/vigolium/vigolium/pkg/toolexec/kingfisher"
-	"github.com/vigolium/vigolium/pkg/types/severity"
 	"go.uber.org/zap"
 )
 
@@ -800,7 +799,19 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 				continue
 			}
 
-			result, scanErr := scanner.Scan(ctx, record.ResponseBodyBytes())
+			// Parse the raw response once so we can both scan the body and
+			// inspect the status/headers for the severity decision below.
+			resp := record.ParsedResponse()
+			if resp == nil {
+				continue
+			}
+			redirect := secret_detect.IsRedirectStatus(resp.StatusCode())
+			headerValues := secret_detect.JoinHeaderValues(resp.Headers())
+
+			body := resp.Body()
+			respHead := string(resp.Head())
+
+			result, scanErr := scanner.Scan(ctx, body)
 			if scanErr != nil || !result.HasFindings() {
 				continue
 			}
@@ -808,35 +819,22 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 			for i := range result.Findings {
 				f := &result.Findings[i]
 
-				sev := severity.High
-				conf := severity.Firm
-				if f.IsValidated() {
-					sev = severity.Critical
-					conf = severity.Certain
-				}
+				// Downgrade matches that ride on a redirect or are only
+				// reflected into a response header (e.g. an OAuth identifier in
+				// a Location URL bouncing to an SSO login) — usually low-value
+				// reflections rather than secrets leaked in page content.
+				sev, conf := secret_detect.SecretFindingSeverity(
+					f.IsValidated(),
+					redirect,
+					secret_detect.SnippetInHeaderValues(f.Snippet(), headerValues),
+				)
 
-				event := &output.ResultEvent{
-					ModuleID: "",
-					Info: output.Info{
-						Name:        f.RuleName(),
-						Description: "Leaked secret detected: " + f.RuleID(),
-						Severity:    sev,
-						Confidence:  conf,
-						Tags:        []string{"secret", "credential", "exposure", "known-issue-scan"},
-					},
-					Host:             record.Hostname,
-					URL:              record.URL,
-					Matched:          record.URL,
-					ExtractedResults: []string{f.Snippet()},
-					Metadata: map[string]any{
-						"rule_id":   f.RuleID(),
-						"rule_name": f.RuleName(),
-						"validated": f.IsValidated(),
-					},
-					ModuleType:    database.ModuleTypeSecretScan,
-					FindingSource: database.FindingSourceKnownIssueScan,
-					ModuleShort:   "Leaked secret detected in HTTP response body",
-				}
+				response := secret_detect.BuildEvidenceResponse(respHead, body, f.Snippet(), f.Finding.Line)
+				event := secret_detect.NewSecretFinding(f, sev, conf, record.Hostname, record.URL, string(record.RawRequest), response)
+				event.Info.Tags = append(event.Info.Tags, "known-issue-scan")
+				event.ModuleType = database.ModuleTypeSecretScan
+				event.FindingSource = database.FindingSourceKnownIssueScan
+				event.ModuleShort = "Leaked secret detected in HTTP response body"
 
 				// Save to DB
 				if saveErr := r.repository.SaveFinding(ctx, event, []string{record.UUID}, infra.scanUUID, r.options.ProjectUUID); saveErr != nil {
@@ -1036,14 +1034,20 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 	var phaseModuleTimeouts atomic.Int64
 
 	baseExecutorCfg := core.ExecutorConfig{
-		Workers:              daConcurrency,
-		Services:             infra.svc,
-		HTTPRequester:        infra.httpRequester,
-		Repository:           r.repository,
-		RecordWriter:         recordWriter,
-		FindingWriter:        findingWriter,
-		ScanUUID:             infra.scanUUID,
-		ScopeMatcher:         infra.scopeMatcher,
+		Workers:       daConcurrency,
+		Services:      infra.svc,
+		HTTPRequester: infra.httpRequester,
+		Repository:    r.repository,
+		RecordWriter:  recordWriter,
+		FindingWriter: findingWriter,
+		ScanUUID:      infra.scanUUID,
+		ScopeMatcher:  infra.scopeMatcher,
+		// Subdomain feed-back is wired only here, on the dynamic-assessment phase —
+		// the only phase that runs the full passive set with live feed-back. The
+		// executor guard (FollowSubdomains && ScopeMatcher && !DisableFeedback) makes
+		// it a no-op elsewhere, so subdomain_harvest stays recon-only in other phases.
+		FollowSubdomains:     r.options.FollowSubdomains || strings.EqualFold(r.options.Intensity, "deep"),
+		DeepScan:             strings.EqualFold(r.options.Intensity, "deep"),
 		ModuleTimeouts:       &phaseModuleTimeouts,
 		SkipBaseline:         true,
 		PauseCtrl:            r.pauseCtrl,
@@ -1051,8 +1055,8 @@ func (r *Runner) runDynamicAssessmentPhase(ctx context.Context, infra *phaseInfr
 		TechFilterDisabled:   r.options.NoTechFilter || strings.EqualFold(r.options.Intensity, "deep"),
 		OnTechDetected: func(host, tag string) {
 			line := fmt.Sprintf("%s %s %s %s %s %s\n",
-				terminal.Muted(terminal.SymbolChevron+" tech-stack "+terminal.SymbolPipe),
-				terminal.BoldCyan("[detected]"),
+				terminal.PhasePrefix(string(PhaseDynamicAssessment)),
+				terminal.BoldCyan("[tech-stack-detected]"),
 				terminal.HiBlue(host),
 				terminal.Muted("→"),
 				terminal.Yellow(tag),

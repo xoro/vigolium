@@ -46,9 +46,10 @@ func (r *Runner) groupFindingsByValue(ctx context.Context, phase string) {
 		return
 	}
 	deleted, grouped, err := r.repository.GroupFindingsByValue(ctx, r.options.ProjectUUID, database.GroupFindingOptions{
-		PerHost: gc.PerHost,
-		Tags:    gc.Tags,
-		MaxURLs: gc.MaxURLs,
+		PerHost:  gc.PerHost,
+		Tags:     gc.Tags,
+		ByModule: gc.ByModule,
+		MaxURLs:  gc.MaxURLs,
 	})
 	if err != nil {
 		zap.L().Warn("Finding value-grouping failed", zap.String("phase", phase), zap.Error(err))

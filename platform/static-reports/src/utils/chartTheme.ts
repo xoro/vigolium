@@ -80,6 +80,44 @@ export function getMethodColors(theme: Theme): Record<string, string> {
   };
 }
 
+// Stable palette for the Traffic table's Source column. Known sources get an
+// intuitive anchor color; anything else is hashed into the palette so each
+// distinct source keeps a consistent, distinguishable color across renders.
+export function getSourcePalette(theme: Theme): string[] {
+  const c = getColors(theme);
+  const sev = getSeverityColors(theme);
+  return [c.terracotta, c.olive, c.gold, c.rose, c.charcoalLight, sev.info, sev.suspect, c.muted];
+}
+
+function getKnownSourceColors(theme: Theme): Record<string, string> {
+  const c = getColors(theme);
+  const sev = getSeverityColors(theme);
+  return {
+    deparos: c.terracotta,
+    discovery: c.terracotta,
+    spidering: c.olive,
+    spitolas: c.olive,
+    scanner: c.gold,
+    finding: c.rose,
+    "known-issue-scan": c.charcoalLight,
+    kis: c.charcoalLight,
+    ingest: sev.info,
+    replay: sev.suspect,
+    wayback: c.gold,
+    import: c.muted,
+  };
+}
+
+export function getSourceColor(source: string, theme: Theme): string {
+  const key = source.trim().toLowerCase();
+  const known = getKnownSourceColors(theme);
+  if (known[key]) return known[key];
+  const palette = getSourcePalette(theme);
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+
 export function getChartColors(theme: Theme): string[] {
   const c = getColors(theme);
   return [c.terracotta, c.olive, c.gold, c.rose, c.charcoalLight];

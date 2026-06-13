@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { AgGridReact } from "ag-grid-react";
 import {
   AllCommunityModule,
@@ -7,10 +7,10 @@ import {
   type GridReadyEvent,
   type GridApi,
 } from "ag-grid-community";
-import { Download, Search, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from "lucide-react";
+import { Download, Search, X, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Check, Terminal, type LucideIcon } from "lucide-react";
 import type { HttpRecord } from "../types";
 import { useTheme } from "../utils/theme";
-import { getMethodColors, getStatusColors } from "../utils/chartTheme";
+import { getMethodColors, getStatusColors, getSourceColor } from "../utils/chartTheme";
 import FilterDropdown from "./FilterDropdown";
 import HostSitemap from "./HostSitemap";
 import ColumnChooser, { type ColumnOption } from "./ColumnChooser";
@@ -37,23 +37,6 @@ function decodeBase64(b64: string | null): string {
   }
 }
 
-function HeaderChips({ headers }: { headers: Record<string, string | string[]> }) {
-  const entries = Object.entries(headers);
-  if (entries.length === 0) return null;
-  return (
-    <div className="overflow-x-auto max-h-24 overflow-y-auto">
-      <div className="flex flex-wrap gap-1">
-        {entries.map(([k, v]) => (
-          <span key={k} className="inline-flex whitespace-nowrap text-[10px] px-1.5 py-0.5 bg-cream border border-warm-border rounded">
-            <span className="text-terracotta font-semibold">{k}:</span>
-            <span className="text-charcoal-light ml-1">{Array.isArray(v) ? v.join(", ") : v}</span>
-          </span>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function TrimNote({ note }: { note?: string | null }) {
   if (!note) return null;
   return (
@@ -63,18 +46,158 @@ function TrimNote({ note }: { note?: string | null }) {
   );
 }
 
+// Derive the origin-form request target (path + query) the way Burp shows it on
+// the request line. Prefer parsing the full URL so the query string survives.
+function requestTarget(record: HttpRecord): string {
+  try {
+    const u = new URL(record.url);
+    return (u.pathname || "/") + u.search;
+  } catch {
+    return record.path || "/";
+  }
+}
+
+function flattenHeaders(headers: Record<string, string | string[]> | null | undefined): string[] {
+  if (!headers) return [];
+  const lines: string[] = [];
+  for (const [k, v] of Object.entries(headers)) {
+    const vals = Array.isArray(v) ? v : [v];
+    for (const val of vals) lines.push(`${k}: ${val}`);
+  }
+  return lines;
+}
+
+// Build the raw HTTP request in Burp wire format. A full JSONL export carries
+// raw_request verbatim; generated reports drop it, so reconstruct the message
+// from the request line + headers + (trimmed) body.
+function buildRawRequest(record: HttpRecord): string {
+  const raw = decodeBase64(record.raw_request);
+  if (raw) return raw;
+  const version = record.http_version || "HTTP/1.1";
+  const lines = [`${record.method} ${requestTarget(record)} ${version}`];
+  const headerLines = flattenHeaders(record.request_headers);
+  const hasHost = headerLines.some((l) => l.toLowerCase().startsWith("host:"));
+  if (!hasHost && record.hostname) {
+    const isDefaultPort = (record.scheme === "https" && record.port === 443) || (record.scheme === "http" && record.port === 80);
+    lines.push(`Host: ${record.hostname}${record.port && !isDefaultPort ? `:${record.port}` : ""}`);
+  }
+  lines.push(...headerLines);
+  let out = lines.join("\n");
+  const body = decodeBase64(record.request_body);
+  if (body) out += `\n\n${body}`;
+  return out;
+}
+
+function buildRawResponse(record: HttpRecord): string {
+  const raw = decodeBase64(record.raw_response);
+  if (raw) return raw;
+  const version = record.response_http_version || record.http_version || "HTTP/1.1";
+  const lines = [`${version} ${record.status_code}${record.status_phrase ? ` ${record.status_phrase}` : ""}`];
+  lines.push(...flattenHeaders(record.response_headers));
+  let out = lines.join("\n");
+  const body = decodeBase64(record.response_body);
+  if (body) out += `\n\n${body}`;
+  return out;
+}
+
+// Decode the request body, preferring the explicit request_body field and
+// falling back to the body portion of a full raw_request when present.
+function requestBodyText(record: HttpRecord): string {
+  const direct = decodeBase64(record.request_body);
+  if (direct) return direct;
+  const raw = decodeBase64(record.raw_request);
+  if (!raw) return "";
+  const norm = raw.replace(/\r\n/g, "\n");
+  const idx = norm.indexOf("\n\n");
+  return idx >= 0 ? norm.slice(idx + 2) : "";
+}
+
+// POSIX single-quote: wrap in '...' and escape embedded single quotes.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+// Build a copy-paste curl command for the request. Host/Content-Length are
+// dropped since curl derives them; the method is only emitted when not GET.
+function toCurl(record: HttpRecord): string {
+  const parts = ["curl"];
+  if (record.method && record.method.toUpperCase() !== "GET") {
+    parts.push(`-X ${record.method.toUpperCase()}`);
+  }
+  parts.push(shellQuote(record.url));
+  const headers = record.request_headers || {};
+  for (const [k, v] of Object.entries(headers)) {
+    const kl = k.toLowerCase();
+    if (kl === "host" || kl === "content-length") continue;
+    const vals = Array.isArray(v) ? v : [v];
+    for (const val of vals) parts.push(`-H ${shellQuote(`${k}: ${val}`)}`);
+  }
+  const body = requestBodyText(record);
+  if (body) parts.push(`--data-raw ${shellQuote(body)}`);
+  return parts.join(" \\\n  ");
+}
+
+function CopyButton({ text, label = "Copy", icon: Icon = Copy }: { text: string; label?: string; icon?: LucideIcon }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = useCallback(() => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+    }).catch(() => {});
+  }, [text]);
+  return (
+    <button
+      onClick={onCopy}
+      className="flex items-center gap-1 text-[10px] font-sans font-semibold text-text-muted hover:text-terracotta transition-colors px-1.5 py-0.5 border border-warm-border rounded hover:border-terracotta/30"
+      aria-label={`Copy ${label === "Copy" ? "raw message" : label}`}
+    >
+      {copied ? <Check size={11} /> : <Icon size={11} />}
+      {copied ? "Copied" : label}
+    </button>
+  );
+}
+
+// Render a raw HTTP message Burp-style: monospace, with the start line and
+// header names emphasized and the body separated after the blank line. When
+// `grow` is set the message fills the remaining height of a flex column
+// instead of being capped, so the response can use the full panel.
+function BurpMessage({ raw, grow }: { raw: string; grow?: boolean }) {
+  const text = raw.replace(/\r\n/g, "\n");
+  const sepIdx = text.indexOf("\n\n");
+  const headerPart = sepIdx >= 0 ? text.slice(0, sepIdx) : text;
+  const bodyPart = sepIdx >= 0 ? text.slice(sepIdx + 2) : "";
+  const headerLines = headerPart.split("\n");
+  return (
+    <pre className={`text-[11px] leading-relaxed bg-cream border border-warm-border rounded p-3 overflow-x-auto whitespace-pre-wrap break-all text-charcoal-light overflow-y-auto font-mono ${grow ? "flex-1 min-h-0" : "max-h-[40vh]"}`}>
+      {headerLines.map((line, i) => {
+        if (i === 0) {
+          return <div key={i} className="text-terracotta font-semibold">{line}</div>;
+        }
+        const ci = line.indexOf(":");
+        if (ci > 0) {
+          return (
+            <div key={i}>
+              <span className="text-charcoal font-semibold">{line.slice(0, ci)}</span>
+              <span>{line.slice(ci)}</span>
+            </div>
+          );
+        }
+        return <div key={i}>{line}</div>;
+      })}
+      {bodyPart && <div className="mt-2 text-charcoal-light/90 border-t border-warm-border/60 pt-2">{bodyPart}</div>}
+    </pre>
+  );
+}
+
 function RecordDetail({ record }: { record: HttpRecord }) {
-  // Generated reports drop the redundant raw_request/raw_response and carry the
-  // (trimmed) body in request_body/response_body. A manually-dropped full JSONL
-  // export still has the raw fields, so prefer those when present.
-  const reqBody = decodeBase64(record.raw_request) || decodeBase64(record.request_body);
-  const respBody = decodeBase64(record.raw_response) || decodeBase64(record.response_body);
+  const rawRequest = buildRawRequest(record);
+  const rawResponse = buildRawResponse(record);
   const reqTrim = record.request_body_trimmed ? record.request_body_note : null;
   const respTrim = record.response_body_trimmed ? record.response_body_note : null;
 
   return (
-    <div className="p-4 bg-cream-dark/50 border-t border-warm-border space-y-3 text-sm font-sans">
-      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-text-muted">
+    <div className="flex flex-col min-h-0 flex-1 p-4 gap-3 bg-cream-dark/50 border-t border-warm-border text-sm font-sans">
+      <div className="flex flex-wrap gap-x-6 gap-y-1 text-xs text-text-muted shrink-0">
         <span><strong className="text-charcoal">Status:</strong> {record.status_code}{record.status_phrase ? ` ${record.status_phrase}` : ""}</span>
         <span><strong className="text-charcoal">IP:</strong> {record.ip || "N/A"}</span>
         <span><strong className="text-charcoal">Scheme:</strong> {record.scheme}</span>
@@ -85,34 +208,27 @@ function RecordDetail({ record }: { record: HttpRecord }) {
         {record.response_title && <span><strong className="text-charcoal">Title:</strong> {record.response_title}</span>}
       </div>
 
-      <div className="space-y-3">
-        {/* Request */}
-        <div className="space-y-2">
+      {/* Request — natural height, capped */}
+      <div className="space-y-2 shrink-0">
+        <div className="flex items-center justify-between">
           <span className="text-xs text-text-muted uppercase tracking-wider font-semibold">Request</span>
-          {record.request_headers && Object.keys(record.request_headers).length > 0 && (
-            <HeaderChips headers={record.request_headers} />
-          )}
-          <TrimNote note={reqTrim} />
-          {reqBody && (
-            <pre className="text-[11px] bg-cream border border-warm-border rounded p-3 overflow-x-auto whitespace-pre-wrap text-charcoal-light overflow-y-auto">
-              {reqBody}
-            </pre>
-          )}
+          <div className="flex items-center gap-3">
+            <CopyButton text={rawRequest} />
+            <CopyButton text={toCurl(record)} label="cURL" icon={Terminal} />
+          </div>
         </div>
+        <TrimNote note={reqTrim} />
+        <BurpMessage raw={rawRequest} />
+      </div>
 
-        {/* Response */}
-        <div className="space-y-2">
+      {/* Response — fills the remaining panel height */}
+      <div className="flex flex-col min-h-0 flex-1 space-y-2">
+        <div className="flex items-center justify-between shrink-0">
           <span className="text-xs text-text-muted uppercase tracking-wider font-semibold">Response</span>
-          {record.response_headers && Object.keys(record.response_headers).length > 0 && (
-            <HeaderChips headers={record.response_headers} />
-          )}
-          <TrimNote note={respTrim} />
-          {respBody && (
-            <pre className="text-[11px] bg-cream border border-warm-border rounded p-3 overflow-x-auto whitespace-pre-wrap text-charcoal-light overflow-y-auto">
-              {respBody}
-            </pre>
-          )}
+          <CopyButton text={rawResponse} />
         </div>
+        <TrimNote note={respTrim} />
+        <BurpMessage raw={rawResponse} grow />
       </div>
     </div>
   );
@@ -167,22 +283,32 @@ export default function HttpTrafficTable({ data }: Props) {
   const [methodFilter, setMethodFilter] = useState<string>("all");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [contentTypeFilter, setContentTypeFilter] = useState<string>("all");
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [expandedUuid, setExpandedUuid] = useState<string | null>(null);
   const [selectedHosts, setSelectedHosts] = useState<Set<string>>(new Set());
   const [visibleColumns, setVisibleColumns] = useState<Set<string>>(new Set(DEFAULT_COLUMNS));
   const [pageSize, setPageSize] = useState(100);
   const [currentPage, setCurrentPage] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
+  const [copiedCount, setCopiedCount] = useState<number | null>(null);
+  const [displayedCount, setDisplayedCount] = useState(0);
 
   const syncPagination = useCallback((api: GridApi) => {
     setCurrentPage(api.paginationGetCurrentPage());
     setTotalPages(api.paginationGetTotalPages());
   }, []);
 
+  // Rows currently shown after column filters + the search box quick filter
+  // (across all pages) — drives the Copy URLs button's count.
+  const onModelUpdated = useCallback((api: GridApi) => {
+    setDisplayedCount(api.getDisplayedRowCount());
+  }, []);
+
   const onGridReady = useCallback((params: GridReadyEvent) => {
     setGridApi(params.api);
     syncPagination(params.api);
-  }, [syncPagination]);
+    onModelUpdated(params.api);
+  }, [syncPagination, onModelUpdated]);
 
   const hostCounts = useMemo(() => {
     const map = new Map<string, number>();
@@ -209,6 +335,11 @@ export default function HttpTrafficTable({ data }: Props) {
     return Array.from(s).sort();
   }, [data]);
 
+  const sources = useMemo(() => {
+    const s = new Set(data.map((r) => (r.source || "").trim()).filter(Boolean));
+    return Array.from(s).sort();
+  }, [data]);
+
   const filteredData = useMemo(() => {
     let result = data;
     if (selectedHosts.size > 0) {
@@ -226,8 +357,11 @@ export default function HttpTrafficTable({ data }: Props) {
         return ct === contentTypeFilter;
       });
     }
+    if (sourceFilter !== "all") {
+      result = result.filter((r) => (r.source || "").trim() === sourceFilter);
+    }
     return result;
-  }, [data, selectedHosts, methodFilter, statusFilter, contentTypeFilter]);
+  }, [data, selectedHosts, methodFilter, statusFilter, contentTypeFilter, sourceFilter]);
 
   const allColumnDefs = useMemo<ColDef<HttpRecord>[]>(
     () => [
@@ -281,7 +415,20 @@ export default function HttpTrafficTable({ data }: Props) {
       },
       { field: "hostname", headerName: "Host", width: 150 },
       { field: "response_title", headerName: "Title", width: 160 },
-      { field: "source", headerName: "Source", width: 90 },
+      {
+        field: "source",
+        headerName: "Source",
+        width: 110,
+        cellRenderer: ({ value }: { value: string | null }) => {
+          if (!value) return <span className="text-text-muted text-xs">—</span>;
+          const color = getSourceColor(value, theme);
+          return (
+            <span className="inline-block px-2 py-0.5 text-xs font-sans font-semibold rounded" style={{ color, backgroundColor: `${color}1f` }}>
+              {value}
+            </span>
+          );
+        },
+      },
       { field: "uuid", headerName: "UUID", width: 280, cellClass: "text-xs" },
       { field: "scheme", headerName: "Scheme", width: 80 },
       { field: "port", headerName: "Port", width: 70 },
@@ -304,7 +451,7 @@ export default function HttpTrafficTable({ data }: Props) {
       { field: "remarks", headerName: "Remarks", width: 180, valueFormatter: (p) => Array.isArray(p.value) ? p.value.join(", ") : "" },
       { field: "risk_score", headerName: "Risk Score", width: 90 },
     ],
-    [methodColors, statusColors]
+    [methodColors, statusColors, theme]
   );
 
   const columnDefs = useMemo<ColDef<HttpRecord>[]>(
@@ -325,6 +472,39 @@ export default function HttpTrafficTable({ data }: Props) {
     gridApi?.exportDataAsCsv({ fileName: "vigolium-http-traffic.csv" });
   }, [gridApi]);
 
+  // Copy the URLs of every row in the current view (after search + filters +
+  // sort, across all pages) to the clipboard, one per line.
+  const onCopyUrls = useCallback(() => {
+    if (!gridApi) return;
+    const urls: string[] = [];
+    gridApi.forEachNodeAfterFilterAndSort((node) => {
+      const u = node.data?.url;
+      if (u) urls.push(u);
+    });
+    navigator.clipboard?.writeText(urls.join("\n")).then(() => {
+      setCopiedCount(urls.length);
+      setTimeout(() => setCopiedCount(null), 1400);
+    }).catch(() => {});
+  }, [gridApi]);
+
+  // Download the current view (search + filters + sort) as canonical vigolium
+  // JSONL — one {"type":"http_record","data":...} envelope per line, so the
+  // file re-loads into the report and re-ingests into vigolium.
+  const onExportJsonl = useCallback(() => {
+    if (!gridApi) return;
+    const lines: string[] = [];
+    gridApi.forEachNodeAfterFilterAndSort((node) => {
+      if (node.data) lines.push(JSON.stringify({ type: "http_record", data: node.data }));
+    });
+    const blob = new Blob([lines.length ? `${lines.join("\n")}\n` : ""], { type: "application/x-ndjson" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "vigolium-http-traffic.jsonl";
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [gridApi]);
+
   const onToggleHost = useCallback((host: string) => {
     setSelectedHosts((prev) => {
       const next = new Set(prev);
@@ -339,6 +519,16 @@ export default function HttpTrafficTable({ data }: Props) {
   }, []);
 
   const selectedRecord = expandedUuid !== null ? data.find((r) => r.uuid === expandedUuid) : null;
+
+  // Close the Record Detail panel on Escape.
+  useEffect(() => {
+    if (expandedUuid === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setExpandedUuid(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [expandedUuid]);
 
   const pageSizeOptions = [50, 100, 200, 500];
 
@@ -384,21 +574,22 @@ export default function HttpTrafficTable({ data }: Props) {
           onChange={setContentTypeFilter}
           options={[{ value: "all", label: "All Content-Types" }, ...contentTypes.map((ct) => ({ value: ct, label: ct }))]}
         />
+        <FilterDropdown
+          value={sourceFilter}
+          onChange={setSourceFilter}
+          options={[{ value: "all", label: "All Sources" }, ...sources.map((s) => ({ value: s, label: s }))]}
+        />
         <div className="flex-1" />
         <span className="text-xs text-text-muted font-sans">
           {filteredData.length} of {data.length} records
         </span>
         {/* Pagination controls */}
         <div className="flex items-center gap-1.5">
-          <select
-            value={pageSize}
-            onChange={(e) => onPageSizeChange(Number(e.target.value))}
-            className="bg-cream border border-warm-border text-charcoal text-xs font-sans px-2 py-1.5 rounded-md focus:outline-none focus:border-terracotta/50"
-          >
-            {pageSizeOptions.map((s) => (
-              <option key={s} value={s}>{s} / page</option>
-            ))}
-          </select>
+          <FilterDropdown
+            value={String(pageSize)}
+            onChange={(v) => onPageSizeChange(Number(v))}
+            options={pageSizeOptions.map((s) => ({ value: String(s), label: `${s} / page` }))}
+          />
           <button onClick={() => { gridApi?.paginationGoToFirstPage(); if (gridApi) syncPagination(gridApi); }} disabled={currentPage === 0} className="p-1.5 text-text-muted hover:text-charcoal disabled:opacity-30 disabled:cursor-not-allowed transition-colors rounded hover:bg-warm-border/30">
             <ChevronsLeft size={14} />
           </button>
@@ -422,11 +613,27 @@ export default function HttpTrafficTable({ data }: Props) {
           defaults={DEFAULT_COLUMNS}
         />
         <button
+          onClick={onCopyUrls}
+          title="Copy the URLs of every row in the current table view (search + filters), one per line"
+          className="flex items-center gap-1.5 text-xs font-sans font-semibold text-terracotta hover:text-charcoal transition-colors px-2.5 py-1.5 border border-warm-border rounded-md hover:border-terracotta/30"
+        >
+          {copiedCount !== null ? <Check size={13} /> : <Copy size={13} />}
+          {copiedCount !== null ? `Copied ${copiedCount}` : `Copy URLs of current table (${displayedCount})`}
+        </button>
+        <button
           onClick={onExport}
           className="flex items-center gap-1.5 text-xs font-sans font-semibold text-terracotta hover:text-charcoal transition-colors px-2.5 py-1.5 border border-warm-border rounded-md hover:border-terracotta/30"
         >
           <Download size={13} />
           CSV
+        </button>
+        <button
+          onClick={onExportJsonl}
+          title="Download every row in the current table view (search + filters) as vigolium JSONL"
+          className="flex items-center gap-1.5 text-xs font-sans font-semibold text-terracotta hover:text-charcoal transition-colors px-2.5 py-1.5 border border-warm-border rounded-md hover:border-terracotta/30"
+        >
+          <Download size={13} />
+          JSONL
         </button>
       </div>
       <div className="flex flex-row gap-1 flex-1 min-h-0">
@@ -439,6 +646,7 @@ export default function HttpTrafficTable({ data }: Props) {
             paginationPageSize={pageSize}
             suppressPaginationPanel={true}
             onPaginationChanged={() => { if (gridApi) syncPagination(gridApi); }}
+            onModelUpdated={(e) => onModelUpdated(e.api)}
             animateRows={true}
             domLayout="normal"
             suppressCellFocus={true}
@@ -450,8 +658,8 @@ export default function HttpTrafficTable({ data }: Props) {
           />
         </div>
         {selectedRecord && (
-          <div className="w-1/2 overflow-y-auto border border-warm-border rounded-md">
-            <div className="flex items-center justify-between px-4 pt-3 pb-1 sticky top-0 bg-cream-dark/90 backdrop-blur-sm z-10">
+          <div className="w-1/2 flex flex-col min-h-0 border border-warm-border rounded-md">
+            <div className="flex items-center justify-between px-4 pt-3 pb-1 shrink-0 bg-cream-dark/90 backdrop-blur-sm">
               <span className="text-xs text-text-muted font-sans font-semibold uppercase tracking-wider">Record Detail</span>
               <button
                 onClick={() => setExpandedUuid(null)}

@@ -315,7 +315,9 @@ func (r *Runner) printScanConfig() {
 	settings := r.settings
 
 	fmt.Fprintf(os.Stderr, "\n%s %s\n", terminal.Green(terminal.SymbolStart), terminal.BoldHiBlue("Scan Configuration"))
-	if opts.ScanUUID != "" {
+	// In stateless mode the scan lives in a throwaway database, so the UUID
+	// can't be used to query results later — printing it is just noise.
+	if opts.ScanUUID != "" && !opts.Stateless {
 		fmt.Fprintf(os.Stderr, "  %s Scan ID: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ScanUUID))
 	}
 	if opts.Stateless {
@@ -328,8 +330,9 @@ func (r *Runner) printScanConfig() {
 
 	// Only surface the project when it's a real, operator-chosen one. The
 	// auto-created default project is implementation noise — printing its UUID
-	// just clutters the header for the common single-project case.
-	if opts.ProjectUUID != "" && opts.ProjectUUID != database.DefaultProjectUUID {
+	// just clutters the header for the common single-project case — and in
+	// stateless mode the project lives in a throwaway database anyway.
+	if opts.ProjectUUID != "" && opts.ProjectUUID != database.DefaultProjectUUID && !opts.Stateless {
 		fmt.Fprintf(os.Stderr, "  %s Project: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ProjectUUID))
 	}
 

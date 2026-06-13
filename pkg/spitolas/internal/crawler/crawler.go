@@ -397,6 +397,12 @@ func (c *Crawler) initializeIndexState(ctx context.Context) error {
 		}
 	}
 
+	// Prime service-worker assets: fetch the files a PWA service worker would
+	// pre-cache (e.g. Angular's lazy webpack chunks listed in ngsw.json) so the
+	// network capture records them. A short headless visit never runs the
+	// worker's precache, so these are otherwise missed.
+	c.primeServiceWorkerAssets(ctx, page)
+
 	// Fill forms if present
 	if c.config.FormFillEnabled {
 		zap.L().Debug("Form filling enabled, detecting forms")

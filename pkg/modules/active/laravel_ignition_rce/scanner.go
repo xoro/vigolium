@@ -33,7 +33,7 @@ var probes = []probe{
 		path:    "/_ignition/health-check",
 		method:  "GET",
 		name:    "Ignition Health Check",
-		markers: []string{"can_execute_commands", "true", "ignition"},
+		markers: []string{"can_execute_commands"},
 		sev:     severity.High,
 		desc:    "Laravel Ignition health-check endpoint is publicly accessible, indicating debug tooling is exposed",
 		refs:    []string{"https://flareapp.io/docs/ignition-for-laravel/introduction"},
@@ -44,7 +44,7 @@ var probes = []probe{
 		body:        "{}",
 		contentType: "application/json",
 		name:        "Ignition Execute Solution",
-		markers:     []string{"execute-solution", "solution", "spatie", "ignition", "class"},
+		markers:     []string{"execute-solution", "spatie/laravel-ignition", "facade/ignition", "ignitionSolution"},
 		sev:         severity.Critical,
 		desc:        "Laravel Ignition execute-solution endpoint is reachable. This is a CVE-2021-3129 RCE candidate if facade/ignition < 2.5.2",
 		refs:        []string{"https://nvd.nist.gov/vuln/detail/CVE-2021-3129", "https://www.ambionics.io/blog/laravel-debug-rce"},
@@ -53,7 +53,7 @@ var probes = []probe{
 		path:        "/_ignition/scripts/0",
 		method:      "GET",
 		name:        "Ignition Scripts",
-		markers:     []string{"ignition", "Spatie", "script", "function"},
+		markers:     []string{"ignition", "Spatie\\", "flareapp.io"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.Medium,
 		desc:        "Laravel Ignition script assets are publicly accessible, confirming debug tooling is enabled in production",
@@ -258,6 +258,12 @@ func (m *Module) probeEndpoint(
 				return nil
 			}
 		}
+	}
+
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
 	}
 
 	for _, anti := range p.antiMarkers {

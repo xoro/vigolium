@@ -15,7 +15,7 @@ var (
 
 **Fix:** Configure the proxy to route strictly on the validated Host header and reject request lines that name an arbitrary external or absolute target.`
 
-	ModuleConfirmation = "OAST oracle: confirmed by an out-of-band callback from the proxy. In-band oracle: confirmed when an internal/metadata marker appears, reproduces, is absent from the original-request baseline, and absent for a decoy target."
+	ModuleConfirmation = "OAST oracle: confirmed by an out-of-band callback from the proxy (Certain). In-band oracle (Tentative): reported only when a plain (non-HTML) metadata body carries several distinct self-evidencing tokens together, the cluster reproduces, is absent from the original-request baseline, and is absent for a benign decoy target."
 	ModuleSeverity     = severity.High
 	ModuleConfidence   = severity.Firm
 	ModuleTags         = []string{"ssrf", "proxy", "routing", "request-line", "oast", "heavy"}

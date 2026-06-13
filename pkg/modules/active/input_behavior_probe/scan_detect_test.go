@@ -12,6 +12,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/output"
 )
 
 func TestTagDistance(t *testing.T) {
@@ -66,6 +67,49 @@ func TestDetectChange_StatusTransitionStandsAlone(t *testing.T) {
 	assert.True(t, ch.statusInteresting, "200→500 is an independent status signal")
 }
 
+// TestDetectChange_RedirectEmptyBodyNotInteresting reproduces reported finding #26:
+// a path probe that 302-redirects with an empty body. The empty body's zero tags
+// produce a maximal distance against the HTML baseline, but that is the page
+// vanishing, not input-driven structure — and a 3xx is a different resource.
+func TestDetectChange_RedirectEmptyBodyNotInteresting(t *testing.T) {
+	base := &detectionBaseline{
+		tagCounts:  extractTagCounts("<html><body>" + strings.Repeat("<div></div>", 20) + "</body></html>"),
+		statusCode: 200,
+		tagJitter:  0,
+	}
+	ch := detectChange(base, "", 302)
+	assert.False(t, ch.TagsChanged, "an empty redirect body is not a structural change")
+	assert.False(t, ch.IsInteresting, "200→302 with an empty body must not be reported")
+}
+
+// TestDetectChange_NotFoundEmptyBodyNotInteresting reproduces reported finding #25:
+// a path probe that 404s with an empty body (CloudFront XML-error stub).
+func TestDetectChange_NotFoundEmptyBodyNotInteresting(t *testing.T) {
+	base := &detectionBaseline{
+		tagCounts:  extractTagCounts("<html><body>" + strings.Repeat("<div></div>", 20) + "</body></html>"),
+		statusCode: 200,
+		tagJitter:  0,
+	}
+	ch := detectChange(base, "", 404)
+	assert.False(t, ch.IsInteresting, "200→404 with an empty body must not be reported")
+}
+
+// TestDetectChange_ErrorPageWithHTMLNotInteresting covers the harder case: a 4xx
+// that returns its OWN substantial HTML error page. It is still a different
+// resource, not a structural change within the baseline page, so the status-class
+// gate must suppress it even though the body has plenty of tags.
+func TestDetectChange_ErrorPageWithHTMLNotInteresting(t *testing.T) {
+	base := &detectionBaseline{
+		tagCounts:  extractTagCounts("<html><body><div>app</div></body></html>"),
+		statusCode: 200,
+		tagJitter:  0,
+	}
+	fuzz := "<html><body>" + strings.Repeat("<section><h1>Not Found</h1></section>", 5) + "</body></html>"
+	ch := detectChange(base, fuzz, 404)
+	assert.False(t, ch.TagsChanged, "a 4xx error page is a different resource, not a tag-structure change")
+	assert.False(t, ch.IsInteresting)
+}
+
 func TestDetectChange_ProbeBlockedSuppressed(t *testing.T) {
 	base := &detectionBaseline{
 		tagCounts:  extractTagCounts("<html></html>"),
@@ -109,6 +153,116 @@ func TestScanPerRequest_DynamicBodyNoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a page whose body naturally jitters must not be reported as a behavior change")
 }
 
+// probeResult is a tiny helper to build a ResultEvent shaped like one
+// buildProbeResult emits, for the collapse unit tests.
+func probeResult(probeType string, base, fuzz int, payload string) *output.ResultEvent {
+	return &output.ResultEvent{
+		Request:          "GET /" + payload + " HTTP/1.1\r\nHost: h\r\n\r\n",
+		Response:         "HTTP/1.1 200 OK\r\n\r\n",
+		ExtractedResults: []string{payload},
+		Metadata: map[string]any{
+			"probe_type":  probeType,
+			"base_status": base,
+			"fuzz_status": fuzz,
+		},
+	}
+}
+
+// TestCollapseProbeFindings_FoldsToSingleRecord verifies that many diverging probes
+// collapse into ONE finding (one http_record) with the rest carried as inline
+// AdditionalEvidence — the table-flooding guard.
+func TestCollapseProbeFindings_FoldsToSingleRecord(t *testing.T) {
+	in := []*output.ResultEvent{
+		probeResult("path_prefix", 200, 200, "../"),       // tag-only, rank 0
+		probeResult("debug_param", 200, 500, "debug=true"), // →5xx, rank 2
+		probeResult("header", 200, 200, "localhost"),       // tag-only, rank 0
+	}
+	out := collapseProbeFindings(in)
+	require.Len(t, out, 1, "all probes must collapse into exactly one finding/record")
+	primary := out[0]
+	assert.Equal(t, 500, primary.Metadata["fuzz_status"], "the →5xx probe must win as primary")
+	assert.Len(t, primary.AdditionalEvidence, 2, "the other two probes ride along as inline evidence")
+	assert.Equal(t, 3, primary.Metadata["collapsed_probe_count"])
+}
+
+// TestCollapseProbeFindings_PrefersAccessBypass verifies a 403→200 access-control
+// flip outranks a server error and a tag change when choosing the primary.
+func TestCollapseProbeFindings_PrefersAccessBypass(t *testing.T) {
+	in := []*output.ResultEvent{
+		probeResult("debug_param", 200, 500, "debug=1"),
+		probeResult("path_prefix", 403, 200, "..;/"), // bypass, rank 3
+		probeResult("header", 200, 200, "null"),
+	}
+	out := collapseProbeFindings(in)
+	require.Len(t, out, 1)
+	assert.Equal(t, 403, out[0].Metadata["base_status"])
+	assert.Equal(t, 200, out[0].Metadata["fuzz_status"], "403→200 bypass must be the primary")
+}
+
+// TestCollapseProbeFindings_EvidenceCapped verifies AdditionalEvidence stays bounded
+// by modkit.MaxEvidencePairs even when far more probes diverge.
+func TestCollapseProbeFindings_EvidenceCapped(t *testing.T) {
+	in := make([]*output.ResultEvent, 0, 30)
+	for i := range 30 {
+		in = append(in, probeResult("header", 200, 200, "v"+string(rune('a'+i%26))))
+	}
+	out := collapseProbeFindings(in)
+	require.Len(t, out, 1)
+	assert.LessOrEqual(t, len(out[0].AdditionalEvidence), modkit.MaxEvidencePairs,
+		"inline evidence must be capped so a collapsed finding can't grow unbounded")
+	assert.Equal(t, 30, out[0].Metadata["collapsed_probe_count"],
+		"the full diverged-probe count is still reported even though evidence is sampled")
+}
+
+func TestCollapseProbeFindings_EmptyIsNil(t *testing.T) {
+	assert.Nil(t, collapseProbeFindings(nil))
+	assert.Nil(t, collapseProbeFindings([]*output.ResultEvent{}))
+}
+
+// TestScanPerRequest_PathProbe404EmptyBodyNoFalsePositive is the end-to-end
+// reproduction of reported finding #25: the real page lives only at the exact
+// baseline path, and every path-manipulation probe lands on a 404 with an EMPTY
+// body. The empty body must not be reported as a structural behavior change.
+func TestScanPerRequest_PathProbe404EmptyBodyNoFalsePositive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app" {
+			_, _ = w.Write([]byte("<html><body>" + strings.Repeat("<div>x</div>", 30) + "</body></html>"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound) // empty body
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/app")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "path probes that 404 with an empty body must not be reported as behavior changes")
+}
+
+// TestScanPerRequest_PathProbe302RedirectNoFalsePositive is the end-to-end
+// reproduction of reported finding #26: path-manipulation probes 302-redirect away
+// instead of serving the baseline page.
+func TestScanPerRequest_PathProbe302RedirectNoFalsePositive(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app" {
+			_, _ = w.Write([]byte("<html><body>" + strings.Repeat("<div>x</div>", 30) + "</body></html>"))
+			return
+		}
+		w.Header().Set("Location", "https://example.org/")
+		w.WriteHeader(http.StatusFound) // empty body
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/app")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "path probes that 302-redirect must not be reported as behavior changes")
+}
+
 // TestScanPerRequest_ServerErrorIsReported is the status-signal positive: a probe
 // (any appended query param) drives the server to a 500, an independent signal
 // that stands on its own without tag reproduction.
@@ -127,7 +281,12 @@ func TestScanPerRequest_ServerErrorIsReported(t *testing.T) {
 
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
-	assert.NotEmpty(t, res, "a probe that drives the server to a 500 must be reported")
+	// Many debug-param probes drive a 500, but they must collapse into a SINGLE
+	// finding (one http_record) so the run can't flood the table; the surviving
+	// primary is the 500 signal and the rest are inline AdditionalEvidence.
+	require.Len(t, res, 1, "diverging probes must collapse into a single finding/record")
+	assert.Equal(t, 500, res[0].Metadata["fuzz_status"], "the 500 status signal must be the primary")
+	assert.NotEmpty(t, res[0].AdditionalEvidence, "other diverging probes must be retained as inline evidence")
 }
 
 // TestScanPerInsertionPoint_ReflectedStructureIsReported is the tag-signal

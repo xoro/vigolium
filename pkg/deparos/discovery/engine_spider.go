@@ -54,6 +54,14 @@ func (e *Engine) extractLinks(baseURL *url.URL, rc *responsechain.ResponseChain,
 	// not linked anywhere in the HTML.
 	e.queueNextJSManifests(baseURL, rc, parentDepth)
 
+	// Harvest SPA/PWA asset manifests + service workers (Angular ngsw.json, CRA
+	// asset-manifest.json, Nuxt builds, generic service workers + Workbox
+	// precache). These enumerate the lazy-loaded chunks that are built from a
+	// runtime chunk map and so are invisible to static link extraction — only the
+	// framework runtime or a service worker (neither of which discovery runs)
+	// would otherwise fetch them.
+	e.queueSPAAssetManifests(baseURL, rc, parentDepth)
+
 	result, err := e.spiderCoordinator.Extract(e.ctx, baseURL, rc)
 	if err != nil {
 		logger.Debug("Link extraction failed",
@@ -78,17 +86,18 @@ func (e *Engine) extractLinks(baseURL *url.URL, rc *responsechain.ResponseChain,
 		e.queueFormSubmission(result.FormRequests, baseURL, parentDepth)
 	}
 
-	if len(result.Links) == 0 {
+	if len(result.DiscoveredLinks) == 0 {
 		return
 	}
 
 	logger.Debug("Links extracted from response",
 		zap.String("url", baseURL.String()),
-		zap.Int("count", len(result.Links)),
+		zap.Int("count", len(result.DiscoveredLinks)),
 		zap.Uint16("parent_depth", parentDepth))
 
-	// Collect and validate all links
-	batch := e.collectValidatedLinks(result.Links, parentDepth)
+	// Collect and validate all links (DiscoveredLinks carry the source type used
+	// to gate server-side extension confirmation).
+	batch := e.collectValidatedLinks(result.DiscoveredLinks, parentDepth)
 	if batch == nil {
 		return
 	}
@@ -97,24 +106,56 @@ func (e *Engine) extractLinks(baseURL *url.URL, rc *responsechain.ResponseChain,
 	e.createSpiderBatchTask(batch)
 }
 
+// extensionConfirmAllowed reports whether a spider link from the given source
+// may *eagerly* confirm a server-side extension for wordlist fuzzing.
+//
+// This gate only applies in legacy (non-ConfirmRequired) mode. Under
+// ConfirmRequired — the default — link-time confirmation is disabled entirely
+// and the decision is made on the served response (see collectValidatedLinks /
+// OnFileDiscovered), so a genuine reference is no longer treated as proof.
+//
+// Two guards keep this from firing on noise:
+//
+//   - SPA gate: on a JS-shell SPA (Next.js/React/Angular/Vue/Svelte) the server
+//     returns the same index shell for every path, so a path bearing .php/.aspx/
+//     .do/… is almost never a real route. Every confirmation candidate is a
+//     server-side extension, so on a SPA we never confirm one from a link.
+//   - Source gate: only links the application genuinely references count (see
+//     LinkSourceType.IsGenuineReference); URL-like strings scavenged from JS/HTML
+//     body text are not proof the server serves that extension.
+func (e *Engine) extensionConfirmAllowed(src spider.LinkSourceType) bool {
+	return !e.startURLIsModernApp && src.IsGenuineReference()
+}
+
 // collectValidatedLinks validates all extracted links and returns a batch.
 // Handles observed name/extension extraction and breadcrumb processing.
 // NOTE: Spider tasks do NOT increment depth and have no maxDepth limit.
-func (e *Engine) collectValidatedLinks(links []*url.URL, parentDepth uint16) *SpiderLinkBatch {
+func (e *Engine) collectValidatedLinks(links []*spider.DiscoveredLink, parentDepth uint16) *SpiderLinkBatch {
 	var files, dirs [][]byte
 	var baseURL []byte
 
-	for _, link := range links {
-		// Extract and track observed names/extensions using unified metadata extractor.
-		// Spider links are trusted sources - they come from actual URLs in the response.
-		// Pass depth=0 here; extension task generation is handled separately below.
-		meta := e.applyFileMetadata(link.Path, 0)
+	for _, dl := range links {
+		if dl == nil || dl.URL == nil {
+			continue
+		}
+		link := dl.URL
 
-		// Generate dynamic extension tasks for newly discovered extensions during
-		// spidering. Under ConfirmRequired this is already handled by
-		// applyFileMetadata above (the "observed" confirmation source), so skip
-		// the legacy depth-gated path to avoid double task generation.
-		if meta.Extension != "" && !e.config.Extensions.ConfirmRequired {
+		// Under ConfirmRequired (the default) a spider link never confirms a
+		// server-side extension: a path like /citation.cfm or /sharer.php in an
+		// <a href> — even a genuine same-host one — is no proof the server serves
+		// it. Confirmation is deferred to the served path (OnFileDiscovered, gated
+		// on scope + the analyzer's non-soft-404 verdict). Names/paths are still
+		// harvested. Legacy mode keeps the old source-type-gated eager behaviour.
+		eagerConfirm := !e.config.Extensions.ConfirmRequired && e.extensionConfirmAllowed(dl.SourceType)
+
+		// Extract and track observed names/extensions using unified metadata extractor.
+		// Pass depth=0 here; extension task generation is handled separately below.
+		meta := e.applyFileMetadata(link.Path, 0, eagerConfirm)
+
+		// Legacy-mode only: generate dynamic extension tasks for newly discovered
+		// extensions during spidering. Under ConfirmRequired this whole branch is
+		// off (eagerConfirm is false) — the served path drives confirmation + fuzz.
+		if eagerConfirm && meta.Extension != "" {
 			wasNew := e.addObservedExtensionIfNew(meta.Extension)
 			linkDepth := pathDepth(link.Path)
 			if wasNew && e.config.Extensions.TestObserved && linkDepth > 0 {
@@ -226,6 +267,10 @@ func (e *Engine) queueJSFetch(jsURLs []*url.URL, _ uint16) {
 		if spider.ShouldSkipJSPathExtraction(jsURL) {
 			continue
 		}
+
+		// Remember the app's real JS mount directory for the JS-bundle sweep
+		// (e.g. /js/, /assets/js/) so it probes there too, not just root.
+		e.recordObservedJSDir(jsURL)
 
 		// Normalize URL for dedup: scheme://host/path (strip query params)
 		normalizedURL := strings.ToLower(jsURL.Scheme) + "://" +

@@ -45,6 +45,14 @@ type FindingGroupingConfig struct {
 	// identical extracted value — the value-identity (plus module + severity) is
 	// itself the guardrail against merging unrelated findings.
 	Tags []string `yaml:"tags"`
+	// ByModule lists module IDs whose findings collapse to a single finding per
+	// (module, severity[, host]) regardless of the per-URL extracted value. Use
+	// it for modules that fire once per asset where the differing value is noise,
+	// not signal — e.g. sourcemap-detect, which reports a distinct .map filename
+	// for every JS/CSS bundle on a site. Module identity (plus severity, so a Low
+	// "sourcemap advertised" never merges with a High "full source exposed") is
+	// the guardrail; the Tags gate does not apply to these modules.
+	ByModule []string `yaml:"by_module"`
 	// MaxURLs caps how many distinct matched URLs are retained on the survivor
 	// finding (0 = unlimited), bounding MatchedAt on very noisy sites.
 	MaxURLs int `yaml:"max_urls"`
@@ -57,7 +65,10 @@ func defaultFindingGrouping() FindingGroupingConfig {
 	return FindingGroupingConfig{
 		Enabled: true,
 		PerHost: true,
-		MaxURLs: 50,
+		// sourcemap-detect emits a distinct .map filename per JS/CSS bundle, so a
+		// single site collapses to one finding per host instead of one per asset.
+		ByModule: []string{"sourcemap-detect"},
+		MaxURLs:  50,
 	}
 }
 

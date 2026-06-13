@@ -22,7 +22,11 @@ func TestScanPerRequest_DetectsMailboxIngress(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/rails/action_mailbox/relay/inbound_emails" {
+			// A genuine Rails route leaks a Ruby app-server fingerprint, which the
+			// host-Rails gate requires before trusting the OPTIONS Allow header.
 			w.Header().Set("Allow", "POST, OPTIONS")
+			w.Header().Set("X-Runtime", "0.018744")
+			w.Header().Set("Server", "Puma")
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("action_mailbox ingress endpoint present and accepting submissions"))
 			return
@@ -38,6 +42,105 @@ func TestScanPerRequest_DetectsMailboxIngress(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected a finding when an Action Mailbox ingress advertises POST")
+	assert.Equal(t, severity.Tentative, res[0].Info.Confidence,
+		"a header-only OPTIONS ingress confirmation is heuristic and must be reported Tentative")
+}
+
+// TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive reproduces the
+// vn.einvoice.grab.com production false positive: a front-controller answers
+// OPTIONS on every /rails path with a blank body and an over-broad
+// "OPTIONS, TRACE, GET, HEAD, POST" Allow header (plus CORS headers). A real
+// POST-only ingress route never advertises GET/HEAD/TRACE, so the broad Allow
+// set must be rejected. The root blanket-probe path 404s so the host-level guard
+// cannot short-circuit first, isolating the POST-only Allow-set gate.
+func TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			if !strings.HasPrefix(r.URL.Path, "/rails/") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Allow", "OPTIONS, TRACE, GET, HEAD, POST")
+			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.grab.com")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.WriteHeader(http.StatusOK) // blank body
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an over-broad GET/HEAD/TRACE Allow header on a blank-body OPTIONS must not be reported")
+}
+
+// TestScanPerRequest_NonRailsHostNoFalsePositive is the core production-FP
+// guard: a host answers OPTIONS on the exact relay ingress path with a clean,
+// POST-only "POST, OPTIONS" Allow and a blank body — passing the Allow-set gate
+// — while random siblings 404 (passing the sibling baseline). But the host shows
+// no Ruby/Rails fingerprint anywhere (no X-Runtime, no Ruby Server header, no
+// Rails session cookie, no framework markers), so the OPTIONS Allow header is a
+// generic proxy/middleware reply, not a mounted Rails route. The host-Rails gate
+// drops it.
+func TestScanPerRequest_NonRailsHostNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions && r.URL.Path == "/rails/action_mailbox/relay/inbound_emails" {
+			w.Header().Set("Allow", "POST, OPTIONS") // clean, POST-only — but no Rails fingerprint
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an OPTIONS Allow header on a host with no Rails fingerprint must not be reported")
+}
+
+// TestScanPerRequest_SiblingCatchAllNoFalsePositive covers a catch-all OPTIONS
+// handler mounted on the /rails prefix that answers a clean, POST-only
+// "POST, OPTIONS" Allow on every path under it — including random siblings of
+// the real route. The Allow set alone is legitimate (no GET), so neither the
+// Allow-set gate nor the host-level blanket detector (the root path 404s) drops
+// it; only the per-probe sibling baseline (the same response with or without the
+// real path) prevents the finding.
+func TestScanPerRequest_SiblingCatchAllNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			if !strings.HasPrefix(r.URL.Path, "/rails/") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			// Clean POST-only Allow on every /rails/* path, real or random.
+			w.Header().Set("Allow", "POST, OPTIONS")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a prefix-wide catch-all OPTIONS handler must not yield a Rails ingress finding")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures a host that 404s every probe path
@@ -241,6 +344,8 @@ func TestScanPerRequest_DetectsConductorUIByBody(t *testing.T) {
 	}
 	require.NotNil(t, conductor, "expected the Conductor UI finding")
 	assert.Equal(t, severity.High, conductor.Info.Severity)
+	assert.Equal(t, severity.Firm, conductor.Info.Confidence,
+		"the conductor UI finding is confirmed by rendered body content and stays Firm")
 	require.NotEmpty(t, conductor.ExtractedResults)
 	joined := strings.Join(conductor.ExtractedResults, " ")
 	assert.Contains(t, joined, "Body:", "evidence must cite the rendered body content, not just a status code")

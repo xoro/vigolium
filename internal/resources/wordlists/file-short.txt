@@ -43,6 +43,7 @@ chpasswd
 chpassword
 chpwd
 clients
+config
 comments
 common
 community
@@ -86,6 +87,8 @@ games
 go
 graphics
 head
+health
+healthz
 header
 help
 history
@@ -119,6 +122,8 @@ main
 mainframe
 media
 menu
+metrics
+metric
 menuitem
 misc
 modules
@@ -143,6 +148,7 @@ password
 passwords
 pdf
 people
+ping
 photos
 press
 print

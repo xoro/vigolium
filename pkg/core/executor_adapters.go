@@ -6,6 +6,7 @@ import (
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/work"
@@ -50,6 +51,19 @@ func (f *executorFeeder) Feed(rr *httpmsg.HttpRequestResponse) bool {
 // Dropped returns the total number of feedback items dropped due to channel capacity.
 func (f *executorFeeder) Dropped() int64 {
 	return f.dropped.Load()
+}
+
+// executorScopeExpander adapts *config.ScopeMatcher to modkit.ScopeExpander so
+// modules (subdomain_harvest under --follow-subdomains) can add an exact
+// discovered host to the scan's runtime scope allow-set.
+type executorScopeExpander struct {
+	matcher *config.ScopeMatcher
+}
+
+func (s *executorScopeExpander) AllowHost(host string) {
+	if s.matcher != nil {
+		s.matcher.AllowHost(host)
+	}
 }
 
 // nopFeeder is the RequestFeeder used when ExecutorConfig.DisableFeedback is

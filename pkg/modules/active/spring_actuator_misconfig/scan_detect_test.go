@@ -40,6 +40,39 @@ func TestScanPerRequest_DetectsActuatorEnv(t *testing.T) {
 	require.NotEmpty(t, res, "expected an actuator finding when /env returns server.port JSON")
 }
 
+// TestScanPerRequest_DetectsActuatorEnvViaPathBypass models a Spring Boot app
+// behind a reverse proxy that blocks /actuator/* directly (403), while the
+// Servlet stack still serves it once the `..;` path-parameter is normalized. The
+// module must fall back to the path-normalization bypass and flag the finding.
+func TestScanPerRequest_DetectsActuatorEnvViaPathBypass(t *testing.T) {
+	t.Parallel()
+	const envJSON = `{"activeProfiles":[],"propertySources":[{"name":"systemProperties","properties":{"server.port":{"value":"8080"},"local.server.port":{"value":"8080"}}}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.RequestURI == "/actuator/env" || r.RequestURI == "/env":
+			w.WriteHeader(http.StatusForbidden) // proxy blocks the direct path
+		case strings.Contains(r.RequestURI, "..") && strings.HasSuffix(r.RequestURI, "/actuator/env"):
+			w.Header().Set("Content-Type", "application/vnd.spring-boot.actuator.v3+json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(envJSON))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected an actuator finding via the /..;/ path-normalization bypass")
+	assert.Contains(t, res[0].Info.Name, "path-normalization bypass")
+	assert.Contains(t, res[0].Info.Tags, "acl-bypass")
+	assert.Contains(t, strings.Join(res[0].ExtractedResults, ","), "/actuator/env",
+		"the finding must record the bypass path used")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a host that 404s every actuator
 // probe yields no finding.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

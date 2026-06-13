@@ -54,6 +54,22 @@ var (
 		"action": {}, "do": {}, "jspx": {}, "ashx": {}, "asmx": {}, "cgi": {},
 	}
 
+	// DefaultJSBundleNames is the curated list of common base names (no
+	// extension) the SPA-gated JS-bundle sweep probes on monolith /
+	// server-rendered apps (see ExtensionConfig.JSBundleSweep). Each name is
+	// tried as both .js (bundles) and .json (sibling config/data). These are
+	// hand-written, never-content-hashed names that are frequently NOT linked
+	// from the HTML — confirmed hits are fed to the JS-fetch pipeline for
+	// endpoint/secret extraction. Biased toward names that, when present, expose
+	// interesting routes/config (admin, config, api, auth, settings, …).
+	DefaultJSBundleNames = []string{
+		"main", "app", "index", "script", "scripts", "bundle", "common",
+		"core", "site", "global", "vendor", "base", "default", "custom",
+		"config", "settings", "api", "auth", "login", "user", "users",
+		"admin", "dashboard", "upload", "internal", "debug", "dev",
+		"functions", "utils", "helpers",
+	}
+
 	// DefaultBackupExtensions lists backup/temp file extensions tested when a file is discovered
 	// (e.g., admin.php -> admin.bak).
 	DefaultBackupExtensions = []string{
@@ -106,6 +122,9 @@ func NewDefaultConfig() *Config {
 			ConfirmViaFingerprint: true,
 			ConfirmViaProbe:       true,
 			Candidates:            DefaultCandidateExtensions,
+			// SPA-gated JS-bundle name sweep (default on): probe common bundle
+			// names on monolith apps and feed hits to jsscan. No-op on SPAs.
+			JSBundleSweep: true,
 		},
 		Engine: EngineConfig{
 			CaseSensitivity:  CaseAutoDetect,

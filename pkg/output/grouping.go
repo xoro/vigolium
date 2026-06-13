@@ -12,6 +12,24 @@ import (
 // It must not appear inside an individual value (record separator, 0x1e).
 const valueKeySeparator = "\x1e"
 
+// groupKeySeparator joins the (module, severity, value[, host]) components of a
+// finding grouping key. A different control char (unit separator, 0x1f) than
+// valueKeySeparator so the two layers never collide.
+const groupKeySeparator = "\x1f"
+
+// GroupingKey assembles the finding grouping key from its components, prefixing
+// the host when perHost is set. The single source of truth for the key layout
+// (and its separator) shared by the live console grouper and the DB grouping
+// pass — callers compute value via NormalizedValueKey (or "" to collapse a whole
+// module) and pass it in.
+func GroupingKey(moduleID, severity, value, host string, perHost bool) string {
+	key := moduleID + groupKeySeparator + severity + groupKeySeparator + value
+	if perHost {
+		key = host + groupKeySeparator + key
+	}
+	return key
+}
+
 // NormalizedValueKey builds a stable grouping key from a finding's extracted
 // results: each entry trimmed, empties dropped, the remainder sorted (so order
 // doesn't matter), joined with a separator that can't appear inside a single
@@ -36,16 +54,38 @@ func NormalizedValueKey(values []string) string {
 }
 
 // NormalizeTagSet lowercases and trims a tag filter into a set, returning nil when
-// the filter is empty (meaning "match regardless of tags").
+// nothing usable remains (meaning "match regardless of tags").
 func NormalizeTagSet(tags []string) map[string]struct{} {
-	if len(tags) == 0 {
+	return normalizeToSet(tags, true)
+}
+
+// NormalizeStringSet trims each entry and drops empties and duplicates, returning
+// a lookup set (nil when nothing usable remains). Unlike NormalizeTagSet it does
+// NOT lowercase — it is for exact-match identifiers such as module IDs, which are
+// matched case-sensitively against module_id in the DB.
+func NormalizeStringSet(items []string) map[string]struct{} {
+	return normalizeToSet(items, false)
+}
+
+// normalizeToSet trims each entry, drops empties and duplicates (lowercasing when
+// lower is set), and returns nil when nothing usable remains.
+func normalizeToSet(items []string, lower bool) map[string]struct{} {
+	if len(items) == 0 {
 		return nil
 	}
-	set := make(map[string]struct{}, len(tags))
-	for _, t := range tags {
-		if t = strings.ToLower(strings.TrimSpace(t)); t != "" {
-			set[t] = struct{}{}
+	set := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		it = strings.TrimSpace(it)
+		if it == "" {
+			continue
 		}
+		if lower {
+			it = strings.ToLower(it)
+		}
+		set[it] = struct{}{}
+	}
+	if len(set) == 0 {
+		return nil
 	}
 	return set
 }

@@ -17,11 +17,11 @@ func Notice(prefix, message string) {
 }
 
 // AgentNotice prints a prefixed console line to stderr like Notice but with the
-// agent / automated-process glyph (⬢). Used for autonomous engine decisions
+// join / relation glyph (⋈). Used for autonomous engine decisions
 // (e.g. discovery confirming an extension and queuing it for fuzzing).
 func AgentNotice(prefix, message string) {
 	fmt.Fprintf(os.Stderr, "  %s %s %s\n",
-		Purple(SymbolAgent), BoldCyan("["+prefix+"]"), message)
+		Purple(SymbolBowtie), BoldCyan("["+prefix+"]"), message)
 }
 
 // Global state for terminal capabilities

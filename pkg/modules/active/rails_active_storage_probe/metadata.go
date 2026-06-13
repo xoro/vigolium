@@ -15,8 +15,8 @@ var (
 
 **Fix:** Require authentication on Active Storage and Action Mailbox routes (configure ingress credentials and restrict access), and do not expose these internal routes to untrusted networks.`
 
-	ModuleConfirmation = "Confirmed when an Active Storage / Action Mailbox OPTIONS probe returns a 2xx Allow header advertising POST, or a blob route redirects to a stored object"
+	ModuleConfirmation = "Tentatively flagged when an Active Storage / Action Mailbox OPTIONS probe returns a 2xx POST-only Allow header (subset of POST/OPTIONS) that a random sibling path does not reproduce, or a blob route redirects to a stored object"
 	ModuleSeverity     = severity.Medium
-	ModuleConfidence   = severity.Firm
+	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"rails", "ruby", "misconfiguration", "file-exposure", "light"}
 )

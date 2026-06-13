@@ -39,6 +39,34 @@ func TestScanPerRequest_DetectsH2Console(t *testing.T) {
 	require.NotEmpty(t, res, "expected an H2 console finding when /h2-console serves the console page")
 }
 
+// TestScanPerRequest_DetectsContextPathConsole verifies the context-path walk:
+// the H2 console is mounted under server.servlet.context-path at /api/h2-console
+// (NOT at the web root), and the observed request is to /api/users. The module
+// must derive the /api base from the observed path and find the console there.
+func TestScanPerRequest_DetectsContextPathConsole(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/h2-console" {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`<html><head><title>H2 Console</title></head><body>JDBC URL: jdbc:h2:mem:test Driver Class: org.h2.Driver</body></html>`))
+			return
+		}
+		// Root /h2-console and every sibling 404 — only the context-path mount serves it.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/api/users")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding for an H2 console mounted under the /api context path")
+	assert.Contains(t, res[0].URL, "/api/h2-console", "the finding URL must point at the context-path mount")
+}
+
 // TestScanPerRequest_NoFalsePositive ensures a host that 404s every H2 probe
 // yields no finding.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

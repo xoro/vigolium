@@ -75,6 +75,12 @@ type DeparosDiscoveryConfig struct {
 	Candidates            []string
 	ProbeFilenames        []string
 
+	// JSBundleSweep enables the SPA-gated JS-bundle name sweep (main.js,
+	// admin.js, config.js, …) on monolith apps; hits are fed to jsscan.
+	// JSBundleNames overrides the curated name list (empty = built-in).
+	JSBundleSweep bool
+	JSBundleNames []string
+
 	// Engine
 	CaseSensitivity         string // "auto_detect" | "sensitive" | "insensitive"
 	EngineTimeout           time.Duration
@@ -450,6 +456,12 @@ func (d *DeparosDiscoverySource) buildDeparosConfig(target string) *deparosconfi
 	}
 	if len(d.cfg.ProbeFilenames) > 0 {
 		cfg.Extensions.ProbeFilenames = d.cfg.ProbeFilenames
+	}
+
+	// SPA-gated JS-bundle name sweep
+	cfg.Extensions.JSBundleSweep = d.cfg.JSBundleSweep
+	if len(d.cfg.JSBundleNames) > 0 {
+		cfg.Extensions.JSBundleNames = d.cfg.JSBundleNames
 	}
 
 	// Engine settings

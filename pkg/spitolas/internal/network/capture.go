@@ -459,6 +459,13 @@ func (c *Capture) shouldLogEntry(entry *TrafficEntry) bool {
 		return true
 	}
 
+	// Suppress 404s (probe noise — e.g. service-worker / PWA manifest priming
+	// requests that 404 on sites not using them). Records are still written to
+	// the DB, just not printed. Mirrors the discovery phase's 404 suppression.
+	if entry.Response != nil && entry.Response.Status == 404 {
+		return false
+	}
+
 	// Suppress cross-origin requests (host doesn't relate to target)
 	if th := c.targetHostValue(); th != "" {
 		if u, err := url.Parse(entry.Request.URL); err == nil {

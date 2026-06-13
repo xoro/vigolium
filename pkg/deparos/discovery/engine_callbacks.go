@@ -458,7 +458,9 @@ func (e *Engine) extractFileMetadata(filePath string, depth uint16) {
 		return
 	}
 
-	meta := e.applyFileMetadata(parsedURL.Path, depth)
+	// Discovered files reach here only after the analyzer confirmed a genuine
+	// (non-soft-404) hit, so the observed extension confirmation is trusted.
+	meta := e.applyFileMetadata(parsedURL.Path, depth, true)
 
 	if meta.Name != "" {
 		logger.Debug("Added observed name from file discovery",

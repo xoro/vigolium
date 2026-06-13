@@ -181,6 +181,12 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil

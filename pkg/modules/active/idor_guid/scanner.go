@@ -14,6 +14,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/shared/authzutil"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // uuidPattern matches standard UUID format (8-4-4-4-12 hex digits).
@@ -159,6 +160,15 @@ func (m *Module) tryPredictedID(
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
+	// Public-navigation gate: a predicted neighbor the baseline page already links
+	// to (pagination Next/Prev, sibling hrefs, catalog entries) is intended public
+	// browsing, not a predictable-object-reference leak. This is the blog/catalog
+	// false positive — GET /blog/2/ whose body links href="/blog/3/", where each
+	// id is *expected* to serve different content. Skip before spending a probe.
+	if authzutil.BaselineLinksNeighbor(baselineBody, fuzzedReq.Request().Path()) {
+		return nil, nil
+	}
+
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
 		return nil, err
@@ -205,6 +215,16 @@ func (m *Module) tryPredictedID(
 			return nil, nil
 		}
 
+		// Authorization-boundary gate: a predictable id only proves broken
+		// object-level authorization when the original request carried a credential
+		// whose per-user boundary it crossed. An unauthenticated "different id →
+		// different page" is the expected behavior of public content (blogs,
+		// catalogs, docs), so report it as a Tentative lead rather than Firm.
+		confidence := severity.Firm
+		if !authzutil.RequestCarriesCredential(ctx.Request()) {
+			confidence = severity.Tentative
+		}
+
 		return &output.ResultEvent{
 			URL:              urlStr,
 			Matched:          urlStr,
@@ -215,6 +235,8 @@ func (m *Module) tryPredictedID(
 			Info: output.Info{
 				Name:        fmt.Sprintf("IDOR GUID Predictability: %s", technique),
 				Description: fmt.Sprintf("Predicted identifier %q injected into parameter %q returned a valid different resource, indicating predictable object references", predictedID, paramName),
+				Severity:    severity.Medium,
+				Confidence:  confidence,
 			},
 		}, nil
 	}

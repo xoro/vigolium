@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/vigolium/vigolium/pkg/deparos/config"
+	pkghttp "github.com/vigolium/vigolium/pkg/deparos/http"
 	"github.com/vigolium/vigolium/pkg/deparos/storage"
 	"github.com/vigolium/vigolium/pkg/deparos/wordlist"
 	"go.uber.org/zap"
@@ -52,23 +53,48 @@ func collectDirectoryURLs(s storage.Storage) []string {
 // extractFilenamesFromSitemap extracts filenames and extensions from existing sitemap URLs.
 func extractFilenamesFromSitemap(e *Engine) error {
 	return e.storage.WalkFiles(func(node *storage.DiscoveredNode) error {
-		e.applyFileMetadata(node.URL().Path, 0)
+		// Names/paths are always harvested for discovery. The observed-extension
+		// confirmation (which triggers wordlist fuzzing) is gated on the stored
+		// node having actually been served, so a crawled-but-not-served path such
+		// as a dead /citation.cfm <a href> (404, or a redirect to a login/SPA
+		// shell) does not confirm ".cfm". Stored nodes carry only a status code,
+		// not the live analyzer's soft-404 verdict, so this is a status-based
+		// approximation of the served gate the live path applies (OnFileDiscovered).
+		e.applyFileMetadata(node.URL().Path, 0, nodeServedConfirmsExtension(node))
 		return nil
 	})
+}
+
+// nodeServedConfirmsExtension reports whether a stored node was served
+// convincingly enough to treat its URL's extension as a real server-side route.
+// A genuine 2xx, or an auth wall (401/403) that proves the handler exists,
+// qualifies. A 3xx/404/5xx, or a node with no recorded response, does not — those
+// are no proof the server serves that extension.
+func nodeServedConfirmsExtension(node *storage.DiscoveredNode) bool {
+	resp := node.Response()
+	if resp == nil {
+		return false
+	}
+	return pkghttp.IsSuccessStatus(resp.StatusCode) || pkghttp.IsUnauthorized(resp.StatusCode)
 }
 
 // applyFileMetadata extracts all file metadata from urlPath in a single pass
 // and applies it to the engine's observed collections. This consolidates the
 // duplicate extraction logic previously spread across extractFilenamesFromSitemap,
 // extractFileMetadata, and collectValidatedLinks.
-func (e *Engine) applyFileMetadata(urlPath string, depth uint16) (meta FileMetadata) {
+// confirmObserved gates the "observed" server-side extension confirmation
+// (wordlist fuzzing): when false, names/paths/segments are still harvested but
+// the URL's extension is not treated as proof the server serves that route.
+// Callers tied to genuinely-served resources (sitemap, post-fetch file
+// discovery) pass true; spider links pass extensionConfirmAllowed.
+func (e *Engine) applyFileMetadata(urlPath string, depth uint16, confirmObserved bool) (meta FileMetadata) {
 	meta = ExtractAllFileMetadata(urlPath)
 
 	if meta.Name != "" {
 		e.AddObservedNameTrusted(meta.Name)
 	}
 	if meta.Extension != "" {
-		e.observeExtensionForFuzz(meta.Extension, urlPath, depth, true)
+		e.observeExtensionForFuzz(meta.Extension, urlPath, depth, true, confirmObserved)
 	}
 
 	// Store full filename for literal file testing (preserves hashes like app.b5ca88ec.js)
@@ -89,7 +115,7 @@ func (e *Engine) applyFileMetadata(urlPath string, depth uint16) (meta FileMetad
 				e.AddObservedNameTrusted(segName)
 			}
 			if segExt != "" {
-				e.observeExtensionForFuzz(segExt, urlPath, depth, false)
+				e.observeExtensionForFuzz(segExt, urlPath, depth, false, confirmObserved)
 			}
 		}
 	}
@@ -172,12 +198,16 @@ func (e *Engine) incrementTasksGenerated() uint64 {
 // confirmation source (gated by ConfirmViaObserved); otherwise it preserves the
 // legacy observed-extension behaviour. primary marks the URL's own last-segment
 // extension, which in legacy mode could directly generate dynamic tasks at
-// depth>0; segment-derived extensions never did.
-func (e *Engine) observeExtensionForFuzz(ext, urlPath string, depth uint16, primary bool) {
+// depth>0; segment-derived extensions never did. confirmObserved=false
+// suppresses the observed confirmation entirely (untrusted source / SPA).
+func (e *Engine) observeExtensionForFuzz(ext, urlPath string, depth uint16, primary, confirmObserved bool) {
 	if e.config.Extensions.ConfirmRequired {
-		if e.config.Extensions.ConfirmViaObserved {
+		if confirmObserved && e.config.Extensions.ConfirmViaObserved {
 			e.confirmExtension(ext, "observed", urlPath, depth)
 		}
+		return
+	}
+	if !confirmObserved {
 		return
 	}
 	if primary && depth > 0 {

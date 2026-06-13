@@ -78,6 +78,22 @@ func (t LinkSourceType) String() string {
 	}
 }
 
+// IsGenuineReference reports whether a link from this source is one the
+// application actually references — an HTML attribute, a meta-refresh, an HTTP
+// header, or a robots.txt entry. URL-like strings scavenged from JS/HTML body
+// text (the inline scanner, JS string/script/comment/event-handler/SWF
+// extractors) are not genuine references: they may be dead constants, library
+// data, or legacy path tables baked into a bundle, and are no proof the server
+// serves that path.
+func (t LinkSourceType) IsGenuineReference() bool {
+	switch t {
+	case SourceHTMLAttribute, SourceMetaRefresh, SourceHTTPHeader, SourceRobotsTxt:
+		return true
+	default:
+		return false
+	}
+}
+
 // ResourceType indicates the type of resource referenced by a URL.
 type ResourceType uint16
 

@@ -2,6 +2,7 @@ package base64_data_detect
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -219,4 +220,107 @@ func TestFindBase64Matches(t *testing.T) {
 			assert.Len(t, matches, tc.expected)
 		})
 	}
+}
+
+// urlSafeJSON is base64url(`{"returnTo":"https://api.example.com/v1/auth/oidc/login/redirect?sessionState=x>?>?>?"}`).
+// It contains both '-' and '_' from the URL-safe alphabet so it exercises the
+// broadened capture: the old regex stopped at the first '-'/'_' and decoded to a
+// truncated fragment; the value must now be captured whole and decode to valid JSON.
+const urlSafeJSON = "eyJyZXR1cm5UbyI6Imh0dHBzOi8vYXBpLmV4YW1wbGUuY29tL3YxL2F1dGgvb2lkYy9sb2dpbi9yZWRpcmVjdD9zZXNzaW9uU3RhdGU9eD4_Pj8-PyJ9"
+
+func TestDecodeBase64Blob(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantOK  bool
+		wantSub string // optional: substring the result must contain
+	}{
+		{name: "std JSON", input: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", want: `{"alg":"HS256","typ":"JWT"}`, wantOK: true},
+		{name: "url-safe JSON whole", input: urlSafeJSON, wantOK: true, wantSub: `?sessionState=x>?>?>?"}`},
+		{name: "https url", input: "aHR0cHM6Ly9leGFtcGxlLmNvbS9sb2dpbg", want: "https://example.com/login", wantOK: true},
+		{name: "percent encoded", input: "eyJ%68bGciOiJIUzI1NiJ9", wantOK: true, wantSub: `{"alg`}, // %68 = 'h'
+		{name: "missing padding", input: "eyJhbGciOiJIUzI1NiJ9", wantOK: true, wantSub: `{"alg`},
+		{name: "garbage", input: "!!!notbase64!!!", wantOK: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := decodeBase64Blob(tc.input)
+			assert.Equal(t, tc.wantOK, ok)
+			if tc.want != "" {
+				assert.Equal(t, tc.want, got)
+			}
+			if tc.wantSub != "" {
+				assert.Contains(t, got, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestDecodeForDisplay_SkipsBinary(t *testing.T) {
+	// rO0ABXNy... is a Java serialized object header: it decodes to bytes that
+	// are not valid UTF-8 text, so no decoded line should be offered.
+	assert.Empty(t, decodeForDisplay("rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA="))
+	// JSON decodes to readable text.
+	assert.Equal(t, `{"alg":"HS256","typ":"JWT"}`, decodeForDisplay("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"))
+}
+
+func TestIsDisplayableText(t *testing.T) {
+	assert.True(t, isDisplayableText(`{"a":1}`))
+	assert.True(t, isDisplayableText("https://example.com"))
+	assert.False(t, isDisplayableText(""))
+	assert.False(t, isDisplayableText("text\x00with-nul"))
+	assert.False(t, isDisplayableText("\xac\xed\x00\x05")) // invalid UTF-8 binary
+}
+
+func TestBuildExtracted_IncludesDecodedLineAndPreview(t *testing.T) {
+	extracted, preview := buildExtracted("request", []string{"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"})
+	require.NotEmpty(t, extracted)
+	assert.Equal(t, "Source: request", extracted[0])
+
+	var hasRaw, hasDecoded bool
+	for _, line := range extracted {
+		if line == "JSON object: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" {
+			hasRaw = true
+		}
+		if line == `JSON object (decoded): {"alg":"HS256","typ":"JWT"}` {
+			hasDecoded = true
+		}
+	}
+	assert.True(t, hasRaw, "raw base64 line should be present")
+	assert.True(t, hasDecoded, "decoded line should be present")
+	assert.Equal(t, `{"alg":"HS256","typ":"JWT"}`, preview)
+}
+
+func TestBuildExtracted_BinaryHasNoDecodedLine(t *testing.T) {
+	extracted, preview := buildExtracted("response", []string{"rO0ABXNyABFqYXZhLmxhbmcuQm9vbGVhbtA="})
+	assert.Empty(t, preview)
+	for _, line := range extracted {
+		assert.NotContains(t, line, "(decoded)")
+	}
+}
+
+func TestScanPerRequest_URLSafeBlobDecodedEndToEnd(t *testing.T) {
+	m := New()
+	ctx := makeHTTPCtx("/login?authctx="+urlSafeJSON, "OK")
+	scanCtx := &modkit.ScanContext{}
+
+	results, err := m.ScanPerRequest(ctx, scanCtx)
+	require.NoError(t, err)
+
+	reqResult := findResultBySource(results, "Source: request")
+	require.NotNil(t, reqResult, "URL-safe base64 in the request line should be detected")
+
+	var decodedLine string
+	for _, line := range reqResult.ExtractedResults {
+		if strings.Contains(line, "(decoded)") {
+			decodedLine = line
+		}
+	}
+	require.NotEmpty(t, decodedLine, "a decoded line should be present")
+	// The whole blob (past the '-'/'_') must decode to complete JSON.
+	assert.Contains(t, decodedLine, `"returnTo":"https://api.example.com`)
+	assert.Contains(t, decodedLine, `sessionState=x>?>?>?"}`)
+	// The decoded preview should also surface in the finding description.
+	assert.Contains(t, reqResult.Info.Description, "Decoded preview:")
 }

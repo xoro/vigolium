@@ -41,6 +41,35 @@ func TestScanPerRequest_DetectsSwaggerUI(t *testing.T) {
 	require.NotEmpty(t, res, "expected an exposed-docs finding when Swagger UI is served at /docs")
 }
 
+// TestScanPerRequest_DetectsContextPathDocs verifies the context-path walk: a
+// FastAPI sub-app serves its docs at /api/docs (NOT the web root) and the
+// observed request is to /api/items. The module must derive the /api base and
+// find the docs there.
+func TestScanPerRequest_DetectsContextPathDocs(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/docs" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("<html><body><div id=\"swagger-ui\"></div>" +
+				"<script>const ui = SwaggerUIBundle({url: '/api/openapi.json'})</script>" +
+				strings.Repeat(" ", 400) + "</body></html>"))
+			return
+		}
+		// Root /docs and every sibling 404 — only the context-path mount serves it.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("nope"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/api/items"), "text/html", "<html>app</html>")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding for FastAPI docs mounted under the /api context path")
+	assert.Contains(t, res[0].URL, "/api/docs", "the finding URL must point at the context-path mount")
+}
+
 // TestScanPerRequest_NoFalsePositive returns 404 for every docs path, so nothing
 // should be flagged.
 func TestScanPerRequest_NoFalsePositive(t *testing.T) {

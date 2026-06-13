@@ -218,6 +218,16 @@ func (m *Module) probeNeighbor(
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
+	// Public-navigation gate: if the baseline page already links to the neighbor
+	// target (pagination "Next"/"Prev", sibling hrefs, catalog entries) the
+	// neighbor is reachable by design — intended public browsing, not a broken
+	// authorization boundary. This is the blog/catalog false positive: GET
+	// /blog/3/ whose body links href="/blog/4/" and href="/blog/2/", where each id
+	// is *expected* to serve different content. Skip before spending an HTTP probe.
+	if authzutil.BaselineLinksNeighbor(string(baseline.Summary.Body), fuzzedReq.Request().Path()) {
+		return nil, nil
+	}
+
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
 		return nil, err
@@ -311,6 +321,18 @@ func (m *Module) probeNeighbor(
 		confidence = severity.Firm
 	}
 
+	// Authorization-boundary gate: IDOR/BOLA is an authorization flaw, so it is
+	// only provable when the ORIGINAL request actually carried a credential whose
+	// per-user boundary the neighbor id crossed. With no Authorization / Cookie /
+	// token the differential is just public content served per-id (blogs,
+	// catalogs, docs) — keep it as a Medium/Tentative lead, not a High/Firm
+	// authorization bypass.
+	sev := severity.High
+	if !authzutil.RequestCarriesCredential(ctx.Request()) {
+		sev = severity.Medium
+		confidence = severity.Tentative
+	}
+
 	desc := fmt.Sprintf(
 		"Parameter %s=%s was changed to %s and returned a structurally similar response "+
 			"(status=%d, body ratio=%.2f) with different content, suggesting missing authorization.",
@@ -336,7 +358,7 @@ func (m *Module) probeNeighbor(
 		Info: output.Info{
 			Name:        "IDOR / Broken Object Level Authorization",
 			Description: desc,
-			Severity:    severity.High,
+			Severity:    sev,
 			Confidence:  confidence,
 			Tags:        []string{"idor", "bola", "access-control", "api-security"},
 			Reference: []string{

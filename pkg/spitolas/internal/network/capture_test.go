@@ -862,3 +862,27 @@ func TestSetTargetHostStaticStillSuppressed(t *testing.T) {
 		t.Errorf("static content on adopted host should still be suppressed")
 	}
 }
+
+// TestShouldLogEntry404Suppressed verifies probe noise (404s from e.g.
+// service-worker / manifest priming) is suppressed from stderr in non-verbose
+// mode but shown under verbose. Records are still written regardless.
+func TestShouldLogEntry404Suppressed(t *testing.T) {
+	// Non-verbose: same-host 404 is suppressed.
+	c := New(&mockWriter{}, true, false, false, false, false, "example.com", "spider")
+	notFound := createTestEntry("https://example.com/ngsw.json")
+	notFound.Response.Status = 404
+	if c.shouldLogEntry(notFound) != false {
+		t.Errorf("404 should be suppressed in non-verbose mode")
+	}
+	// A same-host 200 on the same path is still logged (only 404s are dropped).
+	ok := createTestEntry("https://example.com/ngsw.json")
+	if c.shouldLogEntry(ok) != true {
+		t.Errorf("200 should still be logged in non-verbose mode")
+	}
+
+	// Verbose: 404 is shown.
+	cv := New(&mockWriter{}, true, false, true, false, false, "example.com", "spider")
+	if cv.shouldLogEntry(notFound) != true {
+		t.Errorf("404 should be logged under verbose mode")
+	}
+}

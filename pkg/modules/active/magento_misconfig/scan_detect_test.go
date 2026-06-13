@@ -75,6 +75,69 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host with no exposed Magento files must not yield a finding")
 }
 
+// magentoCatchAllShell is a themed SPA / catch-all application shell that 200s
+// almost any path with the same body. It contains the generic words the old
+// single-marker probes keyed on ("setup", "downloader") but no Magento-identity
+// anchor — the vn.einvoice.grab.com case.
+const magentoCatchAllShell = `<!DOCTYPE html><html><head><title>Hóa đơn điện tử</title>` +
+	`<script src="/Content/js/setup-downloader.js"></script></head><body>` +
+	`<nav><a href="/hoa-don/tra-cuu">Tra cứu</a><a href="/admin">Quản trị</a></nav>` +
+	`<main>Welcome to the invoice portal. Please sign in to continue.</main></body></html>`
+
+// TestScanPerRequest_CatchAllShellNoFalsePositive reproduces the
+// vn.einvoice.grab.com false positive: an ASP.NET catch-all that 200s every
+// path with the same app shell (containing weak words like "setup"/"downloader")
+// must not be reported as an exposed Magento endpoint, because no Magento-identity
+// anchor co-occurs.
+func TestScanPerRequest_CatchAllShellNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "vigolium-magento-404-") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<html><body>The requested page could not be found.</body></html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(magentoCatchAllShell))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/hoa-don/tra-cuu/"), "text/html", magentoCatchAllShell)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a catch-all app shell with no Magento-identity anchor must not yield a finding")
+}
+
+// TestScanPerRequest_BaselineShellGuard isolates the baseline-shell guard: even
+// when a catch-all body satisfies the co-occurrence markers (it contains both
+// "Magento" and "Setup Wizard"), the finding is dropped because the probe
+// response is textually equivalent to the originally-observed page.
+func TestScanPerRequest_BaselineShellGuard(t *testing.T) {
+	t.Parallel()
+	shell := `<!DOCTYPE html><html><head><title>Magento store</title></head><body>` +
+		`<p>Our Setup Wizard help center explains how Magento works.</p>` +
+		`<nav><a href="/home">Home</a><a href="/about">About</a></nav></body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "vigolium-magento-404-") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("<html><body>distinct not found body, nothing like the shell.</body></html>"))
+			return
+		}
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(shell))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", shell)
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a probe body equal to the observed page shell must be dropped by the baseline-shell guard")
+}
+
 // TestScanPerRequest_DeployedVersionConfirmed serves a real Magento
 // deployed_version.txt (a bare timestamp token) and asserts the Info finding
 // fires on the version-token shape.

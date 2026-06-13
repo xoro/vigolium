@@ -49,3 +49,20 @@ func TestDefaultKnownIssueScanConfig_ConfigJSONIsMedium(t *testing.T) {
 		t.Errorf("default config must validate: %v", err)
 	}
 }
+
+func TestDefaultFindingGrouping_GroupsSourcemapByModule(t *testing.T) {
+	gc := DefaultKnownIssueScanConfig().ResolveGroupByValue()
+	if !gc.Enabled || !gc.PerHost {
+		t.Fatalf("default grouping should be enabled per-host, got %+v", gc)
+	}
+	found := false
+	for _, m := range gc.ByModule {
+		if m == "sourcemap-detect" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("default ByModule should include sourcemap-detect, got %v", gc.ByModule)
+	}
+}

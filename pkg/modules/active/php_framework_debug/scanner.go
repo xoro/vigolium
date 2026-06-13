@@ -60,14 +60,14 @@ var probes = []probe{
 	{
 		path:    "/user_guide/",
 		name:    "CodeIgniter User Guide",
-		markers: []string{"CodeIgniter", "User Guide", "user_guide"},
+		markers: []string{"CodeIgniter", "User Guide"},
 		sev:     severity.Low,
 		desc:    "CodeIgniter user guide shipped to production, confirming framework and potentially revealing version",
 	},
 	{
 		path:        "/application/logs/log-",
 		name:        "CodeIgniter Application Log",
-		markers:     []string{"ERROR", "DEBUG", "INFO", "CRITICAL"},
+		markers:     []string{"ERROR - ", "DEBUG - ", "INFO - ", "CRITICAL - "},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "CodeIgniter application log accessible, potentially exposing error details and file paths",
@@ -76,14 +76,14 @@ var probes = []probe{
 	{
 		path:    "/debug_kit/toolbar/",
 		name:    "CakePHP Debug Kit Toolbar",
-		markers: []string{"debug_kit", "DebugKit", "toolbar", "CakePHP"},
+		markers: []string{"debug_kit", "DebugKit", "CakePHP"},
 		sev:     severity.High,
 		desc:    "CakePHP Debug Kit toolbar exposed, revealing SQL queries, routes, and application variables",
 	},
 	{
 		path:    "/debug_kit/panels/",
 		name:    "CakePHP Debug Kit Panels",
-		markers: []string{"debug_kit", "DebugKit", "panel", "CakePHP"},
+		markers: []string{"debug_kit", "DebugKit", "CakePHP"},
 		sev:     severity.High,
 		desc:    "CakePHP Debug Kit panels accessible, exposing detailed debugging information",
 	},
@@ -107,7 +107,7 @@ var probes = []probe{
 	{
 		path:    "/webtools.php",
 		name:    "Phalcon DevTools",
-		markers: []string{"Phalcon", "WebTools", "DevTools", "phalcon"},
+		markers: []string{"Phalcon", "phalcon"},
 		sev:     severity.High,
 		desc:    "Phalcon DevTools exposed in production, allowing database migration and code scaffolding",
 	},
@@ -299,6 +299,12 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	// Check anti-markers
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
@@ -311,10 +317,15 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Strip the reflected probe path before matching so a marker that is also the
+	// path slug ("user_guide" for /user_guide/) can't match on a reflected
+	// href/breadcrumb alone.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}

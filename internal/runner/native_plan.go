@@ -159,6 +159,10 @@ func ApplyNativePhaseSelection(opts *types.Options, enableExtensions func()) err
 			switch phase {
 			case "discovery", "ingestion":
 				opts.SkipIngestion = true
+				// Keep DiscoverEnabled in sync with the skip (mirrors the
+				// --only path) so the config panel and downstream gates don't
+				// still report discovery as active.
+				opts.DiscoverEnabled = false
 			case "external-harvest":
 				opts.ExternalHarvestEnabled = false
 			case "spidering":

@@ -4279,6 +4279,9 @@ readme.md
 Readme.md
 README.MD
 README.md
+CLAUDE.md
+AGENTS.md
+SKILL.md
 README.mkd
 readme.mkd
 readme.php

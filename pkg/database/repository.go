@@ -47,6 +47,40 @@ func buildEvidence(request, response string) string {
 // the storage-layer dedup/merge path splits evidence the same way modules emit it.
 const EvidenceSeparator = output.EvidenceSeparator
 
+// maxAdditionalEvidence caps how many request/response pairs a survivor finding
+// retains under AdditionalEvidence when duplicates are folded in (the evidence
+// merge paths in repository_dedup.go).
+const maxAdditionalEvidence = 10
+
+// appendUniqueEvidence appends each candidate to existing, skipping any that is
+// empty, byte-identical to primary, or already present. primary is the survivor's
+// own request/response pair (already shown as the finding's primary evidence), so
+// folding a duplicate that carries the same request/response — e.g. the same
+// secret re-detected on the same stored response across scan passes — would just
+// print the response twice. This keeps "Additional Evidence" to genuinely
+// distinct pairs.
+func appendUniqueEvidence(existing []string, primary string, candidates ...string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(candidates)+1)
+	for _, e := range existing {
+		seen[e] = struct{}{}
+	}
+	if primary != "" {
+		seen[primary] = struct{}{}
+	}
+	out := existing
+	for _, c := range candidates {
+		if c == "" {
+			continue
+		}
+		if _, dup := seen[c]; dup {
+			continue
+		}
+		seen[c] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
 // mergeUniqueStrings returns the deduplicated union of two string slices.
 func mergeUniqueStrings(a, b []string) []string {
 	seen := make(map[string]struct{}, len(a)+len(b))

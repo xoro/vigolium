@@ -32,6 +32,10 @@ func TestScanPerRequest_DetectsStackTrace(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	require.NotEmpty(t, res, "expected an Express debug finding when a Node.js stack trace leaks")
+	// All probe techniques leak the same debug signal on this host; they must
+	// collapse into a single finding (one http_record) rather than one per probe.
+	require.Len(t, res, 1, "multiple debug probes must collapse into one finding per host")
+	assert.NotEmpty(t, res[0].AdditionalEvidence, "the other probe techniques must be retained as inline evidence")
 }
 
 // TestScanPerRequest_NoFalsePositive ensures an app returning a clean,

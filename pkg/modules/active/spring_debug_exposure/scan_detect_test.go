@@ -3,6 +3,7 @@ package spring_debug_exposure
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,6 +81,38 @@ func TestScanPerRequest_WeakMarkerNoFalsePositive(t *testing.T) {
 	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "a generic error page without the Spring Whitelabel phrases must not yield a finding")
+}
+
+// TestScanPerRequest_ReflectedPathNoFalsePositive guards the Critical DevTools
+// remote-restart probe against the reflected-path FP class: a path-routing app
+// echoes the requested path (/.~~spring-boot!~/restart, which contains both the
+// "restart" and "spring" markers) into a 200 page. Without the reflected-path
+// strip the bare {restart}/{spring} marker groups would both be satisfied by our
+// own request bouncing back, forging a Critical RCE finding.
+func TestScanPerRequest_ReflectedPathNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Random soft-404 fingerprint path 404s so the fingerprint guard does not
+		// fire — isolating the reflected-path strip.
+		if strings.Contains(r.URL.Path, "vigolium") {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte("not found"))
+			return
+		}
+		// Every other path 200s with a page that reflects the requested path (a
+		// catch-all that echoes the URL into a link), with no real Spring content.
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("You requested " + r.URL.Path + " on this server."))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a page that merely reflects the probe path must not yield a DevTools restart finding")
 }
 
 // TestCanProcess covers the module gate: it requires a non-nil response baseline.

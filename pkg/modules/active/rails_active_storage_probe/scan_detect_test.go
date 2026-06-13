@@ -11,6 +11,7 @@ import (
 
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // TestScanPerRequest_DetectsDirectUpload simulates a Rails app whose Active
@@ -20,7 +21,11 @@ func TestScanPerRequest_DetectsDirectUpload(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions && r.URL.Path == "/rails/active_storage/direct_uploads" {
+			// A genuine Rails route leaks a Ruby app-server fingerprint, which
+			// the host-Rails gate requires before trusting the OPTIONS Allow header.
 			w.Header().Set("Allow", "POST, OPTIONS")
+			w.Header().Set("X-Runtime", "0.034219")
+			w.Header().Set("Server", "Puma")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -38,6 +43,107 @@ func TestScanPerRequest_DetectsDirectUpload(t *testing.T) {
 	require.NotEmpty(t, res[0].ExtractedResults)
 	assert.Contains(t, strings.Join(res[0].ExtractedResults, " "), "Allow:",
 		"evidence must cite the Allow header, not a body substring")
+	assert.Equal(t, severity.Tentative, res[0].Info.Confidence,
+		"an OPTIONS-only Allow-header confirmation is heuristic and must be reported Tentative")
+}
+
+// TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive reproduces the
+// production false positive on vn.einvoice.grab.com: a generic front-controller
+// answers OPTIONS on *every* path with a blank body and an over-broad
+// "OPTIONS, TRACE, GET, HEAD, POST" Allow header (plus CORS headers). A real
+// POST-only Active Storage / Action Mailbox route would never advertise
+// GET/HEAD/TRACE, so the broad Allow set must be rejected. The root
+// blanket-probe path 404s so the host-level guard cannot see it, isolating the
+// per-response Allow-set gate.
+func TestScanPerRequest_GenericAllowBlankBodyNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			// The root blanket-detector probe (a non-/rails path) 404s so the
+			// host-level short-circuit does not fire and we exercise the Allow gate.
+			if !strings.HasPrefix(r.URL.Path, "/rails/") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Allow", "OPTIONS, TRACE, GET, HEAD, POST")
+			w.Header().Set("Access-Control-Allow-Origin", "https://vn.einvoice.grab.com")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.WriteHeader(http.StatusOK) // blank body
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an over-broad GET/HEAD/TRACE Allow header on a blank-body OPTIONS must not be reported")
+}
+
+// TestScanPerRequest_NonRailsHostNoFalsePositive is the core production-FP
+// guard: a host answers OPTIONS on the exact direct-upload path with a clean,
+// POST-only "POST, OPTIONS" Allow and a blank body — passing the Allow-set gate
+// — while random siblings 404 (passing the sibling baseline). But the host shows
+// no Ruby/Rails fingerprint anywhere (no X-Runtime, no Ruby Server header, no
+// Rails session cookie, no framework markers), so the OPTIONS Allow header is a
+// generic proxy/middleware reply, not a mounted Rails route. The host-Rails gate
+// drops it.
+func TestScanPerRequest_NonRailsHostNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions && r.URL.Path == "/rails/active_storage/direct_uploads" {
+			w.Header().Set("Allow", "POST, OPTIONS") // clean, POST-only — but no Rails fingerprint
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "an OPTIONS Allow header on a host with no Rails fingerprint must not be reported")
+}
+
+// TestScanPerRequest_SiblingCatchAllNoFalsePositive covers a catch-all OPTIONS
+// handler mounted on the /rails prefix that answers a clean, POST-only
+// "POST, OPTIONS" Allow on every path under it — including random siblings of
+// the real route. The Allow set alone looks legitimate, so only the sibling
+// baseline (same response with or without the real path) drops it. The root
+// blanket-probe path 404s so the host-level guard cannot short-circuit first.
+func TestScanPerRequest_SiblingCatchAllNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			if !strings.HasPrefix(r.URL.Path, "/rails/") {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			// Clean POST-only Allow on every /rails/* path, real or random.
+			w.Header().Set("Allow", "POST, OPTIONS")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("a distinct not found page body"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a prefix-wide catch-all OPTIONS handler must not yield a Rails ingress finding")
 }
 
 // TestScanPerRequest_Nginx405NotAllowedNoFalsePositive reproduces the exact

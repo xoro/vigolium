@@ -16,6 +16,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 )
 
 // TestScanPerInsertionPoint_DetectsSequentialIDOR drives the real scan method
@@ -74,6 +75,76 @@ func TestScanPerInsertionPoint_NoFalsePositive(t *testing.T) {
 	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
 	require.NoError(t, err)
 	assert.Empty(t, res, "404 for neighbor ids means authorization is enforced — no finding")
+}
+
+// listingBody renders a paginated public listing for the given id that links to
+// its previous and next siblings (e.g. /list?id=2 with href="/list?id=1" and
+// href="/list?id=3") — the shape of a blog/catalog index where every id serves
+// distinct content by design.
+func listingBody(id string) string {
+	n, _ := strconv.Atoi(id)
+	return fmt.Sprintf(
+		`<html><body><h1>Listing %s</h1><div class="posts">%s</div>`+
+			`<a href="/list?id=%d" class="prev">Prev</a>`+
+			`<a href="/list?id=%d" class="next">Next</a></body></html>`,
+		id, strings.Repeat("post ", 60), n-1, n+1)
+}
+
+// TestScanPerInsertionPoint_LinkedNeighborSkipped is the regression for the
+// reported blog-pagination false positive: GET /list?id=2 serves a listing whose
+// body already links id 1 (Prev) and id 3 (Next) — the exact ±1 ids this module
+// predicts. Both are intended public navigation, so the module must skip them
+// before sending any probe and report nothing.
+func TestScanPerInsertionPoint_LinkedNeighborSkipped(t *testing.T) {
+	t.Parallel()
+	var probes int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&probes, 1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = fmt.Fprint(w, listingBody(r.URL.Query().Get("id")))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/list?id=2"),
+		"text/html",
+		listingBody("2"),
+	)
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "the ±1 ids are linked from the page itself — intended navigation, not a predictable-reference leak")
+	assert.Zero(t, atomic.LoadInt64(&probes), "both predicted neighbors are linked, so no probe should be sent")
+}
+
+// TestScanPerInsertionPoint_NoCredentialTentative verifies the
+// authorization-boundary gate: a predictable-id hit on an unauthenticated
+// request (no Authorization, Cookie or token) is reported as Medium/Tentative,
+// since "different id → different page" is the expected behavior of public
+// content rather than a confirmed broken-authorization finding.
+func TestScanPerInsertionPoint_NoCredentialTentative(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.URL.Query().Get("id")
+		_, _ = fmt.Fprintf(w, "{\"id\":%q,\"owner\":%q,\"pad\":%q}", id, "user-"+id, strings.Repeat("x", 120))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(
+		modtest.Request(t, srv.URL+"/api/objects?id=100"),
+		"application/json",
+		"{\"id\":\"100\",\"owner\":\"user-100\",\"pad\":\""+strings.Repeat("x", 120)+"\"}",
+	)
+	ip := modtest.InsertionPoint(t, rr, "id")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res)
+	assert.Equal(t, severity.Medium, res[0].Info.Severity)
+	assert.Equal(t, severity.Tentative, res[0].Info.Confidence, "an unauthenticated predictable-id hit is a Tentative lead, not Firm")
 }
 
 // keycloakLoginBody is a trimmed Keycloak Sign-In form — the page the predicted

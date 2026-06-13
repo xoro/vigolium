@@ -90,8 +90,14 @@ type ExtensionConfig struct {
 	// pipeline (observed URLs / fingerprint / active probe). When false the
 	// legacy always-on CustomList behaviour applies.
 	ConfirmRequired bool `json:"confirm_required"`
-	// ConfirmViaObserved confirms an extension when a real URL bearing it is
-	// seen (start URL, spidered link, JS-extracted endpoint, sitemap).
+	// ConfirmViaObserved confirms an extension when a URL the application
+	// genuinely references bears it: the start URL, a spidered link from an HTML
+	// attribute / meta-refresh / HTTP header / robots.txt, a sitemap entry, or a
+	// file actually fetched and confirmed (non-soft-404). Path-like strings
+	// scavenged from JS/HTML body text (inline/JS-string extractors) do NOT
+	// count — they are not proof the server serves that extension — and on a
+	// JS-shell SPA the observed source is suppressed entirely, since the index
+	// shell is served for every path. See Engine.extensionConfirmAllowed.
 	ConfirmViaObserved bool `json:"confirm_via_observed"`
 	// ConfirmViaFingerprint confirms an extension when the start URL's response
 	// headers/cookies fingerprint a stack known to serve it (PHPSESSID → php,
@@ -109,6 +115,19 @@ type ExtensionConfig struct {
 	// ProbeFilenames are the high-signal base names tried per candidate during
 	// the active probe (no extension). Empty = built-in default.
 	ProbeFilenames []string `json:"probe_filenames"`
+
+	// JSBundleSweep enables a curated, SPA-gated sweep for common base names,
+	// each probed as both .js (bundles) and .json (sibling config/data) —
+	// main.js, admin.js, config.json, settings.json, … — on monolith /
+	// server-rendered apps. Confirmed hits are fed to the JS-fetch pipeline for
+	// endpoint and secret extraction. The sweep is skipped when the start page
+	// fingerprints as a JS-shell SPA (Next.js/React/Angular/Vue/Svelte), whose
+	// bundles are content-hashed (main.a1b2c3.js) and therefore unguessable —
+	// and already linked + harvested. See discovery/js_bundle_sweep.go.
+	JSBundleSweep bool `json:"js_bundle_sweep"`
+	// JSBundleNames overrides the built-in curated name list (no leading dot, no
+	// extension — both .js and .json are appended). Empty = DefaultJSBundleNames.
+	JSBundleNames []string `json:"js_bundle_names"`
 }
 
 // EffectiveCustomList returns the custom extensions to statically sweep with the

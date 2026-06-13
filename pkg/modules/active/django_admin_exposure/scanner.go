@@ -26,17 +26,21 @@ type probe struct {
 
 var probes = []probe{
 	{
-		path:        "/admin/",
-		name:        "Django Admin Index",
-		markers:     []string{"Django administration", "django-admin", "Log in", "id_username", "id_password"},
+		path: "/admin/",
+		name: "Django Admin Index",
+		// Django-specific markers only — the bare "Log in" matched any login wall.
+		// "id_username"/"id_password" are Django's default admin form field IDs.
+		markers:     []string{"Django administration", "django-admin", "id_username", "id_password"},
 		antiMarkers: []string{"404 Not Found", "Page not found"},
 		sev:         severity.Medium,
 		desc:        "Django admin panel is publicly accessible, exposing the administration interface",
 	},
 	{
-		path:        "/admin/login/",
-		name:        "Django Admin Login",
-		markers:     []string{"Django administration", "Log in", "id_username", "csrfmiddlewaretoken"},
+		path: "/admin/login/",
+		name: "Django Admin Login",
+		// Drop generic "Log in"; require Django-unique markers (the admin title, the
+		// form field IDs, or the Django CSRF field name).
+		markers:     []string{"Django administration", "id_username", "csrfmiddlewaretoken"},
 		antiMarkers: []string{"404 Not Found", "Page not found"},
 		sev:         severity.Medium,
 		desc:        "Django admin login page is publicly accessible, confirming Django admin is installed and enabling brute force attacks",
@@ -96,17 +100,29 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// known endpoint mounted under a context path (e.g. /myapp/<endpoint>) is
+	// reached, not just the root. Claim each (host, base) pair up front so a
+	// fully-deduped request issues no traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeEndpoint(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 
@@ -151,13 +167,14 @@ func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -206,6 +223,13 @@ func (m *Module) probeEndpoint(
 		}
 	}
 
+	// Catch-all / shell guard: a body textually equivalent to the originally
+	// observed page means the app served its standard shell for /admin/ too, not a
+	// distinct Django admin — "the same body with or without the probe".
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil
@@ -228,8 +252,16 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes,
+	// drop the finding if a nonexistent sibling under the same parent returns the
+	// same markers (a handler that 200s every child path). Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

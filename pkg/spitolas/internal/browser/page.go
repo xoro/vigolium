@@ -336,6 +336,33 @@ func (p *Page) EvalWithArgs(script string, args ...interface{}) (interface{}, er
 	return val, nil
 }
 
+// EvalAwait evaluates a JavaScript expression that returns a Promise and waits
+// for it to resolve, returning the resolved value. timeout bounds the whole
+// evaluation (0 = no explicit timeout). Used for in-page async work such as
+// priming service-worker assets with fetch().
+func (p *Page) EvalAwait(script string, timeout time.Duration) (interface{}, error) {
+	eval := proto.RuntimeEvaluate{
+		Expression:            script,
+		IncludeCommandLineAPI: true,
+		ReturnByValue:         true,
+		AwaitPromise:          true,
+	}
+	if timeout > 0 {
+		eval.Timeout = proto.RuntimeTimeDelta(timeout.Milliseconds())
+	}
+
+	result, err := eval.Call(p.rodPage)
+	if err != nil {
+		return nil, err
+	}
+
+	if result.ExceptionDetails != nil {
+		return nil, fmt.Errorf("eval error: %s", result.ExceptionDetails.Text)
+	}
+
+	return result.Result.Value.Val(), nil
+}
+
 // EvalCDP executes a CDP command via Runtime.evaluate.
 func (p *Page) EvalCDP(expression string) (interface{}, error) {
 	result, err := proto.RuntimeEvaluate{

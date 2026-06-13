@@ -179,13 +179,18 @@ func (r *Repository) insertFindingRecords(ctx context.Context, idb bun.IDB, find
 // project-scoped so evidence from one project is never merged into another project's
 // finding, even when both share a finding_hash.
 func (r *Repository) appendRecordsToFinding(ctx context.Context, idb bun.IDB, projectUUID, findingHash string, newUUIDs []string, evidence string) error {
+	// Only fetch the (potentially large) request/response bodies when there's
+	// evidence to append — they're needed solely to dedup against the survivor's
+	// own primary pair below.
 	existing := &Finding{}
-	err := idb.NewSelect().Model(existing).
+	sel := idb.NewSelect().Model(existing).
 		Column("id", "http_record_uuids", "additional_evidence").
 		Where("project_uuid = ?", defaultProjectUUID(projectUUID)).
-		Where("finding_hash = ?", findingHash).
-		Scan(ctx)
-	if err != nil {
+		Where("finding_hash = ?", findingHash)
+	if evidence != "" {
+		sel = sel.Column("request", "response")
+	}
+	if err := sel.Scan(ctx); err != nil {
 		return fmt.Errorf("failed to look up existing finding: %w", err)
 	}
 
@@ -196,13 +201,17 @@ func (r *Repository) appendRecordsToFinding(ctx context.Context, idb bun.IDB, pr
 		Set("http_record_uuids = ?", merged).
 		Where("id = ?", existing.ID)
 
+	// Skip evidence that just duplicates the survivor's own primary
+	// request/response (or an entry it already has) — otherwise re-emitting the
+	// same finding shows its response twice (primary + Additional Evidence).
 	if evidence != "" {
-		updated := append(existing.AdditionalEvidence, evidence)
-		q = q.Set("additional_evidence = ?", updated)
+		primary := buildEvidence(existing.Request, existing.Response)
+		if updated := appendUniqueEvidence(existing.AdditionalEvidence, primary, evidence); len(updated) > len(existing.AdditionalEvidence) {
+			q = q.Set("additional_evidence = ?", updated)
+		}
 	}
 
-	_, err = q.Exec(ctx)
-	if err != nil {
+	if _, err := q.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to update finding record UUIDs: %w", err)
 	}
 	return nil

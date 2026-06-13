@@ -43,6 +43,36 @@ func TestUpgradeSSRF_Positive(t *testing.T) {
 	if !strings.Contains(strings.ToLower(strings.Join(res[0].ExtractedResults, " ")), "ami-id") {
 		t.Errorf("finding should record the ami-id marker, got %v", res[0].ExtractedResults)
 	}
+	if res[0].Info.Confidence.String() != "tentative" {
+		t.Errorf("in-band finding should be tentative, got %q", res[0].Info.Confidence.String())
+	}
+}
+
+// TestUpgradeSSRF_HTMLPageNotMetadata: even when the upgrade differential holds, an
+// HTML document (the app's own SPA page that happens to mention a marker word like
+// window.location.hostname) is not a metadata response and must not be reported.
+func TestUpgradeSSRF_HTMLPageNotMetadata(t *testing.T) {
+	const spaIndex = `<!doctype html><html><head><title>app</title></head>` +
+		`<body><script>const h = window.location.hostname;</script></body></html>`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.RequestURI, "metadata.google.internal") && hasUpgrade(r) {
+			_, _ = io.WriteString(w, spaIndex) // HTML page, mentions "hostname"
+			return
+		}
+		_, _ = io.WriteString(w, "<html><body>normal</body></html>")
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Request(t, srv.URL+"/app/index")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("ScanPerRequest: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("an HTML page mentioning a marker word must not be reported, got %d: %+v", len(res), res)
+	}
 }
 
 // TestUpgradeSSRF_Negative: a proxy that never reaches the metadata host. No
@@ -71,7 +101,8 @@ func TestUpgradeSSRF_Negative(t *testing.T) {
 func TestUpgradeSSRF_NoDoubleReport(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.RequestURI, "169.254.169.254") {
-			_, _ = io.WriteString(w, "ami-id: ami-0plain\n") // present regardless of Upgrade
+			// Full marker cluster present regardless of Upgrade → plain routing SSRF.
+			_, _ = io.WriteString(w, "ami-id: ami-0plain\ninstance-id: i-0plain\n")
 			return
 		}
 		_, _ = io.WriteString(w, "<html><body>normal</body></html>")

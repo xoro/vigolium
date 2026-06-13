@@ -14,7 +14,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 	"github.com/vigolium/vigolium/pkg/toolexec/kingfisher"
-	"github.com/vigolium/vigolium/pkg/types/severity"
 	"go.uber.org/zap"
 )
 
@@ -23,9 +22,13 @@ const maxBodySize = 10 * 1024 * 1024
 
 // batchEntry tracks a buffered response body for batch scanning.
 type batchEntry struct {
-	filename string // basename of the temp file within batchDir
-	url      string
-	host     string
+	filename     string // basename of the temp file within batchDir
+	url          string
+	host         string
+	statusCode   int    // response status — 3xx redirects downgrade secret severity
+	headerValues string // joined response header values, for header-reflection downgrade
+	respHead     string // raw response head (status line + headers, no body), for finding evidence
+	request      string // raw request, for finding evidence and http_record linkage
 }
 
 // Module detects leaked secrets in HTTP response bodies using Kingfisher.
@@ -106,12 +109,22 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, _ *modkit.Scan
 		return nil, nil
 	}
 
-	body := ctx.Response().Body()
+	resp := ctx.Response()
+	body := resp.Body()
 	urlStr := ""
 	host := ""
 	if u, err := ctx.URL(); err == nil {
 		urlStr = u.String()
 		host = u.Host
+	}
+
+	// Retain the response head (status line + headers, no body) and the raw
+	// request so FlushFindings can attach human-readable evidence to each finding
+	// without re-buffering the body in memory.
+	respHead := string(resp.Head())
+	request := ""
+	if req := ctx.Request(); req != nil {
+		request = string(req.Raw())
 	}
 
 	// Write body to temp file with unique name
@@ -122,11 +135,18 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, _ *modkit.Scan
 		return nil, nil
 	}
 
+	// Retain the status code and header values so FlushFindings can downgrade
+	// matches that ride on a redirect or are merely reflected into a header
+	// (e.g. an OAuth identifier in a Location URL bouncing to an SSO login).
 	m.batchMu.Lock()
 	m.batchEntries = append(m.batchEntries, batchEntry{
-		filename: filename,
-		url:      urlStr,
-		host:     host,
+		filename:     filename,
+		url:          urlStr,
+		host:         host,
+		statusCode:   resp.StatusCode(),
+		headerValues: JoinHeaderValues(resp.Headers()),
+		respHead:     respHead,
+		request:      request,
 	})
 	m.batchMu.Unlock()
 
@@ -176,6 +196,10 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 		entryByFile[entries[i].filename] = &entries[i]
 	}
 
+	// Cache bodies read back from the temp dir so a file with several secrets is
+	// read only once.
+	bodyByFile := make(map[string][]byte)
+
 	var results []*output.ResultEvent
 	for i := range result.Findings {
 		f := &result.Findings[i]
@@ -187,32 +211,25 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 			continue
 		}
 
-		sev := severity.High
-		conf := severity.Firm
-		if f.IsValidated() {
-			sev = severity.Critical
-			conf = severity.Certain
-		}
+		sev, conf := SecretFindingSeverity(
+			f.IsValidated(),
+			IsRedirectStatus(entry.statusCode),
+			SnippetInHeaderValues(f.Snippet(), entry.headerValues),
+		)
 
-		results = append(results, &output.ResultEvent{
-			ModuleID: ModuleID,
-			Info: output.Info{
-				Name:        f.RuleName(),
-				Description: "Leaked secret detected: " + f.RuleID(),
-				Severity:    sev,
-				Confidence:  conf,
-				Tags:        []string{"secret", "credential", "exposure"},
-			},
-			Host:             entry.host,
-			URL:              entry.url,
-			Matched:          entry.url,
-			ExtractedResults: []string{f.Snippet()},
-			Metadata: map[string]any{
-				"rule_id":   f.RuleID(),
-				"rule_name": f.RuleName(),
-				"validated": f.IsValidated(),
-			},
-		})
+		// Reconstruct the matched response (head + full-or-windowed body) so the
+		// finding shows the actual leak in context. Read the body back from the
+		// temp file it was buffered to, caching per file.
+		body, cached := bodyByFile[basename]
+		if !cached {
+			body, _ = os.ReadFile(filepath.Join(dir, basename))
+			bodyByFile[basename] = body
+		}
+		response := BuildEvidenceResponse(entry.respHead, body, f.Snippet(), f.Finding.Line)
+
+		event := NewSecretFinding(f, sev, conf, entry.host, entry.url, entry.request, response)
+		event.ModuleID = ModuleID
+		results = append(results, event)
 	}
 
 	zap.L().Info("Kingfisher batch scan completed",

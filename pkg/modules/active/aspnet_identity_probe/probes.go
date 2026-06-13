@@ -22,7 +22,7 @@ var probes = []probe{
 	{
 		path:        "/connect/token",
 		name:        "Token Endpoint",
-		markers:     []string{"error", "invalid_client", "invalid_grant", "unsupported_grant_type"},
+		markers:     []string{"invalid_client", "invalid_grant", "unsupported_grant_type"},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "OAuth2/OIDC token endpoint accessible, may be susceptible to brute force or credential stuffing without rate limiting",
@@ -30,7 +30,7 @@ var probes = []probe{
 	{
 		path:        "/connect/authorize",
 		name:        "Authorization Endpoint",
-		markers:     []string{"client_id", "redirect_uri", "response_type", "error"},
+		markers:     []string{"client_id", "redirect_uri", "response_type"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "OAuth2/OIDC authorization endpoint detected, confirming IdentityServer/Duende deployment",
@@ -38,8 +38,8 @@ var probes = []probe{
 	{
 		path:        "/.well-known/openid-configuration/jwks",
 		name:        "JWKS Endpoint",
-		markers:     []string{"keys", "kty", "use", "kid"},
-		antiMarkers: []string{"404", "Not Found"},
+		markers:     []string{"\"kty\"", "\"kid\"", "\"n\":", "\"e\":"},
+		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Low,
 		desc:        "JSON Web Key Set endpoint exposed, revealing public signing keys used for token validation",
 	},
@@ -47,7 +47,7 @@ var probes = []probe{
 	{
 		path:        "/Identity/Account/Register",
 		name:        "Identity Register (Scaffolded)",
-		markers:     []string{"Register", "Email", "Password", "ConfirmPassword", "__RequestVerificationToken"},
+		markers:     []string{"__RequestVerificationToken", "ConfirmPassword"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Medium,
 		desc:        "ASP.NET Identity registration page publicly accessible, potentially allowing unauthorized account creation",
@@ -55,7 +55,7 @@ var probes = []probe{
 	{
 		path:        "/Identity/Account/Login",
 		name:        "Identity Login (Scaffolded)",
-		markers:     []string{"Log in", "Email", "Password", "RememberMe", "__RequestVerificationToken"},
+		markers:     []string{"__RequestVerificationToken", "RememberMe"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "ASP.NET Identity scaffolded login page detected, confirming Identity UI deployment",
@@ -63,7 +63,7 @@ var probes = []probe{
 	{
 		path:        "/Identity/Account/ForgotPassword",
 		name:        "Identity Password Reset",
-		markers:     []string{"Forgot", "Email", "password", "__RequestVerificationToken"},
+		markers:     []string{"__RequestVerificationToken", "ForgotPassword"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "ASP.NET Identity password reset page exposed, may enable email enumeration",
@@ -72,7 +72,7 @@ var probes = []probe{
 	{
 		path:        "/Account/Register",
 		name:        "MVC Register",
-		markers:     []string{"Register", "Email", "Password", "__RequestVerificationToken"},
+		markers:     []string{"__RequestVerificationToken", "ConfirmPassword"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Medium,
 		desc:        "ASP.NET MVC registration endpoint publicly accessible",
@@ -81,7 +81,7 @@ var probes = []probe{
 	{
 		path:        "/register",
 		name:        "Identity API Register",
-		markers:     []string{"email", "password", "errors", "title", "type"},
+		markers:     []string{"DuplicateUserName", "PasswordTooShort", "\"errors\":{", "InvalidEmail"},
 		antiMarkers: []string{"404", "Not Found", "<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
 		desc:        "ASP.NET Core Identity API registration endpoint accessible, may allow unauthorized account creation via API",

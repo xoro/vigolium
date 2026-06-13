@@ -1,9 +1,12 @@
 package base64_data_detect
 
 import (
+	"encoding/base64"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -22,7 +25,11 @@ import (
 //   - aHR0cHM6L = https://
 //   - aHR0cDo   = http:
 //   - rO0  = Java serialized object
-var base64Re = regexp.MustCompile(`([^A-Za-z0-9+/]|^)(eyJ|YTo|Tzo|PD[89]|aHR0cHM6L|aHR0cDo|rO0)[%a-zA-Z0-9+/]+={0,2}`)
+//
+// The trailing class accepts the URL-safe alphabet (- and _) in addition to the
+// standard one (+ /) and percent-encoding (%), so URL-safe blobs such as JWTs
+// and OIDC state parameters are captured whole rather than cut at the first - or _.
+var base64Re = regexp.MustCompile(`([^A-Za-z0-9+/]|^)(eyJ|YTo|Tzo|PD[89]|aHR0cHM6L|aHR0cDo|rO0)[%a-zA-Z0-9+/_-]+={0,2}`)
 
 var references = []string{
 	"https://portswigger.net/kb/issues/00700200_base64-encoded-data-in-parameter",
@@ -78,19 +85,17 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 			if !isMediaContentType(ct) {
 				if matches := findBase64Matches(body); len(matches) > 0 {
 					if rhm == nil || rhm.ShouldCheck3(urlx, ctx.Request().Method(), ctx.Request().BodyToString(), "", "", "b64-resp") {
+						extracted, preview := buildExtracted("response", matches)
 						results = append(results, &output.ResultEvent{
-							ModuleID: ModuleID,
-							Host:     urlx.Host,
-							URL:      urlx.String(),
-							Matched:  urlx.String(),
-							Request:  string(ctx.Request().Raw()),
-							ExtractedResults: append(
-								[]string{"Source: response"},
-								formatMatches(matches)...,
-							),
+							ModuleID:         ModuleID,
+							Host:             urlx.Host,
+							URL:              urlx.String(),
+							Matched:          urlx.String(),
+							Request:          string(ctx.Request().Raw()),
+							ExtractedResults: extracted,
 							Info: output.Info{
 								Name:        "Base64 Encoded Data in Response",
-								Description: "Interesting base64-encoded information discovered within the response. Manual review is recommended.",
+								Description: describeBase64("response", preview),
 								Reference:   references,
 								Tags:        []string{"base64", "encode", "interesting"},
 							},
@@ -106,19 +111,17 @@ func (m *Module) ScanPerRequest(ctx *httpmsg.HttpRequestResponse, scanCtx *modki
 		raw := string(ctx.Request().Raw())
 		if matches := findBase64Matches(raw); len(matches) > 0 {
 			if rhm == nil || rhm.ShouldCheck3(urlx, ctx.Request().Method(), ctx.Request().BodyToString(), "", "", "b64-req") {
+				extracted, preview := buildExtracted("request", matches)
 				results = append(results, &output.ResultEvent{
-					ModuleID: ModuleID,
-					Host:     urlx.Host,
-					URL:      urlx.String(),
-					Matched:  urlx.String(),
-					Request:  raw,
-					ExtractedResults: append(
-						[]string{"Source: request"},
-						formatMatches(matches)...,
-					),
+					ModuleID:         ModuleID,
+					Host:             urlx.Host,
+					URL:              urlx.String(),
+					Matched:          urlx.String(),
+					Request:          raw,
+					ExtractedResults: extracted,
 					Info: output.Info{
 						Name:        "Base64 Encoded Data in Request",
-						Description: "Interesting base64-encoded information discovered within the request. Manual review is recommended.",
+						Description: describeBase64("request", preview),
 						Reference:   references,
 						Tags:        []string{"base64", "encode", "interesting"},
 					},
@@ -140,8 +143,9 @@ func findBase64Matches(s string) []string {
 	seen := make(map[string]struct{}, len(allMatches))
 	var unique []string
 	for _, match := range allMatches {
-		// Trim leading non-base64 character from the match group
-		trimmed := strings.TrimLeft(match, " \t\r\n&?=;,\"'<>{}[]():/")
+		// Trim the single leading boundary character the regex captured before
+		// the prefix (anything that is not part of the base64/URL-safe alphabet).
+		trimmed := strings.TrimLeft(match, " \t\r\n&?=;,\"'<>{}[]():/-_")
 		if trimmed == "" {
 			continue
 		}
@@ -154,14 +158,106 @@ func findBase64Matches(s string) []string {
 	return unique
 }
 
-// formatMatches truncates and formats base64 matches for display.
-func formatMatches(matches []string) []string {
-	out := make([]string, 0, len(matches))
+// buildExtracted builds the ExtractedResults lines for a set of matches and
+// returns the first decoded value as a short preview. Each match yields a raw
+// line and, when the blob decodes to displayable text, an extra "(decoded)" line
+// so the plaintext appears directly in the finding.
+func buildExtracted(source string, matches []string) (extracted []string, preview string) {
+	extracted = make([]string, 0, len(matches)*2+1)
+	extracted = append(extracted, "Source: "+source)
 	for _, match := range matches {
 		prefix := identifyPrefix(match)
-		out = append(out, fmt.Sprintf("%s: %s", prefix, truncate(match, 80)))
+		extracted = append(extracted, fmt.Sprintf("%s: %s", prefix, modkit.Truncate(match, 80)))
+		decoded := decodeForDisplay(match)
+		if decoded == "" {
+			continue
+		}
+		decodedLine := modkit.Truncate(decoded, 200)
+		extracted = append(extracted, fmt.Sprintf("%s (decoded): %s", prefix, decodedLine))
+		if preview == "" {
+			preview = decodedLine
+		}
 	}
-	return out
+	return extracted, preview
+}
+
+// describeBase64 builds the per-finding description, appending a decoded preview
+// when one is available.
+func describeBase64(source, preview string) string {
+	desc := fmt.Sprintf("Interesting base64-encoded information discovered within the %s. Manual review is recommended.", source)
+	if preview != "" {
+		desc += " Decoded preview: " + preview
+	}
+	return desc
+}
+
+// decodeForDisplay decodes a base64 blob into a single-line, displayable string,
+// or returns "" when it can't be decoded to text (e.g. binary Java serialized
+// objects) so the finding only ever shows readable plaintext.
+func decodeForDisplay(match string) string {
+	decoded, ok := decodeBase64Blob(match)
+	if !ok {
+		return ""
+	}
+	collapsed := collapseWhitespace(decoded)
+	if !isDisplayableText(collapsed) {
+		return ""
+	}
+	return collapsed
+}
+
+// decodeBase64Blob best-effort decodes a base64 string, tolerating the standard
+// and URL-safe alphabets, percent-encoding, missing padding, and a tail the
+// matcher may have cut mid-group.
+func decodeBase64Blob(s string) (string, bool) {
+	candidate := s
+	if strings.Contains(candidate, "%") {
+		if unescaped, err := url.QueryUnescape(candidate); err == nil {
+			candidate = unescaped
+		}
+	}
+	candidate = strings.TrimRight(candidate, "=")
+	if candidate == "" {
+		return "", false
+	}
+	// Drop up to three trailing characters to realign a tail cut mid-group,
+	// trying both the standard and URL-safe alphabets on each attempt.
+	for trim := 0; trim < 4 && len(candidate) > trim; trim++ {
+		c := candidate[:len(candidate)-trim]
+		for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+			if decoded, err := enc.DecodeString(c); err == nil {
+				return string(decoded), true
+			}
+		}
+	}
+	return "", false
+}
+
+// collapseWhitespace flattens runs of whitespace to single spaces for one-line display.
+func collapseWhitespace(s string) string {
+	if !strings.ContainsAny(s, " \t\n\r\f\v") {
+		return s
+	}
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// isDisplayableText reports whether s is valid UTF-8 text safe to show inline,
+// rejecting binary blobs (e.g. Java serialized objects) and control-heavy data.
+func isDisplayableText(s string) bool {
+	if s == "" || !utf8.ValidString(s) {
+		return false
+	}
+	var ctrl, total int
+	for _, r := range s {
+		total++
+		if r == 0x00 {
+			return false
+		}
+		if (r < 0x20 && r != '\t' && r != '\n' && r != '\r') || r == 0x7f {
+			ctrl++
+		}
+	}
+	return total > 0 && float64(ctrl)/float64(total) < 0.1
 }
 
 // identifyPrefix returns a human-readable label for the base64 prefix.
@@ -194,12 +290,4 @@ func isMediaContentType(ct string) bool {
 		strings.Contains(ct, "audio/") ||
 		strings.Contains(ct, "video/") ||
 		strings.Contains(ct, "octet-stream")
-}
-
-// truncate returns the first n characters of s, appending "..." if truncated.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

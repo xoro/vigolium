@@ -166,6 +166,50 @@ function rawRequestToCurl(raw: string): string {
   return parts.join(" \\\n  ");
 }
 
+// Serialize a finding to a self-contained Markdown document for sharing.
+function findingToMarkdown(f: Finding): string {
+  const lines: string[] = [];
+  const title = f.module_short || f.module_name || f.module_id || "Finding";
+  lines.push(`# Finding #${f.id} — ${title}`, "");
+
+  const meta: [string, string | number | null | undefined][] = [
+    ["Severity", f.severity],
+    ["Confidence", f.confidence],
+    ["Status", f.status],
+    ["Module", f.module_name ? `${f.module_name}${f.module_id ? ` (\`${f.module_id}\`)` : ""}` : f.module_id],
+    ["Module Type", f.module_type],
+    ["Source", f.finding_source],
+    ["URL", f.url],
+    ["CWE", f.cwe_id],
+    ["CVSS", f.cvss_score && f.cvss_score > 0 ? f.cvss_score : null],
+    ["Repository", f.repo_name],
+    ["Source File", f.source_file],
+    ["Found At", f.found_at],
+    ["Finding Hash", f.finding_hash],
+  ];
+  for (const [k, v] of meta) {
+    if (v !== null && v !== undefined && v !== "") lines.push(`- **${k}:** ${v}`);
+  }
+  if (f.tags && f.tags.length) lines.push(`- **Tags:** ${f.tags.join(", ")}`);
+  if (f.http_record_uuids && f.http_record_uuids.length) lines.push(`- **HTTP Records:** ${f.http_record_uuids.join(", ")}`);
+
+  if (f.description) lines.push("", "## Description", "", f.description.trim());
+  if (f.remediation) lines.push("", "## Remediation", "", f.remediation.trim());
+  if (f.matched_at && f.matched_at.length) {
+    lines.push("", "## Matched At", "", ...f.matched_at.map((m) => `- ${m}`));
+  }
+  if (f.extracted_results && f.extracted_results.length) {
+    lines.push("", "## Extracted Results", "", ...f.extracted_results.map((r) => `- ${r}`));
+  }
+  if (f.request) lines.push("", "## Request", "", "```http", f.request.trim(), "```");
+  if (f.response) lines.push("", "## Response", "", "```http", f.response.trim(), "```");
+  if (f.additional_evidence && f.additional_evidence.length) {
+    lines.push("", "## Additional Evidence");
+    f.additional_evidence.forEach((e, i) => lines.push("", `### Evidence ${i + 1}`, "", "```", String(e).trim(), "```"));
+  }
+  return lines.join("\n") + "\n";
+}
+
 function CopyButton({ text, label, icon: Icon }: { text: string; label: string; icon: typeof Copy }) {
   const [copied, setCopied] = useState(false);
 
@@ -865,13 +909,16 @@ export default function FindingsTable({ data, httpRecords }: Props) {
           <div className="w-1/2 overflow-y-auto border border-warm-border rounded-md">
             <div className="flex items-center justify-between px-4 pt-3 pb-1 sticky top-0 bg-cream-dark/90 backdrop-blur-sm z-10">
               <span className="text-xs text-text-muted font-sans font-semibold uppercase tracking-wider">Finding Detail</span>
-              <button
-                onClick={() => setExpandedId(null)}
-                className="p-1 text-text-muted hover:text-charcoal transition-colors rounded hover:bg-warm-border/30"
-                aria-label="Close detail panel"
-              >
-                <X size={14} />
-              </button>
+              <div className="flex items-center gap-2">
+                <CopyButton text={findingToMarkdown(selectedFinding)} label="Copy Markdown" icon={Copy} />
+                <button
+                  onClick={() => setExpandedId(null)}
+                  className="p-1 text-text-muted hover:text-charcoal transition-colors rounded hover:bg-warm-border/30"
+                  aria-label="Close detail panel"
+                >
+                  <X size={14} />
+                </button>
+              </div>
             </div>
             <FindingDetail finding={selectedFinding} />
           </div>

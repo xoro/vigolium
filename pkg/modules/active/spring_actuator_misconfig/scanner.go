@@ -1,19 +1,15 @@
 package spring_actuator_misconfig
 
 import (
-	"crypto/md5"
-	"fmt"
 	"regexp"
 	"strings"
 
 	"github.com/pkg/errors"
-	urlutil "github.com/projectdiscovery/utils/url"
 	"github.com/vigolium/vigolium/pkg/dedup"
 	"github.com/vigolium/vigolium/pkg/http"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
-	"github.com/vigolium/vigolium/pkg/utils"
 )
 
 // testCase pairs a set of actuator paths to probe with a confirm predicate that
@@ -25,6 +21,9 @@ import (
 // telltale key:value pairing or co-occurring keys that only a real Spring Boot
 // Actuator endpoint emits.
 type testCase struct {
+	// Name is the canonical actuator endpoint slug (e.g. "env"), used to build the
+	// "actuator/<name>" suffix for reverse-proxy path-normalization bypass probing.
+	Name     string
 	Payloads []string
 	confirm  func(body string) bool
 }
@@ -76,35 +75,31 @@ func (m *Module) ScanPerRequest(
 		return nil, errors.Wrap(err, "failed to get URL")
 	}
 
-	paths := utils.SplitPathRecursive(urlx.Path)
-	if len(paths) == 0 {
-		return results, nil
-	}
-
+	// CandidateBasePaths yields the web root ("") plus each context-path prefix of
+	// the observed URL, so an actuator at the root (/actuator/env) is probed
+	// alongside one mounted under a context path (/api/actuator/env). The earlier
+	// SplitPathRecursive walk skipped the root — the most common Spring Boot
+	// layout — and was unbounded on deep URLs; CandidateBasePaths fixes both.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
+	host := urlx.Scheme + "|" + urlx.Host
 
-	for _, path := range paths {
-		if path == "/" || path == "" {
-			continue
-		}
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		path = strings.TrimSuffix(path, "/")
-
-		checksum := getChecksum(urlx, path)
-		if diskSet != nil && diskSet.IsSeen(checksum) {
-			continue
-		}
-
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	for _, path := range bases {
 		for _, testCase := range m.testCases {
+			blocked := false
+			hit := false
 			for _, payload := range testCase.Payloads {
 				// Build the new path with payload (the actuator endpoint under this
 				// directory) and probe it.
 				newPath := path + "/" + payload
 
-				rawReq, body, ok := m.fetchPathBody(ctx, httpClient, newPath)
+				rawReq, body, status, ok := m.fetchPathBody(ctx, httpClient, newPath)
 				if !ok || !testCase.Matches(body) {
+					// Remember a fronting-proxy block so we know the bypass is worth
+					// trying for this endpoint below.
+					if modkit.IsProxyBlockedStatus(status) {
+						blocked = true
+					}
 					continue
 				}
 
@@ -126,6 +121,7 @@ func (m *Module) ScanPerRequest(
 					continue
 				}
 
+				hit = true
 				results = append(results, &output.ResultEvent{
 					URL:              urlx.Scheme + "://" + urlx.Host + newPath,
 					Request:          rawReq,
@@ -133,14 +129,45 @@ func (m *Module) ScanPerRequest(
 					FuzzingParameter: path,
 				})
 			}
+
+			// Reverse-proxy path-normalization bypass: when a fronting proxy blocked
+			// the actuator endpoint (401/403/405) but did not already serve it, try
+			// the `..;/` family — multi-segment climbs scaled to the observed path
+			// depth plus URL-encoded separator/slash variants (%3b, %23, %2f, %252f).
+			// Once per host (web root present and first) so the extra requests only
+			// land on a host that is actually proxy-protecting actuator.
+			if path == "" && blocked && !hit && testCase.Name != "" {
+				tc := testCase
+				if res := modkit.ProbePathBypass(urlx.Path, "actuator/"+tc.Name, func(bypassPath string) *output.ResultEvent {
+					rawReq, body, _, ok := m.fetchPathBody(ctx, httpClient, bypassPath)
+					if !ok || !tc.Matches(body) {
+						return nil
+					}
+					if !modkit.ConfirmNotSoft404(scanCtx, httpClient, ctx, 200, []byte(body), "") {
+						return nil
+					}
+					// Seed Name/Tags from the module so the bypass annotation
+					// (appended by ProbePathBypass) yields a clean finding — this
+					// module otherwise leaves Info empty for the runner to fill, and
+					// assignModuleInfo only fills EMPTY fields.
+					return &output.ResultEvent{
+						URL:              urlx.Scheme + "://" + urlx.Host + bypassPath,
+						Request:          rawReq,
+						Response:         body,
+						FuzzingParameter: bypassPath,
+						Info: output.Info{
+							Name: m.Name(),
+							Tags: append([]string(nil), m.Tags()...),
+						},
+					}
+				}); res != nil {
+					results = append(results, res)
+				}
+			}
 		}
 	}
 
 	return results, nil
-}
-
-func getChecksum(urlx *urlutil.URL, path string) string {
-	return fmt.Sprintf("%x", md5.Sum([]byte(urlx.Scheme+"|"+urlx.Host+"|"+path)))
 }
 
 // fetchPathBody issues a GET to newPath, carrying the original request's headers
@@ -151,36 +178,40 @@ func (m *Module) fetchPathBody(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	newPath string,
-) (rawReq, body string, ok bool) {
+) (rawReq, body string, status int, ok bool) {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
-		return "", "", false
+		return "", "", 0, false
 	}
 	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, newPath)
 	if err != nil {
-		return "", "", false
+		return "", "", 0, false
 	}
 
 	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
 	if err != nil {
-		return "", "", false
+		return "", "", 0, false
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
-		return "", "", false
+		return "", "", 0, false
 	}
 	defer resp.Close()
 
-	if resp.Response() == nil || resp.Response().StatusCode != 200 {
-		return "", "", false
+	if resp.Response() == nil {
+		return "", "", 0, false
+	}
+	status = resp.Response().StatusCode
+	if status != 200 {
+		return "", "", status, false
 	}
 	if !m.contentTypeRegex.MatchString(resp.Response().Header.Get("Content-Type")) {
-		return "", "", false
+		return "", "", status, false
 	}
 
-	return string(modifiedRaw), resp.Body().String(), true
+	return string(modifiedRaw), resp.Body().String(), status, true
 }
 
 // siblingIsCatchAll probes a random, guaranteed-nonexistent sibling path under
@@ -197,7 +228,7 @@ func (m *Module) siblingIsCatchAll(
 	httpClient *http.Requester,
 ) bool {
 	siblingPath := parentPath + "/" + modkit.FreshCanary()
-	_, body, ok := m.fetchPathBody(ctx, httpClient, siblingPath)
+	_, body, _, ok := m.fetchPathBody(ctx, httpClient, siblingPath)
 	if !ok {
 		return false
 	}
@@ -234,7 +265,8 @@ func initTestCases() []*testCase {
 			// /env — Environment property dump. Always wrapped in the
 			// propertySources/activeProfiles envelope; require it plus a corroborating
 			// inner key so a config blob that merely mentions "server.port" is rejected.
-			Payloads: []string{"env", "..;/env", "..;xxx/env", "actuator/env", "..;/actuator/env", "..;xxx/actuator/env"},
+			Name:     "env",
+			Payloads: []string{"env", "actuator/env"},
 			confirm: func(b string) bool {
 				return strings.Contains(b, `"propertySources"`) &&
 					containsAny(b,
@@ -249,7 +281,8 @@ func initTestCases() []*testCase {
 		{
 			// /info — build & git metadata. Require the build or git block paired with
 			// one of its inner fields so a bare "build"/"git" word doesn't match.
-			Payloads: []string{"info", "..;/info", "..;xxx/info", "actuator/info", "..;/actuator/info", "..;xxx/actuator/info"},
+			Name:     "info",
+			Payloads: []string{"info", "actuator/info"},
 			confirm: func(b string) bool {
 				return (strings.Contains(b, `"build"`) && containsAny(b, `"artifact"`, `"version"`, `"group"`)) ||
 					(strings.Contains(b, `"git"`) && containsAny(b, `"commit"`, `"branch"`))
@@ -257,14 +290,16 @@ func initTestCases() []*testCase {
 		},
 		{
 			// /health — status enum. The {"status":"UP"} key:value pair is the anchor.
-			Payloads: []string{"health", "..;/health", "actuator/health", "..;/actuator/health"},
+			Name:     "health",
+			Payloads: []string{"health", "actuator/health"},
 			confirm:  func(b string) bool { return healthStatusRe.MatchString(b) },
 		},
 		{
 			// /metrics — names list or a single metric's measurements. Require a real
 			// dotted Micrometer metric id, or the measurements/availableTags envelope
 			// of a /metrics/{name} response.
-			Payloads: []string{"metrics", "..;/metrics", "actuator/metrics", "..;/actuator/metrics"},
+			Name:     "metrics",
+			Payloads: []string{"metrics", "actuator/metrics"},
 			confirm: func(b string) bool {
 				return metricNameRe.MatchString(b) ||
 					(strings.Contains(b, `"measurements"`) && containsAny(b, `"availableTags"`, `"statistic"`, `"baseUnit"`))
@@ -274,7 +309,8 @@ func initTestCases() []*testCase {
 			// /loggers — configured/effective levels. configuredLevel/effectiveLevel
 			// are essentially unique to the actuator loggers report; otherwise require
 			// the levels-enum array alongside the loggers map.
-			Payloads: []string{"loggers", "..;/loggers", "actuator/loggers", "..;/actuator/loggers"},
+			Name:     "loggers",
+			Payloads: []string{"loggers", "actuator/loggers"},
 			confirm: func(b string) bool {
 				return containsAny(b, `"configuredLevel"`, `"effectiveLevel"`) ||
 					(strings.Contains(b, `"levels"`) && strings.Contains(b, `"loggers"`))
@@ -285,7 +321,8 @@ func initTestCases() []*testCase {
 			// aliases under a contexts→beans tree. Require that structural co-occurrence
 			// so a page that merely contains the word "scope" (e.g. OAuth client scopes)
 			// is not mistaken for a bean dump.
-			Payloads: []string{"beans", "..;/beans", "actuator/beans", "..;/actuator/beans"},
+			Name:     "beans",
+			Payloads: []string{"beans", "actuator/beans"},
 			confirm: func(b string) bool {
 				return strings.Contains(b, `"beans"`) &&
 					containsAny(b, `"dependencies"`, `"aliases"`) &&
@@ -295,7 +332,8 @@ func initTestCases() []*testCase {
 		{
 			// /mappings — request mappings. dispatcherServlets / requestMappingConditions
 			// / requestMappingHandlerMapping are unique to the actuator mappings report.
-			Payloads: []string{"mappings", "..;/mappings", "actuator/mappings", "..;/actuator/mappings"},
+			Name:     "mappings",
+			Payloads: []string{"mappings", "actuator/mappings"},
 			confirm: func(b string) bool {
 				return containsAny(b, `"dispatcherServlets"`, `"requestMappingConditions"`, `"requestMappingHandlerMapping"`) ||
 					(strings.Contains(b, `"contexts"`) && strings.Contains(b, `"mappings"`))

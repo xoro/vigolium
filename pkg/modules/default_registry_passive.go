@@ -8,6 +8,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/aspnet_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/aspnet_viewstate_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/auth_headers_detect"
+	"github.com/vigolium/vigolium/pkg/modules/passive/baas_endpoint_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/base64_data_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/build_misconfig_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/cache_auth_misconfiguration"
@@ -25,6 +26,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/crypto_weakness_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/csp_weakness_audit"
 	"github.com/vigolium/vigolium/pkg/modules/passive/csrf_detect"
+	"github.com/vigolium/vigolium/pkg/modules/passive/dashboard_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/directory_listing_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/django_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/dom_xss_detect"
@@ -92,6 +94,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/passive/sql_syntax_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/ssr_data_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/passive/ssr_hydration_xss"
+	"github.com/vigolium/vigolium/pkg/modules/passive/subdomain_harvest"
 	"github.com/vigolium/vigolium/pkg/modules/passive/subresource_integrity_detect"
 	"github.com/vigolium/vigolium/pkg/modules/passive/symfony_fingerprint"
 	"github.com/vigolium/vigolium/pkg/modules/passive/unsafe_html_sink"
@@ -183,6 +186,11 @@ func registerPassiveModules(r *Registry) {
 	r.RegisterPassive(cloud_storage_url_harvest.New())
 	r.RegisterPassive(cloud_signed_url_leak.New())
 	r.RegisterPassive(cloud_storage_error_info.New())
+	// Recon Harvest - Passive (INFO): org subdomains + third-party backend services
+	r.RegisterPassive(subdomain_harvest.New())
+	r.RegisterPassive(baas_endpoint_fingerprint.New())
+	// Third-party dashboards / consoles / self-hosted apps - Passive (INFO)
+	r.RegisterPassive(dashboard_fingerprint.New())
 	// Laravel Security - Passive
 	r.RegisterPassive(laravel_fingerprint.New())
 	// Symfony - Passive

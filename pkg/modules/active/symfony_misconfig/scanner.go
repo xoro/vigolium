@@ -27,16 +27,21 @@ type probe struct {
 var probes = []probe{
 	// Web Profiler
 	{
-		path:    "/_profiler/",
-		name:    "Symfony Web Profiler",
-		markers: []string{"Symfony Profiler", "profiler", "sf-toolbar", "X-Debug-Token"},
+		path: "/_profiler/",
+		name: "Symfony Web Profiler",
+		// Strong, Symfony-unique markers only — the bare "profiler" slug is a
+		// segment of the probe path and reflects on any path-routing page.
+		markers: []string{"Symfony Profiler", "sf-toolbar", "X-Debug-Token"},
 		sev:     severity.High,
 		desc:    "Symfony web profiler exposed, revealing request/response details, routes, and environment configuration",
 	},
 	{
-		path:    "/_profiler/empty/search/results",
-		name:    "Symfony Profiler Search",
-		markers: []string{"profiler", "token", "results"},
+		path: "/_profiler/empty/search/results",
+		name: "Symfony Profiler Search",
+		// The page renders inside the profiler chrome — require its Symfony-unique
+		// markers rather than the bare "profiler"/"token"/"results" slugs, which are
+		// path segments (reflected) or generic words.
+		markers: []string{"sf-toolbar", "X-Debug-Token", "Symfony Profiler"},
 		sev:     severity.High,
 		desc:    "Symfony profiler search endpoint accessible, allowing enumeration of debug tokens",
 	},
@@ -44,7 +49,7 @@ var probes = []probe{
 	{
 		path:    "/_wdt/",
 		name:    "Symfony Web Debug Toolbar",
-		markers: []string{"sf-toolbar", "debug", "profiler", "Symfony"},
+		markers: []string{"sf-toolbar", "Symfony"},
 		sev:     severity.High,
 		desc:    "Symfony web debug toolbar exposed, leaking environment details and request information",
 	},
@@ -52,14 +57,14 @@ var probes = []probe{
 	{
 		path:    "/app_dev.php/",
 		name:    "Symfony Dev Front Controller",
-		markers: []string{"Symfony", "profiler", "sf-toolbar", "app_dev.php"},
+		markers: []string{"Symfony", "sf-toolbar"},
 		sev:     severity.High,
 		desc:    "Symfony development front controller (app_dev.php) accessible in production, enabling debug features",
 	},
 	{
 		path:    "/app_dev.php/_profiler/",
 		name:    "Symfony Dev Profiler",
-		markers: []string{"Symfony Profiler", "profiler", "sf-toolbar"},
+		markers: []string{"Symfony Profiler", "sf-toolbar"},
 		sev:     severity.High,
 		desc:    "Symfony development profiler accessible through app_dev.php",
 	},
@@ -174,9 +179,18 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
-	// Dedup by host
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// sub-directory CMS install (e.g. /blog/<file>) is reached, not just the root.
+	// Claim each (host, base) pair up front so a fully-deduped request issues no
+	// traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
@@ -184,9 +198,11 @@ func (m *Module) ScanPerRequest(
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeFile(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeFile(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 	return results, nil
@@ -243,13 +259,14 @@ func (m *Module) probeFile(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -302,6 +319,13 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Catch-all / shell guard: a body textually equivalent to the originally
+	// observed page means the app routed this sub-path back to its standard shell
+	// (a login wall, a landing page) — "the same body with or without the probe".
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	// Check anti-markers
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
@@ -314,10 +338,16 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Strip the reflected probe path before matching: several profiler probe slugs
+	// ("profiler", "results", "app_dev.php") are segments of their own path, so a
+	// page that echoes the requested URL (a breadcrumb, a JSON "path" field, a
+	// <form action>) would otherwise satisfy the marker on reflection alone.
+	matchBody := modkit.StripReflectedProbePath(body, probePath)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}
@@ -326,8 +356,16 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes,
+	// drop the finding if a nonexistent sibling under the same parent returns the
+	// same markers (a handler that 200s every child path). Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil
+	}
+
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,

@@ -36,6 +36,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/active/crlf_injection"
 	"github.com/vigolium/vigolium/pkg/modules/active/csrf_verify"
 	"github.com/vigolium/vigolium/pkg/modules/active/csti_detection"
+	"github.com/vigolium/vigolium/pkg/modules/active/dashboard_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/default_credentials"
 	"github.com/vigolium/vigolium/pkg/modules/active/django_admin_exposure"
 	"github.com/vigolium/vigolium/pkg/modules/active/django_browsable_api_exposure"
@@ -362,6 +363,8 @@ func registerActiveModules(r *Registry) {
 	// Active modules - API Spec Discovery & Ingestion
 	r.RegisterActive(api_spec_ingest.New())
 	r.RegisterActive(swagger_exposure.New())
+	// Active modules - Third-party dashboards / consoles / self-hosted apps
+	r.RegisterActive(dashboard_exposure.New())
 	// Active modules - Python/Django/Flask/FastAPI Security
 	r.RegisterActive(fastapi_docs_exposure.New())
 	r.RegisterActive(fastapi_auth_inconsistency.New())

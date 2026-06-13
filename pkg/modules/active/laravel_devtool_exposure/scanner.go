@@ -30,7 +30,7 @@ var probes = []probe{
 	{
 		path:    "/tinker",
 		name:    "Laravel Web Tinker",
-		markers: []string{"tinker", "Tinker", "REPL", "Execute", "spatie"},
+		markers: []string{"tinker", "Tinker", "web-tinker", "spatie"},
 		sev:     severity.Critical,
 		desc:    "Laravel Web Tinker (interactive PHP console) is publicly accessible, allowing arbitrary code execution",
 		refs:    []string{"https://github.com/spatie/laravel-web-tinker"},
@@ -38,7 +38,7 @@ var probes = []probe{
 	{
 		path:    "/web-tinker",
 		name:    "Laravel Web Tinker (alt)",
-		markers: []string{"tinker", "Tinker", "REPL", "Execute", "spatie"},
+		markers: []string{"tinker", "Tinker", "web-tinker", "spatie"},
 		sev:     severity.Critical,
 		desc:    "Laravel Web Tinker (interactive PHP console) is publicly accessible at alternate path",
 		refs:    []string{"https://github.com/spatie/laravel-web-tinker"},
@@ -47,7 +47,7 @@ var probes = []probe{
 	{
 		path:        "/__clockwork/latest",
 		name:        "Clockwork Profiling (latest)",
-		markers:     []string{"clockwork", "databaseQueries", "timelineData", "controller", "middleware"},
+		markers:     []string{"clockwork", "databaseQueries", "timelineData"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
 		desc:        "Clockwork profiling endpoint exposed, leaking database queries, routes, timings, and request data",
@@ -65,7 +65,7 @@ var probes = []probe{
 	{
 		path:        "/_clockwork/latest",
 		name:        "Clockwork Profiling (underscore)",
-		markers:     []string{"clockwork", "databaseQueries", "timelineData", "controller", "middleware"},
+		markers:     []string{"clockwork", "databaseQueries", "timelineData"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
 		desc:        "Clockwork profiling endpoint exposed at /_clockwork path",
@@ -84,7 +84,7 @@ var probes = []probe{
 	{
 		path:        "/pulse",
 		name:        "Laravel Pulse",
-		markers:     []string{"pulse", "Pulse", "laravel", "livewire"},
+		markers:     []string{"Laravel Pulse", "pulse-dashboard"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.Medium,
 		desc:        "Laravel Pulse monitoring dashboard is publicly accessible, revealing application performance data and server metrics",
@@ -103,7 +103,7 @@ var probes = []probe{
 	{
 		path:        "/log-viewer/api/logs",
 		name:        "Laravel Log Viewer API",
-		markers:     []string{"logs", "file", "level_counts", "laravel"},
+		markers:     []string{"level_counts", "log-viewer", "\"folders\":"},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
 		desc:        "Laravel Log Viewer API is publicly accessible, allowing programmatic access to application logs",
@@ -281,6 +281,12 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
 			return nil
@@ -291,10 +297,17 @@ func (m *Module) probeFile(
 		return nil
 	}
 
+	// Strip the reflected probe path before matching: the /tinker and /web-tinker
+	// markers ("tinker", "web-tinker") are the path slug itself, so a page echoing
+	// the requested path (a <form action>, an href, a JSON route name) would forge
+	// a Critical RCE finding. After the strip a marker only counts when it comes
+	// from the endpoint's own content.
+	matchBody := modkit.StripReflectedProbePath(body, p.path)
+
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}

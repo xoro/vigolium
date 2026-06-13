@@ -341,12 +341,18 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 		return
 	}
 
-	// Validate: JavaScript content-type, with a .js-extension fallback for
-	// bundles served as text/plain or application/octet-stream.
-	if !isJavaScriptContentType(resp.Header.Get("Content-Type")) && !hasJavaScriptExtension(jsURL) {
-		logger.Debug("JS returned non-JS content-type and lacks a JS extension",
+	// Validate: JavaScript or JSON content-type, with a .js/.json-extension
+	// fallback for assets served as text/plain or application/octet-stream. JSON
+	// is accepted because the JS-bundle sweep also harvests sibling config/data
+	// files (config.json, settings.json, …): jsscan no-ops on them, but
+	// linkfinder still extracts embedded paths and the file is recorded as an
+	// http_record (so secret-scanning and later phases see its body).
+	ct := resp.Header.Get("Content-Type")
+	if !isJavaScriptContentType(ct) && !isJSONContentType(ct) &&
+		!hasJavaScriptExtension(jsURL) && !hasJSONExtension(jsURL) {
+		logger.Debug("JS-fetch target is neither JavaScript nor JSON",
 			zap.String("url", item.URL),
-			zap.String("content-type", resp.Header.Get("Content-Type")))
+			zap.String("content-type", ct))
 		return
 	}
 
@@ -445,6 +451,13 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 		}
 	}
 
+	// SPA/PWA asset manifest or service worker: parse its asset list (lazy
+	// webpack chunks, workers) and fan the listed files back through the JSFetch
+	// pipeline so each is fetched and recorded. These chunk filenames are built
+	// at runtime and so are invisible to link extraction — the manifest is the
+	// only place they appear literally. Dispatches per framework by URL shape.
+	harvestSPAManifest(jsURL, body, cb)
+
 	// Call OnResult to create finding (always, regardless of path extraction)
 	if cb.OnResult != nil {
 		cb.OnResult(&Result{
@@ -464,6 +477,17 @@ func (c *PayloadCoordinator) executeJSFetchItem(
 func isJavaScriptContentType(ct string) bool {
 	ct = strings.ToLower(ct)
 	return strings.Contains(ct, "javascript") || strings.Contains(ct, "ecmascript")
+}
+
+// isJSONContentType checks if the content-type indicates JSON (application/json,
+// text/json, application/ld+json, …). "javascript" does not contain "json".
+func isJSONContentType(ct string) bool {
+	return strings.Contains(strings.ToLower(ct), "json")
+}
+
+// hasJSONExtension reports whether the URL path ends in .json.
+func hasJSONExtension(u *url.URL) bool {
+	return strings.HasSuffix(strings.ToLower(u.Path), ".json")
 }
 
 // triggerDiscoveryCallbacks invokes OnFileDiscovered or OnDirectoryDiscovered.

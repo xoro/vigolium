@@ -15,8 +15,8 @@ var (
 
 **Fix:** Place admin panels, API documentation, and GraphQL introspection behind authentication, IP allowlists, or disable them in production.`
 
-	ModuleConfirmation = "Confirmed when admin or documentation endpoints return 200 with expected framework-specific markers"
+	ModuleConfirmation = "Heuristic: an endpoint returns 200 with framework-specific markers that survive a reflected-path strip, is not a login wall, and is not the same shell served at the base path. Path-routing apps reflect the probe path back into the page, so this is reported Tentative and warrants manual confirmation."
 	ModuleSeverity     = severity.High
-	ModuleConfidence   = severity.Firm
+	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"laravel", "php", "info-disclosure", "probe", "light"}
 )

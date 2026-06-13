@@ -135,12 +135,19 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		// Root denied — probe common subpaths
+		// Root denied — probe common subpaths. Each readable subpath proves the SAME
+		// signal (this database has world-readable paths), so collapse them into ONE
+		// finding per database instead of writing an http_record per subpath; the
+		// extra readable paths ride along as inline evidence.
+		var subResults []*output.ResultEvent
 		for _, subpath := range rtdbSubpaths {
 			if result := m.probeRTDB(ctx, httpClient, dbURL, subpath, false); result != nil {
-				results = append(results, result)
+				subResults = append(subResults, result)
 			}
 		}
+		results = append(results, modkit.CollapseFindings(subResults, modkit.CollapseSpec{
+			Key: func(*output.ResultEvent) string { return dbURL },
+		})...)
 	}
 
 	return results, nil

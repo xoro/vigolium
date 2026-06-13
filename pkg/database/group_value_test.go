@@ -159,6 +159,69 @@ func TestGroupFindingsByValue_TagGate(t *testing.T) {
 	}
 }
 
+func TestGroupFindingsByValue_ByModule(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+	projectUUID := DefaultProjectUUID
+
+	// sourcemap-detect fires once per JS bundle, each with a DISTINCT extracted
+	// value (the .map filename). Listed in ByModule, all three collapse to one
+	// finding per (module, severity, host) despite the differing values.
+	survivor := insertValueFinding(t, db, ctx, projectUUID, "sourcemap-detect", "low", "app.x.com", "https://app.x.com/main.111.js", `["main.111.js.map"]`, `["sourcemap"]`)
+	_ = insertValueFinding(t, db, ctx, projectUUID, "sourcemap-detect", "low", "app.x.com", "https://app.x.com/polyfills.222.js", `["polyfills.222.js.map"]`, `["sourcemap"]`)
+	_ = insertValueFinding(t, db, ctx, projectUUID, "sourcemap-detect", "low", "app.x.com", "https://app.x.com/runtime.333.js", `["runtime.333.js.map"]`, `["sourcemap"]`)
+
+	// A higher-severity sourcemap finding (the .map file itself, full source) on
+	// the same host must NOT merge into the Low group — severity is in the key.
+	highMap := insertValueFinding(t, db, ctx, projectUUID, "sourcemap-detect", "high", "app.x.com", "https://app.x.com/main.111.js.map", `["src/secret.ts"]`, `["sourcemap","source-code"]`)
+
+	// Same module on a different host stays separate under PerHost.
+	otherHost := insertValueFinding(t, db, ctx, projectUUID, "sourcemap-detect", "low", "api.x.com", "https://api.x.com/app.444.js", `["app.444.js.map"]`, `["sourcemap"]`)
+
+	// A non-by-module module with distinct values must stay separate (sanity).
+	keepA := insertValueFinding(t, db, ctx, projectUUID, "secret-scan", "high", "app.x.com", "https://app.x.com/a", `["KEY-A"]`, `["secret"]`)
+	keepB := insertValueFinding(t, db, ctx, projectUUID, "secret-scan", "high", "app.x.com", "https://app.x.com/b", `["KEY-B"]`, `["secret"]`)
+
+	deleted, grouped, err := repo.GroupFindingsByValue(ctx, projectUUID, GroupFindingOptions{
+		PerHost:  true,
+		ByModule: []string{"sourcemap-detect"},
+		MaxURLs:  50,
+	})
+	if err != nil {
+		t.Fatalf("GroupFindingsByValue: %v", err)
+	}
+	if deleted != 2 {
+		t.Errorf("expected 2 deleted (the two extra Low sourcemap findings), got %d", deleted)
+	}
+	if grouped != 1 {
+		t.Errorf("expected 1 grouped, got %d", grouped)
+	}
+
+	var remaining []*Finding
+	if err := db.NewSelect().Model(&remaining).Scan(ctx); err != nil {
+		t.Fatalf("select remaining: %v", err)
+	}
+	survivors := map[int64]bool{survivor: true, highMap: true, otherHost: true, keepA: true, keepB: true}
+	if len(remaining) != len(survivors) {
+		t.Errorf("expected %d remaining findings, got %d", len(survivors), len(remaining))
+	}
+	for _, f := range remaining {
+		if !survivors[f.ID] {
+			t.Errorf("unexpected survivor: id=%d module=%s sev=%s host=%s", f.ID, f.ModuleID, f.Severity, f.Hostname)
+		}
+	}
+
+	// The Low survivor should span all three JS bundle URLs.
+	s := &Finding{}
+	if err := db.NewSelect().Model(s).Where("id = ?", survivor).Scan(ctx); err != nil {
+		t.Fatalf("select survivor: %v", err)
+	}
+	if len(s.MatchedAt) != 3 {
+		t.Fatalf("expected survivor to span 3 URLs, got %d: %v", len(s.MatchedAt), s.MatchedAt)
+	}
+}
+
 func TestGroupFindingsByValue_NoFindings(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)

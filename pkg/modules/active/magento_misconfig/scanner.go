@@ -22,106 +22,128 @@ import (
 var deployedVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type probe struct {
-	path        string
-	name        string
-	markers     []string
+	path string
+	name string
+	// markers is an AND-of-OR matcher: the body must contain at least one
+	// substring from EVERY group. A single weak word ("setup", "downloader",
+	// "admin") is never sufficient on its own — a probe fires only when a
+	// Magento-identity anchor co-occurs with a page-specific token, so a themed
+	// catch-all / SPA shell that merely happens to contain one of those words
+	// does not match. An empty markers slice means the probe is validated
+	// structurally in probeFile (see deployed_version.txt).
+	markers     [][]string
 	antiMarkers []string
 	sev         severity.Severity
+	conf        severity.Confidence
 	desc        string
 }
 
 var probes = []probe{
-	// Setup wizard (Magento 2)
+	// Setup wizard (Magento 2) — page-presence, Tentative
 	{
 		path:        "/setup/",
 		name:        "Magento Setup Wizard",
-		markers:     []string{"Magento", "setup", "installation", "Setup Wizard"},
+		markers:     [][]string{{"Magento"}, {"Setup Wizard", "Web Setup Wizard", "setup/index.php", "Component Manager", "ng-app"}},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
+		conf:        severity.Tentative,
 		desc:        "Magento setup wizard accessible in production, potentially allowing reconfiguration",
 	},
-	// Downloader (Magento 1.x)
+	// Downloader (Magento 1.x) — page-presence, Tentative
 	{
 		path:        "/downloader/",
 		name:        "Magento Downloader (Connect Manager)",
-		markers:     []string{"Magento", "downloader", "Magento Connect"},
+		markers:     [][]string{{"Magento"}, {"Connect Manager", "Magento Connect", "downloader/index.php", "Web Setup"}},
 		antiMarkers: []string{"404 Not Found"},
 		sev:         severity.High,
+		conf:        severity.Tentative,
 		desc:        "Magento Connect Manager (downloader) exposed, allowing extension installation",
 	},
-	// Version disclosure
+	// Version disclosure — page-presence, Tentative
 	{
 		path:        "/magento_version",
 		name:        "Magento Version File",
-		markers:     []string{"Magento", "Community", "Enterprise", "Commerce"},
+		markers:     [][]string{{"Magento/"}, {"Community", "Enterprise", "Commerce"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Low,
+		conf:        severity.Tentative,
 		desc:        "Magento version file exposed, revealing exact platform version",
 	},
 	{
 		path:        "/RELEASE_NOTES.txt",
 		name:        "Magento Release Notes",
-		markers:     []string{"Magento", "Release Notes", "Bug Fixes", "=="},
+		markers:     [][]string{{"Magento"}, {"Release Notes"}, {"Bug Fixes", "Highlights", "Fixed"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Low,
+		conf:        severity.Tentative,
 		desc:        "Magento release notes file exposed, revealing platform version details",
 	},
 	// Exposed configuration
 	{
 		path:        "/app/etc/local.xml",
 		name:        "Magento 1.x Configuration",
-		markers:     []string{"<config", "connection", "crypt", "<key>", "dbname"},
+		markers:     [][]string{{"<config"}, {"<connection", "<dbname", "<crypt", "<key>", "<resources"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
+		conf:        severity.Firm,
 		desc:        "Magento 1.x local.xml configuration exposed, containing database credentials and encryption key",
 	},
 	{
 		path:        "/app/etc/env.php",
 		name:        "Magento 2.x Environment Config",
-		markers:     []string{"<?php", "db", "password", "key", "crypt"},
+		markers:     [][]string{{"<?php"}, {"'db'", "'crypt'", "'key'", "'connection'", "'dbname'", "'backend'"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Critical,
+		conf:        severity.Firm,
 		desc:        "Magento 2.x env.php configuration exposed, containing database credentials and encryption key",
 	},
 	{
 		path:        "/app/etc/config.php",
 		name:        "Magento 2.x Module Config",
-		markers:     []string{"<?php", "modules", "Magento_"},
+		markers:     [][]string{{"<?php"}, {"'modules'", "Magento_"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
+		conf:        severity.Firm,
 		desc:        "Magento 2.x config.php exposed, revealing installed modules and their status",
 	},
-	// Admin paths
+	// Admin paths — page-presence, Tentative
 	{
-		path:    "/admin/",
-		name:    "Magento Admin (default)",
-		markers: []string{"Magento", "admin", "login", "Dashboard"},
-		sev:     severity.Medium,
-		desc:    "Magento admin panel accessible at default path /admin/, should be moved to a custom URL",
+		path: "/admin/",
+		name: "Magento Admin (default)",
+		markers: [][]string{
+			{"Magento"},
+			{"Dashboard", "Username", "Sign in to Admin", "adminhtml", "login-form", "Welcome, please sign in"},
+		},
+		sev:  severity.Medium,
+		conf: severity.Tentative,
+		desc: "Magento admin panel accessible at default path /admin/, should be moved to a custom URL",
 	},
 	// Error log
 	{
 		path:        "/var/log/exception.log",
 		name:        "Magento Exception Log",
-		markers:     []string{"Exception", "Stack trace", "Magento\\", "#0"},
+		markers:     [][]string{{"main.CRITICAL", "main.ERROR", "report.CRITICAL", "Exception"}, {"Magento\\", "Stack trace", "#0 ", "vendor/magento"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
+		conf:        severity.Firm,
 		desc:        "Magento exception log exposed, revealing stack traces and internal application details",
 	},
 	{
 		path:        "/var/log/system.log",
 		name:        "Magento System Log",
-		markers:     []string{"main.INFO", "main.ERROR", "main.WARNING", "main.CRITICAL"},
+		markers:     [][]string{{"main.INFO", "main.ERROR", "main.WARNING", "main.CRITICAL"}, {"Magento", "report.", "] [] []", "cron"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
+		conf:        severity.Firm,
 		desc:        "Magento system log exposed, revealing application errors and operational details",
 	},
 	{
 		path:        "/var/log/debug.log",
 		name:        "Magento Debug Log",
-		markers:     []string{"DEBUG", "cache", "Magento\\"},
+		markers:     [][]string{{"main.DEBUG", "DEBUG:"}, {"Magento\\", "] [] []", "cache", "vendor/magento"}},
 		antiMarkers: []string{"<html", "<!DOCTYPE"},
 		sev:         severity.Medium,
+		conf:        severity.Firm,
 		desc:        "Magento debug log exposed, revealing detailed application debugging information",
 	},
 	// Static version endpoint
@@ -131,9 +153,10 @@ var probes = []probe{
 		// No substring marker: the file holds a bare version token (a Unix
 		// timestamp or build hash), validated structurally in probeFile. The
 		// previous "." marker matched every non-empty body.
-		markers:     []string{},
+		markers:     nil,
 		antiMarkers: []string{"<html", "<!DOCTYPE", "404 Not Found"},
 		sev:         severity.Info,
+		conf:        severity.Tentative,
 		desc:        "Magento deployed version file accessible, confirming Magento installation",
 	},
 }
@@ -196,9 +219,18 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
-	// Dedup by host
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// sub-directory Magento install (e.g. /store/<file>) is reached, not just the
+	// root. Claim each (host, base) pair up front so a fully-deduped request issues
+	// no traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
@@ -206,9 +238,11 @@ func (m *Module) ScanPerRequest(
 	fp := m.fingerprint404(ctx, httpClient)
 
 	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeFile(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
+	for _, base := range bases {
+		for _, p := range probes {
+			if result := m.probeFile(ctx, httpClient, p, base+p.path, fp); result != nil {
+				results = append(results, result)
+			}
 		}
 	}
 	return results, nil
@@ -265,13 +299,14 @@ func (m *Module) probeFile(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
 		return nil
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
 		return nil
 	}
@@ -324,6 +359,12 @@ func (m *Module) probeFile(
 		}
 	}
 
+	// Catch-all / SPA shell guard: a themed app that returns the same shell for
+	// any path is a false positive even when a weak marker appears in that shell.
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil
+	}
+
 	// Check anti-markers
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
@@ -331,52 +372,67 @@ func (m *Module) probeFile(
 		}
 	}
 
-	// Require status 200 and at least one marker match
+	// Require status 200 before any content match.
 	if status != 200 {
 		return nil
 	}
 
-	matched := false
-	var matchedMarkers []string
+	// Markerless probes need structural validation, not substring matching.
 	if len(p.markers) == 0 {
-		// Markerless probes need structural validation, not substring matching.
-		switch p.path {
-		case "/static/deployed_version.txt":
-			trimmed := strings.TrimSpace(body)
-			if len(trimmed) == 0 || len(trimmed) > 64 || !deployedVersionPattern.MatchString(trimmed) {
-				return nil
-			}
-			matched = true
-			matchedMarkers = append(matchedMarkers, "deployed version: "+trimmed)
-		default:
+		matchedMarkers := m.matchMarkerless(p, body)
+		if matchedMarkers == nil {
 			return nil
 		}
-	} else {
-		for _, marker := range p.markers {
-			if strings.Contains(body, marker) {
-				matched = true
-				matchedMarkers = append(matchedMarkers, marker)
-			}
-		}
-	}
-	if !matched {
-		return nil
+		return m.buildResult(ctx, p, probePath, string(modifiedRaw), resp.FullResponseString(), matchedMarkers)
 	}
 
+	// Require the full co-occurrence marker set (AND across groups).
+	// MatchAndConfirmSibling also drops the finding when a guaranteed-nonexistent
+	// sibling under the same parent returns the same markers — a sub-directory
+	// catch-all the root soft-404 fingerprint cannot see.
+	matchedMarkers, ok := modkit.MatchAndConfirmSibling(ctx, httpClient, probePath, body, p.markers)
+	if !ok {
+		return nil
+	}
+	return m.buildResult(ctx, p, probePath, string(modifiedRaw), resp.FullResponseString(), matchedMarkers)
+}
+
+// matchMarkerless validates a markerless probe structurally, returning the
+// evidence to attach or nil when the body does not fit the expected shape.
+func (m *Module) matchMarkerless(p probe, body string) []string {
+	switch p.path {
+	case "/static/deployed_version.txt":
+		trimmed := strings.TrimSpace(body)
+		if len(trimmed) == 0 || len(trimmed) > 64 || !deployedVersionPattern.MatchString(trimmed) {
+			return nil
+		}
+		return []string{"deployed version: " + trimmed}
+	default:
+		return nil
+	}
+}
+
+// buildResult assembles the finding for a confirmed probe hit.
+func (m *Module) buildResult(
+	ctx *httpmsg.HttpRequestResponse,
+	p probe,
+	probePath, requestRaw, responseRaw string,
+	matchedMarkers []string,
+) *output.ResultEvent {
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,
 		Matched:          targetURL,
-		Request:          string(modifiedRaw),
-		Response:         resp.FullResponseString(),
+		Request:          requestRaw,
+		Response:         responseRaw,
 		ExtractedResults: matchedMarkers,
 		Info: output.Info{
 			Name:        fmt.Sprintf("Magento Misconfiguration: %s", p.name),
 			Description: p.desc,
 			Severity:    p.sev,
-			Confidence:  ModuleConfidence,
+			Confidence:  p.conf,
 			Tags:        []string{"php", "magento", "misconfiguration"},
 			Reference:   []string{"https://experienceleague.adobe.com/docs/commerce-operations/configuration-guide/overview.html"},
 		},

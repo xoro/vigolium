@@ -95,66 +95,70 @@ func (m *Module) ScanPerRequest(
 		if !ok || pBlocked || !is2xx(pStatus) {
 			continue
 		}
-		marker := firstMarker(pBody, tgt.Markers)
-		if marker == "" {
+		// A real metadata endpoint answers with a plain (non-HTML) body carrying a
+		// cluster of distinct self-evidencing tokens; one common word like "hostname"
+		// echoed by the app's own HTML page is not evidence.
+		markers, ok := infra.ConfirmFreshMetadata(pBody, "", tgt.Markers)
+		if !ok {
 			continue
 		}
 
-		// (2) Control WITHOUT the upgrade handshake. If the marker is present here
+		// (2) Control WITHOUT the upgrade handshake. If the markers are present here
 		// too, this is a plain request-line routing SSRF (routing-ssrf reports it) —
 		// not an upgrade bypass — so we must NOT double-report it.
 		cStatus, cBody, cResp, cBlocked, ok2, _ := m.fire(httpClient, service, baseRaw, target, tgt.ExtraHeaders)
 		if !ok2 {
 			continue // cannot establish the control → fail closed
 		}
-		if !cBlocked && is2xx(cStatus) && containsFold(cBody, marker) {
-			continue // marker present without upgrade → not an upgrade bypass
+		if !cBlocked && is2xx(cStatus) && infra.BodyContainsAllMarkers(cBody, markers) {
+			continue // markers present without upgrade → not an upgrade bypass
 		}
 
 		// (3) Reproduce the upgrade-only behaviour to reject per-request noise.
 		ev := modkit.NewEvidenceCollector()
 		ev.Add("with-upgrade (candidate)", displayRequest(baseRaw, target, true), pResp)
 		ev.Add("without-upgrade (control)", displayRequest(baseRaw, target, false), cResp)
-		if !m.reproduce(httpClient, service, baseRaw, target, tgt, marker, ev) {
+		if !m.reproduce(httpClient, service, baseRaw, target, tgt, markers, ev) {
 			continue
 		}
 
+		markerList := strings.Join(markers, ", ")
 		desc := fmt.Sprintf(
-			"WebSocket-upgrade SSRF bypass: the proxy reached %s (marker %q) only when the request carried Connection: Upgrade / Upgrade: websocket — the same request without the upgrade handshake did not. The connection and Host header named the victim.",
-			tgt.Label, marker,
+			"WebSocket-upgrade SSRF bypass: the proxy reached %s (markers %s) only when the request carried Connection: Upgrade / Upgrade: websocket — the same request without the upgrade handshake did not. The response is a plain metadata body (not the app's HTML page), and the connection and Host header named the victim.",
+			tgt.Label, markerList,
 		)
 		return []*output.ResultEvent{{
 			URL:                urlx.String(),
 			Request:            displayRequest(baseRaw, target, true),
 			Response:           pResp,
 			FuzzingParameter:   "request-line+upgrade",
-			ExtractedResults:   []string{target, tgt.Label, "marker=" + marker, "bypass=Connection: Upgrade"},
+			ExtractedResults:   []string{target, tgt.Label, "markers=" + markerList, "bypass=Connection: Upgrade"},
 			AdditionalEvidence: ev.Entries(),
 			Info: output.Info{
 				Name:        "WebSocket-Upgrade SSRF Filter Bypass",
 				Description: desc,
 				Severity:    severity.High,
-				Confidence:  severity.Firm,
+				Confidence:  severity.Tentative,
 			},
 		}}, nil
 	}
 	return nil, nil
 }
 
-// reproduce re-sends the with-upgrade probe confirmRounds times; the marker must
-// reappear on a 2xx, non-blocked response every time.
+// reproduce re-sends the with-upgrade probe confirmRounds times; the same marker
+// cluster must reappear on a 2xx, non-blocked, non-HTML response every time.
 func (m *Module) reproduce(
 	httpClient *http.Requester,
 	service *httpmsg.Service,
 	baseRaw []byte,
 	target string,
 	tgt infra.SSRFInternalTarget,
-	marker string,
+	markers []string,
 	ev *modkit.EvidenceCollector,
 ) bool {
 	for i := 0; i < confirmRounds; i++ {
 		status, body, resp, blocked, ok, fatal := m.fire(httpClient, service, baseRaw, target, withUpgrade(tgt.ExtraHeaders))
-		if fatal || !ok || blocked || !is2xx(status) || !containsFold(body, marker) {
+		if fatal || !ok || blocked || !is2xx(status) || !infra.MetadataBodyReproduces(body, markers) {
 			return false
 		}
 		ev.Add(fmt.Sprintf("reproduce-%d", i+1), displayRequest(baseRaw, target, true), resp)
@@ -215,19 +219,6 @@ func withUpgrade(extra map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func firstMarker(body string, markers []string) string {
-	for _, mk := range markers {
-		if containsFold(body, mk) {
-			return mk
-		}
-	}
-	return ""
-}
-
-func containsFold(haystack, needle string) bool {
-	return strings.Contains(strings.ToLower(haystack), strings.ToLower(needle))
 }
 
 func is2xx(status int) bool { return status >= 200 && status < 300 }

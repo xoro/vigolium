@@ -159,6 +159,18 @@ type Engine struct {
 	// startURLHeader is a snapshot of the start URL's response headers, captured
 	// during probeStartURL for fingerprint-based extension confirmation.
 	startURLHeader nethttp.Header
+	// startURLIsHTML / startURLIsModernApp capture the start page's shape for the
+	// JS-bundle sweep, which runs only on an HTML, non-SPA landing page (SPA
+	// bundles are content-hashed and unguessable). observedJSDirs collects the
+	// app's real JS mount directories seen while crawling the start page, so the
+	// sweep probes them in addition to root + the start directory. Guarded
+	// because queueJSFetch is also called from concurrent spider workers.
+	// See js_bundle_sweep.go.
+	startURLIsHTML         bool
+	startURLIsModernApp    bool
+	observedJSDirs         map[string]struct{}
+	observedJSDirsMu       sync.Mutex
+	observedJSDirsConsumed atomic.Bool // set once the start-of-scan sweep has read observedJSDirs
 
 	// Module system
 	moduleRegistry *module.Registry
@@ -695,6 +707,7 @@ func (e *Engine) newCallbacks() *Callbacks {
 		OnResult:              e.onResult,
 		AddObservedName:       e.AddObservedNameTrusted,
 		AddObservedPath:       e.AddObservedPathTrusted,
+		QueueJSFetch:          func(urls []*url.URL) { e.queueJSFetch(urls, 0) },
 		HTTPClient:            e.httpClient,
 		Analyzer:              e.analyzer,
 		RedirectDetector:      NewRedirectDetector(),

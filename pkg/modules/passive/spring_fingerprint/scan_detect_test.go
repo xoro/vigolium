@@ -69,3 +69,26 @@ func TestScanPerRequest_NoSpring(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, results)
 }
+
+// TestScanPerRequest_BareTomcatNoSpring verifies a plain servlet container
+// (Tomcat) with no Spring-specific signal is NOT fingerprinted as Spring —
+// generic Java is java_server_fingerprint's job.
+func TestScanPerRequest_BareTomcatNoSpring(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx("Server: Apache-Coyote/1.1\r\n", "text/html", "<html><body>Hello</body></html>")
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "bare Tomcat must not fingerprint Spring")
+}
+
+// TestScanPerRequest_JSessionIdNoSpring verifies a JSESSIONID cookie (generic
+// servlet container) alone is NOT fingerprinted as Spring.
+func TestScanPerRequest_JSessionIdNoSpring(t *testing.T) {
+	t.Parallel()
+	m := New()
+	ctx := makeHTTPCtx("Set-Cookie: JSESSIONID=ABC123; Path=/\r\n", "text/html", "<html><body>Hello</body></html>")
+	results, err := m.ScanPerRequest(ctx, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, results, "JSESSIONID alone must not fingerprint Spring")
+}

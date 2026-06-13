@@ -137,6 +137,12 @@ type DiscoveryExtensionConfig struct {
 	ConfirmViaProbe       *bool    `yaml:"confirm_via_probe"`       // confirm via active soft-404 differential probe; nil = true
 	Candidates            []string `yaml:"candidates"`              // candidate extensions (no dot); empty = built-in
 	ProbeFilenames        []string `yaml:"probe_filenames"`         // probe base names; empty = built-in
+
+	// SPA-gated JS-bundle name sweep: probe common JS bundle names (main.js,
+	// admin.js, config.js, …) on monolith / server-rendered apps and feed hits
+	// to jsscan. Skipped on JS-shell SPAs (content-hashed, unguessable bundles).
+	JSBundleSweep *bool    `yaml:"js_bundle_sweep"` // nil = default (true)
+	JSBundleNames []string `yaml:"js_bundle_names"` // override curated names; empty = built-in
 }
 
 // DiscoveryEngineConfig controls discovery execution settings.

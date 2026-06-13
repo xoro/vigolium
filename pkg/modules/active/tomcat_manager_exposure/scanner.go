@@ -28,6 +28,7 @@ type probe struct {
 	sev         severity.Severity
 	desc        string
 	detect401   bool // if true, also detect 401 with WWW-Authenticate as Tomcat
+	bypass      bool // if true, also probe reverse-proxy path-normalization bypasses
 }
 
 var probes = []probe{
@@ -39,6 +40,7 @@ var probes = []probe{
 		sev:         severity.Critical,
 		desc:        "Tomcat Manager web interface is accessible, enabling WAR deployment and application management. Brute-force or default credentials may lead to full server compromise",
 		detect401:   true,
+		bypass:      true,
 	},
 	{
 		path:        "/host-manager/html",
@@ -48,6 +50,7 @@ var probes = []probe{
 		sev:         severity.Critical,
 		desc:        "Tomcat Host Manager is accessible, enabling virtual host manipulation. Combined with default credentials, this can lead to server compromise",
 		detect401:   true,
+		bypass:      true,
 	},
 	{
 		path:        "/manager/status",
@@ -57,11 +60,12 @@ var probes = []probe{
 		sev:         severity.Medium,
 		desc:        "Tomcat server status page exposed, revealing JVM information, connector details, and thread usage",
 		detect401:   true,
+		bypass:      true,
 	},
 	{
 		path:        "/examples/",
 		name:        "Tomcat Examples",
-		markers:     []string{"Servlet Examples", "JSP Examples", "WebSocket Examples", "examples"},
+		markers:     []string{"Servlet Examples", "JSP Examples", "WebSocket Examples"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Low,
 		desc:        "Tomcat example servlets are deployed, indicating incomplete hardening. Example apps may contain known vulnerabilities",
@@ -69,7 +73,7 @@ var probes = []probe{
 	{
 		path:        "/docs/",
 		name:        "Tomcat Documentation",
-		markers:     []string{"Apache Tomcat", "Documentation Index", "tomcat"},
+		markers:     []string{"Apache Tomcat", "Documentation Index"},
 		antiMarkers: []string{"404", "Not Found"},
 		sev:         severity.Info,
 		desc:        "Tomcat documentation pages are deployed, revealing server version and indicating incomplete hardening",
@@ -124,19 +128,34 @@ func (m *Module) ScanPerRequest(
 
 	host := service.Host()
 
+	urlx, err := ctx.URL()
+	if err != nil {
+		return nil, nil
+	}
+
+	// Walk the web root plus any context-path prefixes of the observed URL so a
+	// manager app mounted under a non-root path is reached, not just /manager.
+	// Claim each (host, base) pair up front so a fully-deduped request issues no
+	// traffic — including the soft-404 fingerprint.
 	diskSet := m.ds.Get(scanCtx.DedupMgr())
-	if diskSet != nil && diskSet.IsSeen(host) {
+	bases := modkit.UnclaimedBasePaths(diskSet, host, modkit.CandidateBasePaths(urlx.Path))
+	if len(bases) == 0 {
 		return nil, nil
 	}
 
 	fp := m.fingerprint404(ctx, httpClient)
 
-	var results []*output.ResultEvent
-	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
-			results = append(results, result)
-		}
-	}
+	// Walk the bases and, once per host, fall back to the reverse-proxy path-
+	// normalization bypass for any bypass-eligible admin endpoint the direct root
+	// probe found blocked. The shared driver owns the status/hit bookkeeping and
+	// the once-per-host + blocked-status gating.
+	results := modkit.DriveProbesWithBypass(bases, probes, urlx.Path,
+		func(p probe) string { return p.name },
+		func(p probe) string { return p.path },
+		func(p probe) bool { return p.bypass },
+		func(p probe, probePath string) (*output.ResultEvent, int) {
+			return m.probeEndpoint(ctx, httpClient, p, probePath, fp)
+		})
 
 	return results, nil
 }
@@ -179,31 +198,32 @@ func (m *Module) probeEndpoint(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	p probe,
+	probePath string,
 	fp *notFoundFingerprint,
-) *output.ResultEvent {
+) (*output.ResultEvent, int) {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "GET")
 	if err != nil {
-		return nil
+		return nil, 0
 	}
-	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, p.path)
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, probePath)
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 
 	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
-		return nil
+		return nil, 0
 	}
 	defer resp.Close()
 
 	if resp.Response() == nil {
-		return nil
+		return nil, 0
 	}
 
 	status := resp.Response().StatusCode
@@ -213,7 +233,7 @@ func (m *Module) probeEndpoint(
 		wwwAuth := resp.Response().Header.Get("WWW-Authenticate")
 		if strings.Contains(wwwAuth, "Tomcat") || strings.Contains(wwwAuth, "tomcat") {
 			urlx, _ := ctx.URL()
-			targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+			targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 			return &output.ResultEvent{
 				URL:              targetURL,
 				Matched:          targetURL,
@@ -228,18 +248,18 @@ func (m *Module) probeEndpoint(
 					Tags:        []string{"tomcat", "java", "admin", "misconfiguration"},
 					Reference:   []string{"https://tomcat.apache.org/tomcat-10.1-doc/security-howto.html"},
 				},
-			}
+			}, status
 		}
 	}
 
 	if status == 404 || status == 500 || status == 502 || status == 503 || status == 403 || status == 401 {
-		return nil
+		return nil, status
 	}
 
 	if status == 301 || status == 302 {
 		location := resp.Response().Header.Get("Location")
 		if strings.Contains(strings.ToLower(location), "login") || strings.Contains(strings.ToLower(location), "user") {
-			return nil
+			return nil, status
 		}
 	}
 
@@ -248,40 +268,59 @@ func (m *Module) probeEndpoint(
 	if fp != nil {
 		bodyHash := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
 		if bodyHash == fp.bodyHash {
-			return nil
+			return nil, status
 		}
 		if fp.bodyLen > 0 {
 			ratio := math.Abs(float64(len(body)-fp.bodyLen)) / float64(fp.bodyLen)
 			if ratio < 0.05 {
-				return nil
+				return nil, status
 			}
 		}
 	}
 
+	// Catch-all / shell guard: a body textually equivalent to the originally
+	// observed page means the app served its standard shell for this path —
+	// "the same body with or without the probe".
+	if modkit.ResemblesObservedPage(ctx, body) {
+		return nil, status
+	}
+
 	for _, anti := range p.antiMarkers {
 		if strings.Contains(body, anti) {
-			return nil
+			return nil, status
 		}
 	}
 
 	if status != 200 {
-		return nil
+		return nil, status
 	}
+
+	// Strip the reflected probe path before matching so a marker that is also the
+	// path slug ("examples" for /examples/) can't match on a reflected href alone.
+	matchBody := modkit.StripReflectedProbePath(body, probePath)
 
 	matched := false
 	var matchedMarkers []string
 	for _, marker := range p.markers {
-		if strings.Contains(body, marker) {
+		if strings.Contains(matchBody, marker) {
 			matched = true
 			matchedMarkers = append(matchedMarkers, marker)
 		}
 	}
 	if !matched {
-		return nil
+		return nil, status
+	}
+
+	// Sub-directory catch-all guard: now that we probe under context-path prefixes,
+	// drop the finding if a nonexistent sibling under the same parent returns the
+	// same markers (a handler that 200s every child path). Root-level probes are
+	// already covered by the random-path 404 fingerprint above.
+	if modkit.SiblingServesAnyMarker(ctx, httpClient, probePath, p.markers) {
+		return nil, status
 	}
 
 	urlx, _ := ctx.URL()
-	targetURL := urlx.Scheme + "://" + urlx.Host + p.path
+	targetURL := urlx.Scheme + "://" + urlx.Host + probePath
 
 	return &output.ResultEvent{
 		URL:              targetURL,
@@ -297,5 +336,5 @@ func (m *Module) probeEndpoint(
 			Tags:        []string{"tomcat", "java", "admin", "misconfiguration"},
 			Reference:   []string{"https://tomcat.apache.org/tomcat-10.1-doc/security-howto.html"},
 		},
-	}
+	}, status
 }

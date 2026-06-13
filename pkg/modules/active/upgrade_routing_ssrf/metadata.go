@@ -15,8 +15,8 @@ var (
 
 **Fix:** Reject or strip Upgrade/Connection handshake headers on non-WebSocket routes, validate the request-line target after upgrade parsing, and block proxy egress to internal and link-local address ranges.`
 
-	ModuleConfirmation = "Confirmed when an internal/metadata marker appears only with the WebSocket upgrade headers present (absent without them), reproduces, and the response is not a block page."
+	ModuleConfirmation = "Reported (Tentative) when a plain (non-HTML) metadata body carrying several distinct self-evidencing tokens appears only with the WebSocket upgrade headers present (absent without them), reproduces, and is not a block page."
 	ModuleSeverity     = severity.High
-	ModuleConfidence   = severity.Firm
+	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"ssrf", "proxy", "websocket", "upgrade", "request-line", "heavy"}
 )

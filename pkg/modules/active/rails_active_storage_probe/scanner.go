@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	httputil "github.com/projectdiscovery/utils/http"
@@ -17,19 +18,6 @@ import (
 	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
-
-// railsBodyMarkers are genuine Rails framework references. They corroborate an
-// OPTIONS finding (they never gate it) and confirm the GET blob-route finding.
-// Matched against the echo-stripped body so a reflected request path can't forge
-// them — the probe paths themselves contain "active_storage"/"action_mailbox".
-var railsBodyMarkers = []string{
-	"ActiveStorage",
-	"Active Storage",
-	"ActionMailbox",
-	"Action Mailbox",
-	"ActionDispatch",
-	"ActionController",
-}
 
 type notFoundFingerprint struct {
 	bodyHash string
@@ -101,7 +89,7 @@ func (m *Module) ScanPerRequest(
 
 	var results []*output.ResultEvent
 	for _, p := range probes {
-		if result := m.probeEndpoint(ctx, httpClient, p, fp); result != nil {
+		if result := m.probeEndpoint(ctx, httpClient, p, fp, scanCtx, host); result != nil {
 			results = append(results, result)
 		}
 	}
@@ -196,6 +184,8 @@ func (m *Module) probeEndpoint(
 	httpClient *http.Requester,
 	p probe,
 	fp *notFoundFingerprint,
+	scanCtx *modkit.ScanContext,
+	host string,
 ) *output.ResultEvent {
 	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), p.method)
 	if err != nil {
@@ -287,18 +277,36 @@ func (m *Module) probeEndpoint(
 			return nil
 		}
 		allowHeader := resp.Response().Header.Get("Allow")
-		if allowHeader == "" || !strings.Contains(strings.ToUpper(allowHeader), "POST") {
+		// A genuine Active Storage / Action Mailbox route is POST-only: its Allow
+		// set is a subset of {POST, OPTIONS}. A generic web-server / front-controller
+		// catch-all answers OPTIONS on *every* path with a broad
+		// "OPTIONS, TRACE, GET, HEAD, POST" Allow and a blank body — the production
+		// false positive on vn.einvoice.grab.com. Reject any Allow set that also
+		// advertises read/other methods (GET/HEAD/TRACE/PUT/...): that is a server
+		// default, not a mounted Rails route.
+		if !allowAdvertisesIngress(allowHeader) {
+			return nil
+		}
+		// Baseline against a random, guaranteed-nonexistent sibling under the same
+		// parent path. A real route answers only at its own path; if a random
+		// sibling returns the same status *and* the same Allow set, this prefix has
+		// a catch-all OPTIONS handler and the probe path is not a live Rails route
+		// — i.e. the same response with or without the real path.
+		if m.siblingOptionsMatches(ctx, httpClient, p.path, status, allowHeader) {
+			return nil
+		}
+		// An OPTIONS Allow header is not, by itself, proof of a mounted Rails
+		// route — any proxy / middleware can answer OPTIONS with `Allow: POST` on
+		// a blank body. Require positive evidence the host actually runs Rails (a
+		// Ruby app-server Server header, a Rails session cookie, X-Runtime, or
+		// rendered framework markers) before reporting. Generic gateways carry
+		// none of these — that is the production false-positive class.
+		railsSignals := railsHostSignals(ctx, resp, scanCtx, host, scanBody)
+		if len(railsSignals) == 0 {
 			return nil
 		}
 		evidence = append(evidence, "Allow: "+allowHeader)
-		// Surface any genuine Rails reference in the body as corroboration
-		// (does not gate the finding).
-		for _, marker := range railsBodyMarkers {
-			if strings.Contains(scanBody, marker) {
-				evidence = append(evidence, "Body: "+marker)
-				break
-			}
-		}
+		evidence = append(evidence, railsSignals...)
 	case "GET":
 		// Blob routes: confirm on a real redirect to a stored object (the genuine
 		// Active Storage behavior) or on actual framework body content — never on a
@@ -331,7 +339,7 @@ func (m *Module) probeEndpoint(
 			Name:        fmt.Sprintf("Rails Endpoint Exposed: %s", p.name),
 			Description: p.desc,
 			Severity:    p.sev,
-			Confidence:  severity.Firm,
+			Confidence:  severity.Tentative,
 			Tags:        []string{"rails", "ruby", "active-storage", "action-mailbox"},
 			Reference:   []string{"https://guides.rubyonrails.org/active_storage_overview.html", "https://guides.rubyonrails.org/action_mailbox_basics.html"},
 		},
@@ -376,6 +384,155 @@ func isCORSPreflightResponse(resp *httputil.ResponseChain) bool {
 		return false
 	}
 	return h.Get("Allow") == ""
+}
+
+// railsHostSignals returns the Rails/Ruby fingerprints observed for this host,
+// or nil when none are present. It checks (in order) the probe response, the
+// original response that triggered the scan, and the shared tech registry (which
+// the passive rails_fingerprint module populates). A non-empty result is the
+// gate that turns a weak OPTIONS `Allow` header into a reportable finding: a
+// generic proxy / API gateway answering OPTIONS uniformly carries none of these.
+// scanBody is the echo-stripped probe body so a reflected probe path cannot
+// masquerade as a framework marker.
+func railsHostSignals(
+	ctx *httpmsg.HttpRequestResponse,
+	resp *httputil.ResponseChain,
+	scanCtx *modkit.ScanContext,
+	host string,
+	scanBody string,
+) []string {
+	if resp != nil && resp.Response() != nil {
+		if sig := infra.RailsSignals(
+			resp.Response().Header.Get,
+			resp.Response().Header.Values("Set-Cookie"),
+			scanBody,
+		); len(sig) > 0 {
+			return sig
+		}
+	}
+	if orig := ctx.Response(); orig != nil {
+		if sig := infra.RailsSignals(orig.Header, rawSetCookies(orig), orig.BodyToString()); len(sig) > 0 {
+			return sig
+		}
+	}
+	if scanCtx != nil && scanCtx.TechStack != nil &&
+		(scanCtx.TechStack.Has(host, "rails") || scanCtx.TechStack.Has(host, "ruby")) {
+		return []string{"Tech: rails (observed elsewhere on host)"}
+	}
+	return nil
+}
+
+// rawSetCookies returns the raw Set-Cookie header values from the original
+// response.
+func rawSetCookies(resp *httpmsg.HttpResponse) []string {
+	var cookies []string
+	for _, h := range resp.Headers() {
+		if strings.EqualFold(h.Name, "Set-Cookie") {
+			cookies = append(cookies, h.Value)
+		}
+	}
+	return cookies
+}
+
+// allowAdvertisesIngress reports whether an Allow header describes a POST-only
+// Rails ingress/upload route. Such routes advertise POST (optionally with
+// OPTIONS) and nothing else. Any read/other method in the set (GET, HEAD, TRACE,
+// PUT, DELETE, PATCH, …) marks a generic server / front-controller catch-all
+// Allow header — the false-positive class where every path answers OPTIONS with
+// the same broad "OPTIONS, TRACE, GET, HEAD, POST" list and a blank body.
+func allowAdvertisesIngress(allow string) bool {
+	methods := parseAllowMethods(allow)
+	if !methods["POST"] {
+		return false
+	}
+	for method := range methods {
+		switch method {
+		case "POST", "OPTIONS":
+			// expected for a POST-only ingress / direct-upload route
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// parseAllowMethods splits an Allow header into an upper-cased set of methods.
+func parseAllowMethods(allow string) map[string]bool {
+	methods := make(map[string]bool)
+	for _, part := range strings.Split(allow, ",") {
+		if m := strings.ToUpper(strings.TrimSpace(part)); m != "" {
+			methods[m] = true
+		}
+	}
+	return methods
+}
+
+// normalizeAllow returns a canonical, order-independent representation of an
+// Allow header so two responses can be compared regardless of method ordering
+// or spacing.
+func normalizeAllow(allow string) string {
+	methods := parseAllowMethods(allow)
+	keys := make([]string, 0, len(methods))
+	for k := range methods {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
+}
+
+// siblingRandomPath replaces the final segment of path with a random,
+// guaranteed-nonexistent token while preserving the parent directory, so the
+// probe lands on the same routing prefix as the real path.
+func siblingRandomPath(path string) string {
+	idx := strings.LastIndex(path, "/")
+	if idx < 0 {
+		return ""
+	}
+	return path[:idx+1] + "vigolium-not-rails-" + utils.RandomString(10)
+}
+
+// siblingOptionsMatches sends OPTIONS to a random sibling of probePath and
+// reports whether it answers with the same status and Allow set as the probe.
+// A live Rails route responds only at its own path, so a matching random sibling
+// proves the OPTIONS reply is a catch-all on the prefix, not route-specific —
+// the "same response with or without the payload" false positive.
+func (m *Module) siblingOptionsMatches(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	probePath string,
+	status int,
+	allow string,
+) bool {
+	sibling := siblingRandomPath(probePath)
+	if sibling == "" {
+		return false
+	}
+
+	modifiedRaw, err := httpmsg.SetMethod(ctx.Request().Raw(), "OPTIONS")
+	if err != nil {
+		return false
+	}
+	modifiedRaw, err = httpmsg.SetPath(modifiedRaw, sibling)
+	if err != nil {
+		return false
+	}
+
+	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
+	if err != nil {
+		return false
+	}
+	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+
+	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
+	if err != nil {
+		return false
+	}
+	defer resp.Close()
+
+	if resp.Response() == nil || resp.Response().StatusCode != status {
+		return false
+	}
+	return normalizeAllow(resp.Response().Header.Get("Allow")) == normalizeAllow(allow)
 }
 
 // stripEcho removes occurrences of the requested path and full URL from the body.

@@ -1536,7 +1536,9 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 	fmt.Fprintf(os.Stderr, "  %s %s %s %s\n\n",
 		terminal.TipPrefix(), terminal.Gray("skip phases you don't need via"), terminal.HiCyan("--skip <phase>"), terminal.Gray("(e.g. --skip discovery,known-issue-scan)"))
 	fmt.Fprintf(os.Stderr, "%s %s\n", terminal.Green(terminal.SymbolStart), terminal.BoldHiBlue("Native Scan Configuration"))
-	if opts.ScanUUID != "" {
+	// In stateless mode the scan lives in a throwaway database, so the UUID
+	// can't be used to query results later — printing it is just noise.
+	if opts.ScanUUID != "" && !opts.Stateless {
 		fmt.Fprintf(os.Stderr, "  %s Scan ID: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ScanUUID))
 	}
 	if opts.Stateless {
@@ -1558,7 +1560,10 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 		}
 		fmt.Fprintf(os.Stderr, "  %s %s\n", terminal.Purple(terminal.SymbolInfo), isolateLine)
 	}
-	if opts.ProjectUUID != "" {
+	// Only surface the project when it's a real, operator-chosen one. The
+	// auto-created default project is implementation noise, and in stateless
+	// mode the project lives in a throwaway database anyway.
+	if opts.ProjectUUID != "" && opts.ProjectUUID != database.DefaultProjectUUID && !opts.Stateless {
 		fmt.Fprintf(os.Stderr, "  %s Project: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ProjectUUID))
 	}
 	fmt.Fprintf(os.Stderr, "  %s Strategy: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(strategy))

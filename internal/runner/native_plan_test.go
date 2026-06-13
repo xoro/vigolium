@@ -172,6 +172,34 @@ func TestApplyNativePhaseSelection_OnlyPhase(t *testing.T) {
 	}
 }
 
+func TestApplyNativePhaseSelection_SkipDiscoveryClearsDiscoverEnabled(t *testing.T) {
+	// A strategy (e.g. balanced) may have enabled DiscoverEnabled before phase
+	// selection runs. --skip discovery must both skip ingestion AND clear
+	// DiscoverEnabled so the config panel reports the phase as off and no
+	// downstream gate still sees discovery as active.
+	opts := &types.Options{
+		DiscoverEnabled: true,
+		SkipPhases:      []string{"discovery"},
+	}
+	if err := ApplyNativePhaseSelection(opts, nil); err != nil {
+		t.Fatalf("ApplyNativePhaseSelection: %v", err)
+	}
+	if !opts.SkipIngestion {
+		t.Errorf("SkipIngestion = false, want true")
+	}
+	if opts.DiscoverEnabled {
+		t.Errorf("DiscoverEnabled = true, want false after --skip discovery")
+	}
+
+	// The native plan derived from these opts must not include PhaseDiscovery.
+	plan := BuildNativeScanPlan(opts)
+	for _, step := range plan.Steps {
+		if step.Phase == PhaseDiscovery && step.Enabled {
+			t.Errorf("PhaseDiscovery still enabled in plan after --skip discovery")
+		}
+	}
+}
+
 func TestApplyNativePhaseSelection_OnlyPhaseErrors(t *testing.T) {
 	tests := []struct {
 		name  string

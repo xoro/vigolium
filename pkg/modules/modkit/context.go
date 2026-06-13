@@ -37,6 +37,14 @@ type RequestFeeder interface {
 	Feed(rr *httpmsg.HttpRequestResponse) bool
 }
 
+// ScopeExpander lets modules add an exact host to the scan's runtime scope
+// allow-set, so a discovered host becomes scannable without wildcarding its
+// apex. Used by subdomain_harvest under --follow-subdomains.
+type ScopeExpander interface {
+	// AllowHost adds host (exact match) to the in-scope set for this scan.
+	AllowHost(host string)
+}
+
 // RiskScoreUpdater updates risk scores for HTTP records in the database.
 type RiskScoreUpdater interface {
 	UpdateRiskScores(ctx context.Context, scores map[string]int) error
@@ -83,10 +91,21 @@ type ScanContext struct {
 	OASTProvider        OASTProvider
 	MutationGen         MutationGenerator
 	RequestFeeder       RequestFeeder
+	ScopeExpander       ScopeExpander // Optional: add discovered hosts to runtime scope (--follow-subdomains)
 	InsertionPoints     InsertionPointProvider
 	ParamFindings       *ParameterFindingRegistry // Cross-module finding dedup
 	TechStack           *TechRegistry             // Per-host tech-stack detections (populated by *_fingerprint passive modules)
 	WAFStack            *WAFRegistry              // Per-host WAF/CDN detections (populated by XSS modules on block responses)
+
+	// FollowSubdomains gates the subdomain_harvest feed-back behavior: when true
+	// the module adds discovered in-scope subdomains to scope (via ScopeExpander)
+	// and feeds them for scanning. Off by default (recon-only).
+	FollowSubdomains bool
+
+	// DeepScan mirrors --intensity=deep: modules may use it to unlock heavier,
+	// broader probing (e.g. dashboard_exposure's full mount-path sweep). Off by
+	// default so normal scans stay bounded.
+	DeepScan bool
 
 	baselineOnce   sync.Once
 	baselineCache  *lru.Cache[string, *BaselineEntry]
@@ -128,6 +147,22 @@ func (sc *ScanContext) Feeder() RequestFeeder {
 		return nil
 	}
 	return sc.RequestFeeder
+}
+
+// ShouldFollowSubdomains reports whether the subdomain_harvest module should
+// pull discovered subdomains into the scan. Requires both the toggle and a
+// usable feeder + scope expander, so the module never half-applies the feature.
+func (sc *ScanContext) ShouldFollowSubdomains() bool {
+	return sc != nil && sc.FollowSubdomains && sc.RequestFeeder != nil && sc.ScopeExpander != nil
+}
+
+// AllowHost adds host to the scan's runtime scope allow-set if a ScopeExpander
+// is wired. No-op otherwise (e.g. tests with a bare ScanContext).
+func (sc *ScanContext) AllowHost(host string) {
+	if sc == nil || sc.ScopeExpander == nil {
+		return
+	}
+	sc.ScopeExpander.AllowHost(host)
 }
 
 // IPProvider returns the InsertionPointProvider or nil safely.

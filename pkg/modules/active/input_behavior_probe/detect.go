@@ -13,6 +13,32 @@ import (
 // incidental flicker the jitter sample didn't happen to capture.
 const tagChangeMargin = 2
 
+// minComparableTags is the fewest opening HTML tags a fuzzed response body must
+// contain before its structure is compared to the baseline. An empty stub, a bare
+// redirect notice, or a non-HTML payload (an XML error, a JSON body) falls below
+// this — comparing it to an HTML baseline only measures "this isn't the page" and
+// registers a maximal, bogus tag distance, the reported 404/302 empty-body false
+// positive.
+const minComparableTags = 3
+
+// isContentResponse reports whether status serves application content a tag
+// comparison can be drawn against — a 2xx body. Redirects (3xx) and client errors
+// (4xx) hand back a DIFFERENT resource (a login redirect, a not-found stub), so
+// their body's tag structure is not comparable to the baseline page's; any delta
+// is a page-TYPE change, which the status leg judges separately.
+func isContentResponse(status int) bool {
+	return status >= 200 && status < 300
+}
+
+// totalTags is the number of opening HTML tags in a multiset (nil-safe).
+func totalTags(counts map[string]int) int {
+	n := 0
+	for _, c := range counts {
+		n += c
+	}
+	return n
+}
+
 // detectionBaseline holds the reference values for comparison.
 type detectionBaseline struct {
 	tags       string         // readable opening-tag string, for reporting
@@ -98,7 +124,20 @@ func isAccessDenied(status int) bool {
 // rotating ad, CDN challenge script, or stale-baseline drift as a behavior change.
 func detectChange(baseline *detectionBaseline, fuzzBody string, fuzzStatus int) *behaviorChange {
 	fuzzTags, fuzzCounts := scanTags(fuzzBody)
-	tagsChanged := tagDistance(baseline.tagCounts, fuzzCounts) > baseline.tagJitter+tagChangeMargin
+
+	// A tag-structure delta is only a meaningful input-handling signal when the
+	// fuzzed response is structurally comparable to the baseline: both must serve
+	// 2xx content (a 3xx redirect or 4xx error returns a DIFFERENT resource, so the
+	// delta measures the page TYPE changing — expected for a path probe that 404s,
+	// and the genuinely-notable cross-class transitions are flagged by the status
+	// leg below), and the fuzz body must carry real HTML structure (an empty or
+	// near-empty body has ~zero tags and registers a maximal, bogus distance against
+	// any HTML baseline — the reported 404/302 empty-body false positives).
+	structurallyComparable := isContentResponse(baseline.statusCode) &&
+		isContentResponse(fuzzStatus) &&
+		totalTags(fuzzCounts) >= minComparableTags
+	tagsChanged := structurallyComparable &&
+		tagDistance(baseline.tagCounts, fuzzCounts) > baseline.tagJitter+tagChangeMargin
 
 	statusChanged := baseline.statusCode != fuzzStatus
 
@@ -157,6 +196,12 @@ func confirmChange(
 	}
 	counts, ok := fetchTagCounts(ctx, httpClient, probeRaw)
 	if !ok {
+		return false
+	}
+	// The reproduction must itself carry real HTML structure — an empty or
+	// near-empty re-fetch (a flaky redirect/error) would otherwise register a bogus
+	// maximal distance and "confirm" the very empty-body FP detectChange suppresses.
+	if totalTags(counts) < minComparableTags {
 		return false
 	}
 	return tagDistance(baseline.tagCounts, counts) > baseline.tagJitter+tagChangeMargin
