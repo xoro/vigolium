@@ -3,9 +3,10 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 
-	"github.com/uptrace/bun"
 	"github.com/vigolium/vigolium/pkg/database"
 )
 
@@ -13,6 +14,16 @@ const (
 	agentSummaryTopFindings = 20  // cap on top_findings rendered in the summary
 	agentSummaryScanCap     = 500 // cap on rows fetched to rank top_findings
 )
+
+// agentStreamSink returns the writer for an agent run's live output: stderr
+// under --json (stdout is reserved for the final JSON summary), otherwise
+// stdout. Shared by autopilot / swarm / audit so the routing rule lives once.
+func agentStreamSink() io.Writer {
+	if globalJSON {
+		return os.Stderr
+	}
+	return os.Stdout
+}
 
 // resolveAgenticScanTree returns the root agentic-scan UUID plus any direct
 // child runs (audit driver legs, swarm sub-runs link via parent_run_uuid), so a
@@ -45,22 +56,11 @@ func emitAgentScanJSONSummary(repo *database.Repository, projectUUID, agenticSca
 	db := repo.DB()
 	uuids := resolveAgenticScanTree(ctx, db, agenticScanUUID)
 
-	// Accurate counts by severity via GROUP BY across the scan tree.
-	type sevCount struct {
-		Severity string `bun:"severity"`
-		Count    int64  `bun:"count"`
-	}
-	var rows []sevCount
-	_ = db.NewSelect().Model((*database.Finding)(nil)).
-		ColumnExpr("severity, COUNT(*) AS count").
-		Where("agentic_scan_uuid IN (?)", bun.List(uuids)).
-		GroupExpr("severity").
-		Scan(ctx, &rows)
-	counts := make(map[string]int64, len(rows))
+	// Accurate counts by severity across the whole scan tree.
+	counts, _ := database.CountFindingsByAgenticScans(ctx, db, uuids)
 	var total int64
-	for _, r := range rows {
-		counts[r.Severity] = r.Count
-		total += r.Count
+	for _, c := range counts {
+		total += c
 	}
 
 	// Top findings: bounded fetch, ranked by severity desc.

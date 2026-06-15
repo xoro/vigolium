@@ -64,6 +64,56 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host without exposed Rails files must not yield findings")
 }
 
+// TestScanPerRequest_BlankLocalSecretNoFalsePositive reproduces the catch-all FP
+// where /tmp/local_secret.txt returns a blank 200 while unknown paths return a
+// distinct non-empty 404. The markerless local-secret case only had an upper
+// length bound, so an empty body would slip through and be reported as a leaked
+// secret. The hex-token structural check must drop it.
+func TestScanPerRequest_BlankLocalSecretNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tmp/local_secret.txt" {
+			w.WriteHeader(http.StatusOK) // blank body, Content-Length: 0
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("distinct not found body contents here"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a blank-body 200 on /tmp/local_secret.txt must not be reported as a leaked secret")
+}
+
+// TestScanPerRequest_DetectsLocalSecret confirms the structural fix still
+// reports a genuine hex secret_key_base leaked at /tmp/local_secret.txt.
+func TestScanPerRequest_DetectsLocalSecret(t *testing.T) {
+	t.Parallel()
+	secret := "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/tmp/local_secret.txt" {
+			w.Header().Set("Content-Type", "text/plain")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(secret + "\n"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("distinct not found body contents here"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "expected a finding when a hex secret_key_base is exposed")
+}
+
 // TestCanProcess validates the host-liveness gate.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

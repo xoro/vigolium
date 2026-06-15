@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/vigolium/vigolium/pkg/output"
@@ -76,7 +77,7 @@ func TestWithFailOnGate(t *testing.T) {
 	failOnGateTriggered = true
 	scanFailOn = "high"
 	prior := errExample
-	if got := withFailOnGate(prior); got != prior {
+	if got := withFailOnGate(prior); !errors.Is(got, prior) {
 		t.Fatalf("prior error should pass through unchanged")
 	}
 

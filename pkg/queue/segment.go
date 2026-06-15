@@ -2,7 +2,6 @@ package queue
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -386,38 +385,36 @@ func (s *Segment) GetNextPending() (*ScanTask, error) {
 	return nil, nil // No pending tasks
 }
 
-// AckTask marks a task as completed.
+// AckTask marks a task as completed by deleting its record.
+//
+// The previous implementation rewrote the task with status=completed, leaving
+// the (potentially large, RawRequest-bearing) record on disk until the entire
+// 10k-task segment became deletable — so a segment with one stuck task pinned
+// thousands of completed records. A completed record is never read again
+// (GetNextPending consults only the pending index, cleared at dequeue; the
+// Iterator method is unused), so we delete it outright and let LevelDB reclaim
+// the space incrementally. recoverState rebuilds totalTasks from the surviving
+// records, so deletion stays consistent with CanDelete (completed >= total) and
+// PendingTasks (total - completed) across restarts.
 func (s *Segment) AckTask(taskID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	taskKey := []byte(prefixTask + taskID)
-	taskData, err := s.db.Get(taskKey, nil)
-	if err != nil {
-		if errors.Is(err, leveldb.ErrNotFound) {
-			return ErrTaskNotFound
-		}
-		return err
-	}
-
-	var task ScanTask
-	if err := unmarshalTask(taskData, &task); err != nil {
-		return err
-	}
-
-	if task.Status == TaskStatusCompleted {
-		return nil // Already completed
-	}
-
-	task.Status = TaskStatusCompleted
-	task.UpdatedAt = time.Now()
-
-	newData, err := marshalTask(&task)
+	has, err := s.db.Has(taskKey, nil)
 	if err != nil {
 		return err
 	}
+	if !has {
+		// Already acked-and-deleted, or never existed: callers (HybridQueue.Ack)
+		// treat ErrTaskNotFound as an idempotent no-op.
+		return ErrTaskNotFound
+	}
 
-	if err := s.db.Put(taskKey, newData, nil); err != nil {
+	// Delete the task record. Any lingering pending key (a task acked without a
+	// prior dequeue) is self-healed by GetNextPending, which drops pending keys
+	// whose task record is missing.
+	if err := s.db.Delete(taskKey, nil); err != nil {
 		return err
 	}
 

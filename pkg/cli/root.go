@@ -105,6 +105,11 @@ var (
 	// Memory ceiling (GOMEMLIMIT)
 	globalMemLimit string
 
+	// scanHeapCeiling is the heap-ceiling outcome derived by applyScanMemLimit.
+	// The scan banner renders it (colored) after the logo, but only for a
+	// parallel fan-out (-P > 1) — see printScanSummary.
+	scanHeapCeiling memlimit.Result
+
 	// Request clustering
 	globalNoClustering bool
 
@@ -265,7 +270,7 @@ func init() {
 	pf.IntVar(&globalWidth, "width", 70, "Maximum column width for table output")
 
 	pf.StringVar(&globalScanUUID, "scan-uuid", "", "Pin scan UUID for this session (use to sync results across nodes; defaults to a freshly-minted UUID)")
-	pf.StringVar(&globalFormat, "format", "console", "Output format (comma-separated for multiple): console, jsonl, html")
+	pf.StringVar(&globalFormat, "format", "console", "Output format (comma-separated for multiple): console, jsonl, html, sqlite (sqlite needs -S/--stateless)")
 	pf.BoolVar(&globalCIOutput, "ci-output-format", false, "CI-friendly output: JSONL findings only, no color, no banners")
 	pf.BoolVar(&globalNoColor, "no-color", false, "Disable ANSI color in all output (also honored via the NO_COLOR env var)")
 	pf.BoolVar(&globalFullExample, "full-example", false, "Show full example commands organized by section")
@@ -299,9 +304,10 @@ func applyScanMemLimit(cmd *cobra.Command) {
 		Override:    globalMemLimit,
 		Parallelism: globalParallel,
 	})
-	if res.Note != "" && !globalSilent && !globalCIOutput {
-		fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(), res.Note)
-	}
+	// Stash the result rather than printing it here. The scan banner replays it
+	// right after the logo, but only under a parallel fan-out (-P > 1) — a single
+	// scan rarely needs a heap-ceiling line of its own. See printScanSummary.
+	scanHeapCeiling = res
 }
 
 func Execute() {

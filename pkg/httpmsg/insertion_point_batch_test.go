@@ -5,6 +5,56 @@ import (
 	"testing"
 )
 
+// TestBatchReplaceByOffset_SinglePass directly exercises the single-allocation
+// multi-spec splice: one growing and one shrinking spec must both apply in one
+// forward pass, and the per-spec deltas must reflect the size changes.
+func TestBatchReplaceByOffset_SinglePass(t *testing.T) {
+	// indices: ...a=11&b=22... → "11" at [8,10), "22" at [13,15)
+	request := []byte("GET /?a=11&b=22 HTTP/1.1\r\n\r\n")
+	specs := []injectionSpec{
+		{startOffset: 8, endOffset: 10, encoded: []byte("XXXX")}, // grow +2
+		{startOffset: 13, endOffset: 15, encoded: []byte("Y")},   // shrink -1
+	}
+
+	result, deltas := batchReplaceByOffset(request, specs)
+
+	want := "GET /?a=XXXX&b=Y HTTP/1.1\r\n\r\n"
+	if string(result) != want {
+		t.Fatalf("result = %q, want %q", result, want)
+	}
+	if len(deltas) != 2 {
+		t.Fatalf("len(deltas) = %d, want 2: %+v", len(deltas), deltas)
+	}
+	// adjustOffset sums by position; assert both deltas are present with the
+	// right magnitude (order-independent).
+	got := map[int]int{}
+	for _, d := range deltas {
+		got[d.position] = d.delta
+	}
+	if got[8] != 2 || got[13] != -1 {
+		t.Fatalf("deltas = %+v, want {8:+2, 13:-1}", deltas)
+	}
+}
+
+// TestBatchReplaceByOffset_AllInvalidReturnsCopy verifies that when every spec
+// is out of range, a fresh copy of the request (not the input alias) is
+// returned with nil deltas — preserving the prior contract.
+func TestBatchReplaceByOffset_AllInvalidReturnsCopy(t *testing.T) {
+	request := []byte("GET / HTTP/1.1\r\n\r\n")
+	specs := []injectionSpec{{startOffset: 100, endOffset: 200, encoded: []byte("z")}}
+
+	result, deltas := batchReplaceByOffset(request, specs)
+	if string(result) != string(request) {
+		t.Fatalf("result = %q, want unchanged %q", result, request)
+	}
+	if deltas != nil {
+		t.Fatalf("deltas = %+v, want nil", deltas)
+	}
+	if len(result) > 0 && len(request) > 0 && &result[0] == &request[0] {
+		t.Fatal("result must be a fresh copy, not the input slice")
+	}
+}
+
 func TestBuildRequestWithPayloads_URLParamsOnly(t *testing.T) {
 	// Request with two URL parameters
 	request := []byte("GET /api?id=123&name=admin HTTP/1.1\r\nHost: example.com\r\n\r\n")

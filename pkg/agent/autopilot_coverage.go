@@ -218,7 +218,9 @@ func (p *CoverageProbe) SnapshotSignatures(ctx context.Context) ([]string, error
 // reasonable single-target audit; larger projects fall through silently
 // (the diff just under-counts — coverage is a heuristic anyway).
 func (p *CoverageProbe) snapshotSignatures(ctx context.Context, hostname string) ([]string, error) {
-	records, err := p.Repo.GetRecordsByHostname(ctx, p.ProjectUUID, hostname, 5000)
+	// Only (method, URL) are read below, so skip the raw_request/raw_response
+	// BLOBs — pulling 5000 bodies just to discard them is a large memory spike.
+	records, err := p.Repo.GetRecordMetadataByHostname(ctx, p.ProjectUUID, hostname, 5000)
 	if err != nil {
 		return nil, err
 	}

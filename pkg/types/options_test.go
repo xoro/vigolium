@@ -111,6 +111,9 @@ func TestStripFormatExtension(t *testing.T) {
 		{"report.txt", "report.txt"},    // unknown ext preserved
 		{"report", "report"},            // no ext
 		{"my.report.html", "my.report"}, // only last ext stripped
+		{"str-host.sqlite", "str-host"}, // sqlite stripped
+		{"run.sqlite3", "run"},          // sqlite3 alias stripped
+		{"run.db", "run"},               // db alias stripped
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
@@ -132,7 +135,8 @@ func TestFormatOutputPath(t *testing.T) {
 		{"report", "html", "report.html"},
 		{"report", "report", "report.report.html"},
 		{"report", "pdf", "report.pdf"},
-		{"report", "console", "report"}, // unknown format -> base unchanged
+		{"str-host", "sqlite", "str-host.sqlite"}, // sqlite format extension
+		{"report", "console", "report"},           // unknown format -> base unchanged
 	}
 	for _, tt := range tests {
 		t.Run(tt.base+"_"+tt.format, func(t *testing.T) {

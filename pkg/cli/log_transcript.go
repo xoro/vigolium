@@ -135,6 +135,14 @@ func (e *errWriter) printf(format string, args ...any) {
 	_, e.err = fmt.Fprintf(e.w, format, args...)
 }
 
+// println mirrors fmt.Fprintln with the same first-error latching as printf.
+func (e *errWriter) println(args ...any) {
+	if e.err != nil {
+		return
+	}
+	_, e.err = fmt.Fprintln(e.w, args...)
+}
+
 // renderTranscript reads JSONL records from r and writes the rendered replay to
 // w. Split from renderTranscriptFile so it can be unit-tested without stdout.
 func renderTranscript(w io.Writer, r io.Reader) error {

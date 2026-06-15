@@ -195,6 +195,39 @@ func TestDiskSet_IncrementAndCheck_Concurrent(t *testing.T) {
 	}
 }
 
+// TestDiskSet_MaxKeys_BoundsKeyspace verifies the size cap evicts so the set
+// can't grow without limit. With a small MaxKeys, inserting many more distinct
+// keys keeps Size at or below the cap (plus at most one eviction batch of
+// headroom), and eviction is FN-safe (an evicted key reports not-seen again).
+func TestDiskSet_MaxKeys_BoundsKeyspace(t *testing.T) {
+	ds, err := NewDiskSet(DiskSetOptions{Path: t.TempDir(), Cleanup: false, MaxKeys: 100})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	for i := 0; i < 5000; i++ {
+		ds.IsSeen(fmt.Sprintf("k-%d", i))
+	}
+
+	// Cap is 100; eviction fires once size exceeds it, dropping a batch. The set
+	// must stay bounded well under the number of distinct keys inserted.
+	assert.LessOrEqual(t, ds.Size(), int64(diskSetEvictBatch+100),
+		"size must stay bounded by the cap, not grow to the 5000 distinct keys")
+	assert.Less(t, ds.Size(), int64(5000), "the set must not retain every key")
+}
+
+// TestDiskSet_MaxKeys_DisabledIsUnbounded confirms a negative MaxKeys opts out
+// of the cap (legacy unbounded behavior) — every distinct key is retained.
+func TestDiskSet_MaxKeys_DisabledIsUnbounded(t *testing.T) {
+	ds, err := NewDiskSet(DiskSetOptions{Path: t.TempDir(), Cleanup: false, MaxKeys: -1})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ds.Close() })
+
+	for i := 0; i < 500; i++ {
+		ds.IsSeen(fmt.Sprintf("k-%d", i))
+	}
+	assert.Equal(t, int64(500), ds.Size(), "negative MaxKeys disables eviction")
+}
+
 // TestDiskSet_PersistsAcrossReopen verifies the store is durable: keys recorded
 // before Close are still present when the same path is reopened.
 func TestDiskSet_PersistsAcrossReopen(t *testing.T) {

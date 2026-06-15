@@ -216,7 +216,18 @@ func (m *Module) probeEndpoint(
 			return nil
 		}
 	} else {
-		// For the /up probe (no markers): accept any 200 with small body (< 1024 bytes)...
+		// For the /up probe (no markers): a genuine Rails health check
+		// (Rails::HealthController#show) always renders a non-empty body — the
+		// default green status page, or a custom "OK"/JSON payload. An empty or
+		// whitespace-only 200 carries no signal: it is the classic catch-all /
+		// CDN placeholder that returns a blank 200 for every unknown child path.
+		// The soft-404 fingerprint can't catch it because a blank body never
+		// matches the host's non-empty wildcard shell (empty hash ≠ shell hash,
+		// length ratio ≈ 1.0), so reject the blank body outright here.
+		if len(strings.TrimSpace(body)) == 0 {
+			return nil
+		}
+		// ...accept any 200 with small body (< 1024 bytes)...
 		if len(body) >= 1024 {
 			return nil
 		}

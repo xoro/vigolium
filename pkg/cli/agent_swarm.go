@@ -572,13 +572,9 @@ func runAgentSwarm(cmd *cobra.Command, args []string) (err error) {
 	// paths are printed instead — the full LLM response is saved to the
 	// session directory.
 	if settings.Agent.StreamEnabled() && zap.L().Core().Enabled(zap.DebugLevel) {
-		// Under --json, stdout is reserved for the final JSON summary; send the
-		// raw agent stream to stderr so the machine-readable output stays clean.
-		if globalJSON {
-			cfg.StreamWriter = os.Stderr
-		} else {
-			cfg.StreamWriter = os.Stdout
-		}
+		// agentStreamSink() sends the raw stream to stderr under --json so the
+		// machine-readable summary on stdout stays clean.
+		cfg.StreamWriter = agentStreamSink()
 	}
 	cfg.Verbose = swarmVerbose
 	// Always persist the stream to {sessionDir}/runtime.log — even in

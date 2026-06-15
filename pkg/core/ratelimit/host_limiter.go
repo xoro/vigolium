@@ -357,17 +357,41 @@ func (h *HostRateLimiter) getOrCreateEntry(shard *hostShard, host string) *hostE
 	return entry
 }
 
-// evictOldestFromShard evicts the oldest entry from a single shard.
-// Must be called with shard.mu held for writing.
+// evictOldestFromShard evicts the oldest entry that has no in-flight requests
+// from a single shard. Must be called with shard.mu held for writing.
+//
+// It deliberately skips entries with acquired-but-not-released slots: evicting a
+// busy host would orphan its semaphore accounting — a later Release finds no
+// entry and silently no-ops, while a concurrent getOrCreateEntry makes a fresh
+// entry that has lost the in-flight count (mirrors the hasInflight() guard in
+// evictIdle). If every entry in the shard is busy, it evicts nothing and lets
+// the shard briefly exceed its soft cap rather than corrupt accounting.
 func (h *HostRateLimiter) evictOldestFromShard(shard *hostShard) {
 	if shard.evictionHeap.Len() == 0 {
 		return
 	}
 
-	he := heap.Pop(&shard.evictionHeap).(*heapEntry)
-	delete(shard.heapIndex, he.host)
-	delete(shard.hosts, he.host)
-	zap.L().Debug("HostRateLimiter: Evicted oldest entry", zap.String("host", he.host))
+	// Scan for the least-recently-used idle entry. The shard is small (~maxEntries
+	// /numShards), so the linear scan is cheap and only runs on the forced-cap
+	// path.
+	var victim *heapEntry
+	for _, he := range shard.evictionHeap {
+		entry, exists := shard.hosts[he.host]
+		if !exists || entry.hasInflight() {
+			continue
+		}
+		if victim == nil || he.lastUsed < victim.lastUsed {
+			victim = he
+		}
+	}
+	if victim == nil {
+		return // every entry is busy — don't evict an in-flight host
+	}
+
+	heap.Remove(&shard.evictionHeap, victim.index)
+	delete(shard.heapIndex, victim.host)
+	delete(shard.hosts, victim.host)
+	zap.L().Debug("HostRateLimiter: Evicted oldest idle entry", zap.String("host", victim.host))
 }
 
 // evictionLoop periodically evicts idle hosts.

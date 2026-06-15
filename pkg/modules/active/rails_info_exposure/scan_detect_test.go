@@ -62,6 +62,34 @@ func TestScanPerRequest_NoFalsePositive(t *testing.T) {
 	assert.Empty(t, res, "a host without exposed Rails info endpoints must not yield findings")
 }
 
+// TestScanPerRequest_BlankUpBodyNoFalsePositive reproduces the catch-all FP
+// where /up returns a blank 200 (Content-Length: 0) while unknown paths return a
+// distinct non-empty 404. The blank body defeats the soft-404 fingerprint and
+// wildcard guard (an empty body never matches the host's non-empty shell), so
+// without the empty-body bail the markerless /up probe would wrongly fire.
+func TestScanPerRequest_BlankUpBodyNoFalsePositive(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/up" {
+			w.WriteHeader(http.StatusOK) // blank body, Content-Length: 0
+			return
+		}
+		// Every other path (soft-404 fingerprint + wildcard probe + marker
+		// probes) gets a distinct non-empty 404 so the blank /up body is not
+		// suppressed by the fingerprint/length/ratio guards.
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("distinct not found body contents here"))
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.Response(modtest.Request(t, srv.URL+"/"), "text/html", "home")
+
+	res, err := New().ScanPerRequest(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	assert.Empty(t, res, "a blank-body 200 on /up must not be reported as a Rails health check")
+}
+
 // TestCanProcess validates the host-liveness gate.
 func TestCanProcess(t *testing.T) {
 	t.Parallel()

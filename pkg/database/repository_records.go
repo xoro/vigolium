@@ -169,6 +169,29 @@ func (r *Repository) GetRecordsByHostname(ctx context.Context, projectUUID, host
 	return records, nil
 }
 
+// GetRecordMetadataByHostname is GetRecordsByHostname without the raw_request /
+// raw_response BLOB columns, for callers that only need request-line metadata
+// (method, URL, path, status). It avoids pulling multi-KB bodies for every row
+// when they're immediately discarded — notably the autopilot coverage probe,
+// which scans up to 5000 rows just to build (method, URL) signatures. Use the
+// full GetRecordsByHostname when the bodies are needed.
+func (r *Repository) GetRecordMetadataByHostname(ctx context.Context, projectUUID, hostname string, limit int) ([]*HTTPRecord, error) {
+	var records []*HTTPRecord
+	q := r.db.NewSelect().
+		Model(&records).
+		ExcludeColumn("raw_request", "raw_response").
+		Where("hostname = ?", hostname).
+		Order("sent_at DESC").
+		Limit(limit)
+	if projectUUID != "" {
+		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	if err := q.Scan(ctx); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
 // GetUnprobedRecordsBySource returns records with has_response=false for the given source and hostname.
 func (r *Repository) GetUnprobedRecordsBySource(ctx context.Context, projectUUID, source, hostname string, limit int) ([]*HTTPRecord, error) {
 	var records []*HTTPRecord
@@ -329,10 +352,14 @@ type ReSpiderCandidate struct {
 }
 
 // GetReSpiderCandidates returns records that carry a response body, for the
-// targeted re-spider phase. It deliberately includes spidering-sourced records
-// too, so the caller can pre-seed its shell-dedup set with pages the browser
-// already crawled. Ordered by uuid for deterministic per-host capping.
-func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID string, limit int) ([]ReSpiderCandidate, error) {
+// targeted re-spider phase, using UUID-based cursor pagination (afterUUID="" for
+// the first page). It deliberately includes spidering-sourced records too, so
+// the caller can pre-seed its shell-dedup set with pages the browser already
+// crawled. Ordered by uuid so paging is stable and per-host capping
+// deterministic. Each returned row carries a full raw_response body, so the
+// caller pages with a modest limit and reduces each page before reading the
+// next rather than materializing every body at once.
+func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID, afterUUID string, limit int) ([]ReSpiderCandidate, error) {
 	var rows []ReSpiderCandidate
 	q := r.db.NewSelect().
 		TableExpr("http_records").
@@ -342,6 +369,9 @@ func (r *Repository) GetReSpiderCandidates(ctx context.Context, projectUUID stri
 		Where("length(raw_response) > 0")
 	if projectUUID != "" {
 		q = q.Where("project_uuid = ?", projectUUID)
+	}
+	if afterUUID != "" {
+		q = q.Where("uuid > ?", afterUUID)
 	}
 	if limit > 0 {
 		q = q.Limit(limit)

@@ -82,6 +82,24 @@ func (h *Handlers) persistAgenticScanCompleted(agenticScanUUID string, status *A
 	}
 }
 
+// shedAgenticScanResult drops the heavy Result/SwarmResult blobs from the
+// in-memory status entry once the run's summary has been persisted. Those
+// structures are large and uncapped (the full model RawOutput plus findings and
+// HTTP records with bodies) and would otherwise sit in the long-lived status
+// map for the whole prune window, with /status/list snapshotting them under the
+// agent lock. The lightweight counters stay so /status/:id polling is still
+// served from memory; the full result is recoverable from the DB-backed finding
+// /record endpoints, and streaming clients already received it via the SSE
+// "done" event (which uses the local result, not this stored copy).
+func (h *Handlers) shedAgenticScanResult(agenticScanUUID string) {
+	h.agentMu.Lock()
+	if status, ok := h.agenticScanStatus[agenticScanUUID]; ok && status != nil {
+		status.Result = nil
+		status.SwarmResult = nil
+	}
+	h.agentMu.Unlock()
+}
+
 // effectiveAgentName returns the agent identifier recorded on AgenticScan
 // rows for this run. With the subprocess backend system removed, every run
 // is olium-backed, so we ignore the request-supplied agent name and always
@@ -390,6 +408,10 @@ func (h *Handlers) handleAgentSSE(c fiber.Ctx, agenticScanUUID string, opts agen
 		if clientConnected {
 			_ = sink.send(sseEvent{Type: "done", Result: res.result})
 		}
+
+		// Drop the heavy result blob from the long-lived status map now that it's
+		// persisted and streamed (the SSE used res.result, not status.Result).
+		h.shedAgenticScanResult(agenticScanUUID)
 		zap.L().Info("Agent run completed (streaming)",
 			zap.String("agentic_scan_uuid", agenticScanUUID),
 			zap.String("agent", res.result.AgentName),
@@ -483,6 +505,10 @@ func (h *Handlers) runBackgroundAgentWithOpts(agenticScanUUID string, opts agent
 	}
 
 	h.persistAgenticScanCompleted(agenticScanUUID, &statusSnapshot)
+
+	// Async run: no SSE stream carried the result, but it's persisted and the
+	// findings/records are in the DB — drop the heavy blob from the status map.
+	h.shedAgenticScanResult(agenticScanUUID)
 
 	if uploadResults && sessionDir != "" {
 		h.uploadAgenticResults(projectUUID, agenticScanUUID, sessionDir)

@@ -124,7 +124,7 @@ Scan phases accept aliases: `deparos` = `discovery`, `discover` = `discovery`, `
 
 ### Output Formats
 
-The `--format` flag selects output format: `console` (default), `jsonl`, or `html`. Multiple formats can be combined (`--format jsonl,html`). HTML reports use an embedded ag-grid template (`public/static-reports/`) and require `-o/--output`. HTML format is supported for discovery and spidering phases.
+The `--format` flag selects output format: `console` (default), `jsonl`, `html`, or `sqlite` (aliases `sqlite3`, `db`). Multiple formats can be combined (`--format jsonl,html`). HTML reports use an embedded ag-grid template (`public/static-reports/`) and require `-o/--output`. HTML format is supported for discovery and spidering phases. The `sqlite` format dumps the run's standalone database to `<output>.sqlite` via `VACUUM INTO` and requires `-S/--stateless` (the per-run temp DB) plus `-o/--output`; under `--split-by-host` each per-host file is named `<base>-<host>.sqlite`. The exported file reopens directly with `vigolium finding/traffic -S --db <file>.sqlite`.
 
 ### Driving Vigolium from a coding agent
 

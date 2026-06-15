@@ -91,11 +91,12 @@ var (
 	trafficOffset  int
 
 	// Display-only flags (trafficCmd.Flags only)
-	trafficTree    bool
-	trafficRaw     bool
-	trafficBurp    bool
-	trafficColumns []string
-	trafficExclude []string
+	trafficTree     bool
+	trafficRaw      bool
+	trafficBurp     bool
+	trafficMarkdown bool
+	trafficColumns  []string
+	trafficExclude  []string
 
 	// Replay flags (trafficCmd.Flags only; only active with --replay)
 	trafficReplay            bool
@@ -146,6 +147,8 @@ func init() {
 	f.BoolVar(&trafficTree, "tree", false, "Display as host/path hierarchy tree")
 	f.BoolVar(&trafficRaw, "raw", false, "Show full raw HTTP request and response")
 	f.BoolVar(&trafficBurp, "burp", false, "Display in Burp Suite-style format (colored request/response)")
+	f.BoolVar(&trafficMarkdown, "markdown", false, "Render the matched records as Markdown (request/response in fenced http blocks) to stdout")
+	f.BoolVarP(&globalStateless, "stateless", "S", false, "Read from --db (a .jsonl export or standalone .sqlite) with project scoping off; never writes to your project DB")
 	f.StringSliceVar(&trafficColumns, "columns", nil, "Columns to show (comma-separated, e.g. HOST,METHOD,PATH,STATUS)")
 	f.StringSliceVar(&trafficExclude, "exclude-columns", nil, "Columns to hide (comma-separated)")
 	registerAgentJSONFlags(f)
@@ -164,7 +167,7 @@ func init() {
 func runTraffic(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
 
-	db, err := getDB()
+	db, err := openReadDB()
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -219,6 +222,8 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 
 		if globalJSON {
 			return displayJSON(records, total, trafficOffset, trafficLimit)
+		} else if trafficMarkdown {
+			return displayTrafficMarkdown(records)
 		} else if trafficBurp {
 			return displayBurp(records)
 		} else if trafficRaw {
@@ -248,7 +253,7 @@ func buildTrafficFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		dateTo = &t
 	}
 
-	projectUUID, err := resolveProjectUUID()
+	projectUUID, err := effectiveProjectUUID()
 	if err != nil {
 		return database.QueryFilters{}, err
 	}

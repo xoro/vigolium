@@ -761,23 +761,11 @@ func rawBodySignature(status int, body string) ResponseSignature {
 	}
 }
 
-// fetchResponseBody re-issues a raw request and returns its status code and body
-// string (a copy, safe to retain after the response is closed). The bool is
-// false on any parse/HTTP/empty-response error.
-func fetchResponseBody(client *http.Requester, service *httpmsg.Service, raw []byte, noRedirects bool) (int, string, bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", false
-	}
-	if service != nil {
-		req = req.WithService(service)
-	}
-	return fetchResponseBodyParsed(client, req, noRedirects)
-}
-
-// fetchResponseBodyParsed is fetchResponseBody for an already-parsed (and
-// service-bound) request, so a same-id determinism loop parses the raw once and
-// replays the parsed request across rounds. The request is immutable to Execute.
+// fetchResponseBodyParsed re-issues an already-parsed (and service-bound)
+// request and returns its status code and body string (a copy, safe to retain
+// after the response is closed), so a same-id determinism loop parses the raw
+// once and replays the parsed request across rounds. The request is immutable to
+// Execute. The bool is false on any HTTP/empty-response error.
 func fetchResponseBodyParsed(client *http.Requester, req *httpmsg.HttpRequestResponse, noRedirects bool) (int, string, bool) {
 	// NoClustering bypasses the 500ms response cache so each same-id refetch is a
 	// genuinely fresh observation. A cached replay would report perfect self-

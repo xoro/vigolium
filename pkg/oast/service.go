@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	interactshclient "github.com/projectdiscovery/interactsh/pkg/client"
 	"github.com/projectdiscovery/interactsh/pkg/server"
 	"github.com/vigolium/vigolium/internal/config"
@@ -27,10 +28,20 @@ type PayloadContext struct {
 	CallbackURL string
 }
 
+// oastTrackerCacheSize bounds the nonce → PayloadContext tracker. A plain
+// sync.Map here grew unbounded: every planted payload added an entry that was
+// never deleted, so over a long-lived OAST-enabled scan (records × OAST-capable
+// insertion points) it was the fastest-growing map of all. A bounded LRU caps
+// it; a callback for a given payload almost always arrives within the grace
+// period, long before this many newer payloads would evict it, so correlation
+// fidelity is preserved for any payload still in flight.
+const oastTrackerCacheSize = 65536
+
 // Service wraps an interactsh client with payload tracking and result emission.
 type Service struct {
 	client             *interactshclient.Client
-	tracker            sync.Map // nonce → PayloadContext
+	trackerOnce        sync.Once
+	tracker            *lru.Cache[string, PayloadContext] // nonce → PayloadContext (bounded LRU)
 	emitResult         func(*output.ResultEvent)
 	resolveRequestUUID func(requestHash string) string // resolves request hash → DB record UUID
 	repo               *database.Repository
@@ -135,6 +146,16 @@ func (s *Service) Start() {
 		zap.Duration("grace_period", s.gracePeriod))
 }
 
+// trackerCache lazily initializes the bounded payload tracker so a zero-value
+// &Service{} (used by tests) stays safe.
+func (s *Service) trackerCache() *lru.Cache[string, PayloadContext] {
+	s.trackerOnce.Do(func() {
+		// lru.New only errors on size <= 0; the constant is positive.
+		s.tracker, _ = lru.New[string, PayloadContext](oastTrackerCacheSize)
+	})
+	return s.tracker
+}
+
 // GenerateURL creates a unique OAST callback URL and tracks the payload context.
 func (s *Service) GenerateURL(targetURL, paramName, injectionType, moduleID, requestHash string) string {
 	if s == nil {
@@ -160,7 +181,7 @@ func (s *Service) GenerateURL(targetURL, paramName, injectionType, moduleID, req
 	// We use the full subdomain (before first dot) as the tracker key.
 	nonce := extractNonce(url)
 	if nonce != "" {
-		s.tracker.Store(nonce, PayloadContext{
+		s.trackerCache().Add(nonce, PayloadContext{
 			TargetURL:     targetURL,
 			ParameterName: paramName,
 			InjectionType: injectionType,
@@ -231,12 +252,7 @@ func (s *Service) handleInteraction(interaction *server.Interaction) {
 
 	// Look up payload context using the unique ID
 	nonce := interaction.UniqueID
-	val, found := s.tracker.Load(nonce)
-
-	var pctx PayloadContext
-	if found {
-		pctx = val.(PayloadContext)
-	}
+	pctx, found := s.trackerCache().Get(nonce)
 
 	zap.L().Info("OAST: interaction received",
 		zap.String("protocol", interaction.Protocol),

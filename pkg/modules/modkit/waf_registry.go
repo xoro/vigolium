@@ -3,6 +3,8 @@ package modkit
 import (
 	"strings"
 	"sync"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // WAFRegistry tracks the WAF/CDN fronting each host, observed during a scan.
@@ -14,12 +16,15 @@ import (
 // never overwritten by the "generic" fallback. Thread-safe.
 type WAFRegistry struct {
 	mu     sync.RWMutex
-	byHost map[string]string
+	byHost *lru.Cache[string, string] // bounded: see perHostRegistryCacheSize
 }
 
-// NewWAFRegistry returns an empty registry.
+// NewWAFRegistry returns an empty registry. The host map is a bounded LRU so a
+// long-lived executor can't grow it per distinct host without limit; an evicted
+// host reads as "no WAF observed" until re-detected.
 func NewWAFRegistry() *WAFRegistry {
-	return &WAFRegistry{byHost: make(map[string]string)}
+	c, _ := lru.New[string, string](perHostRegistryCacheSize)
+	return &WAFRegistry{byHost: c}
 }
 
 // Mark records that wafType was observed fronting host. Both are normalized to
@@ -36,9 +41,9 @@ func (r *WAFRegistry) Mark(host, wafType string) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	existing, ok := r.byHost[host]
+	existing, ok := r.byHost.Get(host)
 	if !ok || existing == "" || (existing == "generic" && wafType != "generic") {
-		r.byHost[host] = wafType
+		r.byHost.Add(host, wafType)
 	}
 }
 
@@ -53,5 +58,6 @@ func (r *WAFRegistry) Get(host string) string {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.byHost[host]
+	v, _ := r.byHost.Get(host)
+	return v
 }

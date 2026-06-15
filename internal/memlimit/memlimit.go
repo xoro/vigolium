@@ -52,10 +52,13 @@ type Options struct {
 
 // Result describes the outcome of Apply, for operator logging.
 type Result struct {
-	LimitBytes int64  // active soft limit; unlimited (math.MaxInt64) means no ceiling
-	Changed    bool   // Apply set or changed the limit this call
-	Disabled   bool   // the ceiling is explicitly disabled
-	Note       string // one-line human summary (empty when there is nothing to report)
+	LimitBytes    int64  // active soft limit; unlimited (math.MaxInt64) means no ceiling
+	Changed       bool   // Apply set or changed the limit this call
+	Disabled      bool   // the ceiling is explicitly disabled
+	Note          string // one-line human summary (empty when there is nothing to report)
+	Auto          bool   // the ceiling was auto-derived from RAM (vs explicit/percent/off/inherited)
+	TotalRAMBytes uint64 // usable RAM the auto ceiling was sized from (0 unless Auto)
+	RAMSource     string // "physical" or "cgroup" for the auto note (empty unless Auto)
 }
 
 // DetectRAM returns usable RAM in bytes and its source. On Linux it takes the
@@ -148,6 +151,7 @@ func Apply(opts Options) Result {
 	var (
 		limit int64
 		note  string
+		auto  bool
 	)
 	switch {
 	case ov == "":
@@ -156,11 +160,8 @@ func Apply(opts Options) Result {
 			// Machine too small or RAM undetectable: stay unbounded, quietly.
 			return Result{}
 		}
-		note = "heap ceiling " + humanize.IBytes(uint64(limit)) + " (auto from " + humanize.IBytes(total) + " " + src + " RAM"
-		if p := opts.Parallelism; p > 1 {
-			note += ", ÷" + strconv.Itoa(p) + " parallel"
-		}
-		note += ")"
+		auto = true
+		note = "memory ceiling " + humanize.IBytes(uint64(limit)) + "/process (auto from " + humanize.IBytes(total) + " RAM)"
 
 	case strings.HasSuffix(ov, "%"):
 		pct, err := strconv.ParseFloat(strings.TrimSpace(strings.TrimSuffix(ov, "%")), 64)
@@ -181,5 +182,10 @@ func Apply(opts Options) Result {
 
 	debug.SetMemoryLimit(limit)
 	_ = os.Setenv("GOMEMLIMIT", strconv.FormatInt(limit, 10)) // bytes; inherited by child scan processes
-	return Result{LimitBytes: limit, Changed: true, Note: note}
+	res := Result{LimitBytes: limit, Changed: true, Note: note, Auto: auto}
+	if auto {
+		res.TotalRAMBytes = total
+		res.RAMSource = src
+	}
+	return res
 }

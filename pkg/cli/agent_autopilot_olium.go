@@ -143,12 +143,9 @@ func runAutopilotOlium(settings *config.Settings, repo *database.Repository, ins
 
 	// Tee streamed text into {sessionDir}/runtime.log so `vigolium log <uuid>`
 	// can replay the run later, regardless of whether the operator is watching.
-	// Under --json, stdout is reserved for the final JSON summary, so the live
-	// agent stream goes to stderr instead.
-	var streamWriter io.Writer = os.Stdout
-	if globalJSON {
-		streamWriter = os.Stderr
-	}
+	// agentStreamSink() routes the live stream to stderr under --json so stdout
+	// is reserved for the final JSON summary.
+	streamWriter := agentStreamSink()
 	if tee, closer := teeToRuntimeLog(streamWriter, sessionDir); closer != nil {
 		streamWriter = tee
 		defer func() { _ = closer.Close() }()

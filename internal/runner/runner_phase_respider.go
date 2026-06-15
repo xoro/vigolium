@@ -20,6 +20,42 @@ import (
 // pulls for evaluation, keeping memory and CPU bounded on large scans.
 const candidateScanLimit = 5000
 
+// respiderPageSize bounds how many body-carrying rows are read (and so held in
+// memory) per page while collecting re-spider candidates.
+const respiderPageSize = 500
+
+// collectReSpiderEvaluated pages through up to candidateScanLimit body-carrying
+// records, reducing each page to its body-free evaluated form before reading the
+// next page — so peak resident memory is one page of raw_response bodies, not
+// all candidateScanLimit of them.
+func (r *Runner) collectReSpiderEvaluated(ctx context.Context) ([]respiderEvaluated, error) {
+	var evals []respiderEvaluated
+	afterUUID := ""
+	for len(evals) < candidateScanLimit {
+		page := respiderPageSize
+		if remaining := candidateScanLimit - len(evals); remaining < page {
+			page = remaining
+		}
+		rows, err := r.repository.GetReSpiderCandidates(ctx, r.options.ProjectUUID, afterUUID, page)
+		if err != nil {
+			return nil, err
+		}
+		if len(rows) == 0 {
+			break
+		}
+		for i := range rows {
+			evals = append(evals, reduceReSpiderRow(&rows[i]))
+		}
+		afterUUID = rows[len(rows)-1].UUID
+		if len(rows) < page {
+			break // last (short) page — no more rows
+		}
+		// rows (with its page of bodies) becomes garbage on the next iteration's
+		// reassignment; only the body-free evals accumulate.
+	}
+	return evals, nil
+}
+
 // respiderSeed is a chosen re-crawl target.
 type respiderSeed struct {
 	url     string
@@ -50,7 +86,10 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 	phaseStart := time.Now()
 	r.printPhaseStart("Re-spider", "browser re-crawl of rich/SPA routes discovered after spidering")
 
-	rows, err := r.repository.GetReSpiderCandidates(ctx, r.options.ProjectUUID, candidateScanLimit)
+	// Page through body-carrying candidates, reducing each page to a body-free
+	// form before reading the next, so only respiderPageSize raw_response bodies
+	// are resident at once instead of all candidateScanLimit of them.
+	evals, err := r.collectReSpiderEvaluated(ctx)
 	if err != nil {
 		return fmt.Errorf("re-spider: failed to read candidates: %w", err)
 	}
@@ -59,7 +98,7 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 	// interactive non-login pages, rank, and apply per-host + total caps. Pure
 	// (no browser) so it is unit-tested directly.
 	perHost, total := rcfg.SeedsPerHost(), rcfg.SeedsTotal()
-	chosen, skips, kept := selectReSpiderSeeds(rows, perHost, total)
+	chosen, skips, kept := selectReSpiderSeedsFromEvaluated(evals, perHost, total)
 	if len(chosen) == 0 {
 		r.printPhaseComplete("Re-spider", fmt.Sprintf("no rich routes to re-crawl (%s)", formatRespiderSkips(skips)))
 		return nil
@@ -167,42 +206,82 @@ func (r *Runner) runTargetedReSpiderPhase(ctx context.Context, infra *phaseInfra
 	return nil
 }
 
-// selectReSpiderSeeds runs the two-pass selection over body-carrying records and
-// returns the chosen seeds plus a skip tally. Pass 1 pre-seeds the shell-dedup
-// set with shells the browser already crawled (spidering-sourced records) so a
-// known SPA is never re-crawled. Pass 2 keeps rich/SPA/interactive non-login
-// candidates whose shell is new, ranks them by score, then applies the per-host
-// and total caps. No I/O — unit-tested directly.
+// respiderEvaluated is the body-free reduction of a candidate row. Reducing each
+// page to this form lets the phase page through candidates without holding every
+// raw_response body resident at once.
+type respiderEvaluated struct {
+	source      string
+	hostname    string
+	url         string
+	isSpidering bool            // source == "spidering" with a 200 status + parseable URL
+	spiderShell string          // already-crawled shell fingerprint (isSpidering only)
+	decodeOK    bool            // candidate row decoded (non-spidering sources)
+	verdict     respiderVerdict // candidate evaluation (set when decodeOK)
+}
+
+// reduceReSpiderRow decodes one candidate row into its body-free evaluated form
+// so the caller can discard the raw_response afterward. It mirrors the two roles
+// a row plays in selectReSpiderSeedsFromEvaluated: a spidering-200 row
+// contributes an already-crawled shell fingerprint; any other candidate source
+// contributes an evaluation verdict.
+func reduceReSpiderRow(row *database.ReSpiderCandidate) respiderEvaluated {
+	e := respiderEvaluated{source: row.Source, hostname: row.Hostname, url: row.URL}
+	if row.Source == "spidering" {
+		if in, ok := decodeReSpiderRow(row); ok && in.StatusCode == 200 {
+			if u, perr := neturl.Parse(in.URL); perr == nil {
+				e.isSpidering = true
+				e.spiderShell = shellFingerprint(u, in.Body)
+			}
+		}
+		return e
+	}
+	switch row.Source {
+	case "respider", "spec-ingest":
+		return e // already-crawled or API specs — never a candidate
+	}
+	if in, ok := decodeReSpiderRow(row); ok {
+		e.decodeOK = true
+		e.verdict = evaluateReSpiderCandidate(in)
+	}
+	return e
+}
+
+// selectReSpiderSeeds reduces rows then selects seeds. Kept as a thin wrapper
+// over selectReSpiderSeedsFromEvaluated so the pure selection stays directly
+// unit-testable from in-memory candidate rows.
 func selectReSpiderSeeds(rows []database.ReSpiderCandidate, perHost, total int) (chosen []respiderSeed, skips map[string]int, kept int) {
-	seenShells := make(map[string]struct{})
+	evals := make([]respiderEvaluated, len(rows))
 	for i := range rows {
-		row := &rows[i]
-		if row.Source != "spidering" {
-			continue
-		}
-		in, ok := decodeReSpiderRow(row)
-		if !ok || in.StatusCode != 200 {
-			continue
-		}
-		if u, perr := neturl.Parse(in.URL); perr == nil {
-			seenShells[shellFingerprint(u, in.Body)] = struct{}{}
+		evals[i] = reduceReSpiderRow(&rows[i])
+	}
+	return selectReSpiderSeedsFromEvaluated(evals, perHost, total)
+}
+
+// selectReSpiderSeedsFromEvaluated picks re-crawl seeds from body-free evaluated
+// candidates: it pre-seeds the shell-dedup set with already-crawled spidering
+// shells, then keeps non-duplicate rich/SPA/interactive candidates, ranks them
+// by score, and applies the per-host and total caps.
+func selectReSpiderSeedsFromEvaluated(evals []respiderEvaluated, perHost, total int) (chosen []respiderSeed, skips map[string]int, kept int) {
+	seenShells := make(map[string]struct{})
+	for i := range evals {
+		if evals[i].isSpidering && evals[i].spiderShell != "" {
+			seenShells[evals[i].spiderShell] = struct{}{}
 		}
 	}
 
 	skips = map[string]int{}
 	var seeds []respiderSeed
-	for i := range rows {
-		row := &rows[i]
-		switch row.Source {
+	for i := range evals {
+		e := &evals[i]
+		switch e.source {
 		case "spidering", "respider", "spec-ingest":
 			continue // already-crawled or API specs — not candidates
 		}
-		in, ok := decodeReSpiderRow(row)
-		if !ok {
+		if !e.decodeOK {
 			skips["decode"]++
 			continue
 		}
-		v := evaluateReSpiderCandidate(in)
+		v := e.verdict
 		if !v.Keep {
 			skips[v.Reason]++
 			continue
@@ -212,7 +291,7 @@ func selectReSpiderSeeds(rows []database.ReSpiderCandidate, perHost, total int) 
 			continue
 		}
 		seenShells[v.ShellHash] = struct{}{}
-		seeds = append(seeds, respiderSeed{url: in.URL, hostKey: row.Hostname, score: v.Score})
+		seeds = append(seeds, respiderSeed{url: e.url, hostKey: e.hostname, score: v.Score})
 		kept++
 	}
 

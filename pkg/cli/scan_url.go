@@ -861,9 +861,7 @@ func outputScanResult(result *scanResult) error {
 	}
 
 	if globalJSON {
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
+		return writeAgentJSON(result)
 	}
 
 	// Human-readable output

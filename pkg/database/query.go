@@ -826,6 +826,34 @@ func CountFindingsByAgenticScan(ctx context.Context, db *DB, agenticScanUUID str
 	return result, nil
 }
 
+// CountFindingsByAgenticScans is like CountFindingsByAgenticScan but counts
+// across several agentic-scan UUIDs at once (a parent run plus its driver /
+// sub-run children). Returns severity→count with lowercase, trimmed keys.
+func CountFindingsByAgenticScans(ctx context.Context, db *DB, agenticScanUUIDs []string) (map[string]int64, error) {
+	if len(agenticScanUUIDs) == 0 {
+		return map[string]int64{}, nil
+	}
+	var rows []SeverityCount
+	err := db.NewSelect().
+		Model((*Finding)(nil)).
+		ColumnExpr("severity, COUNT(*) AS count").
+		Where("agentic_scan_uuid IN (?)", bun.List(agenticScanUUIDs)).
+		GroupExpr("severity").
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int64, len(rows))
+	for _, row := range rows {
+		key := strings.ToLower(strings.TrimSpace(row.Severity))
+		if key == "" {
+			continue
+		}
+		result[key] += row.Count
+	}
+	return result, nil
+}
+
 // CountFindingsByModule returns finding counts grouped by module_id.
 func CountFindingsByModule(ctx context.Context, db *DB, projectUUID string) (map[string]int64, error) {
 	var rows []struct {

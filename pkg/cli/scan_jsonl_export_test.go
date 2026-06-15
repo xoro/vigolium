@@ -136,6 +136,31 @@ func TestReconcileOutputFormatsDeferredJSONL(t *testing.T) {
 	})
 }
 
+// The sqlite format normalizes its aliases (sqlite3, db) and is gated to
+// stateless mode (it dumps the per-run temp DB).
+func TestReconcileOutputFormatsSQLite(t *testing.T) {
+	origJSON, origCI, origStateless := globalJSON, globalCIOutput, globalStateless
+	defer func() { globalJSON, globalCIOutput, globalStateless = origJSON, origCI, origStateless }()
+	globalJSON, globalCIOutput = false, false
+
+	t.Run("aliases normalize to sqlite under --stateless", func(t *testing.T) {
+		globalStateless = true
+		for _, alias := range []string{"sqlite", "sqlite3", "db"} {
+			opts := &types.Options{OutputFormats: []string{alias, "html"}}
+			require.NoError(t, reconcileOutputFormats(opts), "alias %q", alias)
+			assert.Equal(t, []string{"sqlite", "html"}, opts.OutputFormats, "alias %q", alias)
+		}
+	})
+
+	t.Run("sqlite without --stateless errors", func(t *testing.T) {
+		globalStateless = false
+		opts := &types.Options{OutputFormats: []string{"sqlite"}}
+		err := reconcileOutputFormats(opts)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--stateless")
+	})
+}
+
 // writeJSONLExport must emit the unified {"type":...,"data":...} envelope (never
 // the nuclei ResultEvent schema) and, when given a project UUID, scope every
 // DB-backed row to that project.

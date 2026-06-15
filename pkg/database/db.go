@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -23,7 +24,24 @@ type DB struct {
 	*bun.DB
 	driver string
 	hasFTS bool // true if FTS5 (SQLite) or tsvector (Postgres) is available
+
+	// ckptStop stops the background WAL checkpointer (file-backed SQLite only;
+	// nil otherwise). Closed once by Close().
+	ckptStop     chan struct{}
+	ckptStopOnce sync.Once
 }
+
+// SQLite WAL tuning. wal_autocheckpoint runs an automatic PASSIVE checkpoint
+// after this many WAL pages accumulate; mmap_size enables memory-mapped reads.
+// These are applied per-connection via the DSN. The autocheckpoint alone can't
+// reclaim the WAL while a reader pins old frames (the scan-on-receive poller,
+// status-tick counts, and read API calls all hold read locks in a long-running
+// server), so startWALCheckpointer also forces a TRUNCATE checkpoint on a timer.
+const (
+	sqliteWALAutocheckpoint = 1000      // pages (~4 MiB at 4 KiB/page)
+	sqliteMmapSize          = 268435456 // 256 MiB
+	walCheckpointInterval   = 5 * time.Minute
+)
 
 // NewDB creates database connection based on config
 func NewDB(cfg *config.DatabaseConfig) (*DB, error) {
@@ -72,7 +90,40 @@ func NewDB(cfg *config.DatabaseConfig) (*DB, error) {
 		db.AddQueryHook(debugQueryHook{})
 	}
 
+	// Periodically truncate the WAL for file-backed SQLite so it can't grow
+	// without bound over a long-running process. No-op for Postgres and
+	// in-memory SQLite (no WAL file). Stopped by Close().
+	if driver == "sqlite" && !strings.Contains(cfg.SQLite.Path, ":memory:") {
+		db.startWALCheckpointer()
+	}
+
 	return db, nil
+}
+
+// startWALCheckpointer launches a background goroutine that forces a TRUNCATE
+// WAL checkpoint every walCheckpointInterval, reclaiming WAL disk space that the
+// automatic PASSIVE checkpoint can't while readers pin old frames. The ticker
+// fires only in long-running processes (a short CLI scan exits before the first
+// tick); the goroutine is stopped by Close().
+func (db *DB) startWALCheckpointer() {
+	db.ckptStop = make(chan struct{})
+	stop := db.ckptStop
+	go func() {
+		ticker := time.NewTicker(walCheckpointInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+					zap.L().Debug("WAL checkpoint failed", zap.Error(err))
+				}
+				cancel()
+			}
+		}
+	}()
 }
 
 // NewDBFromBun wraps an existing bun.DB for use in tests or external tooling.
@@ -111,13 +162,20 @@ func openSQLite(cfg *config.SQLiteConfig) (*sql.DB, error) {
 	// serializes concurrent writers rather than racing them. Both _pragma and
 	// _txlock are honored by modernc; mattn (if ever selected) ignores the
 	// unknown params and falls back to its own defaults harmlessly.
+	// wal_autocheckpoint / temp_store / mmap_size are appended so each connection
+	// keeps the WAL bounded, spills temp B-trees to memory, and uses mmap reads —
+	// matching the deparos sitemap driver. Without wal_autocheckpoint the main
+	// ingest DB ran on the SQLite default with no periodic reclaim path of its
+	// own; the WAL could balloon to GB over a multi-day server run.
 	dsn := fmt.Sprintf(
-		"%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(%s)&_pragma=synchronous(%s)&_pragma=cache_size(%d)&_txlock=immediate",
+		"%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(%s)&_pragma=synchronous(%s)&_pragma=cache_size(%d)&_pragma=wal_autocheckpoint(%d)&_pragma=temp_store(memory)&_pragma=mmap_size(%d)&_txlock=immediate",
 		path,
 		cfg.BusyTimeout,
 		cfg.JournalMode,
 		cfg.Synchronous,
 		cfg.CacheSize,
+		sqliteWALAutocheckpoint,
+		sqliteMmapSize,
 	)
 
 	sqldb, err := sql.Open(sqliteshim.ShimName, dsn)
@@ -131,14 +189,25 @@ func openSQLite(cfg *config.SQLiteConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("failed to ping SQLite: %w", err)
 	}
 
+	// Checkpoint + truncate any WAL left over from a previous run so the file
+	// starts compact (no-op outside WAL mode; just-opened DB has no readers yet).
+	if strings.EqualFold(cfg.JournalMode, "WAL") && path != ":memory:" {
+		if _, err := sqldb.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+			zap.L().Debug("initial WAL checkpoint failed", zap.Error(err))
+		}
+	}
+
 	// In WAL mode, SQLite supports concurrent readers alongside a single writer.
-	// Default to 4 connections to allow read parallelism.
-	// For in-memory databases (:memory:), force a single connection since each
-	// connection gets its own isolated database — multiple connections would cause
-	// "no such table" errors as schema created on one connection is invisible to others.
+	// Default to 8 connections so the long-running server's readers (the
+	// scan-on-receive poller, status-tick counts, and read API calls) don't
+	// serialize behind a too-small pool; a slow read no longer ties up a quarter
+	// of the connections. For in-memory databases (:memory:), force a single
+	// connection since each connection gets its own isolated database — multiple
+	// connections would cause "no such table" errors as schema created on one
+	// connection is invisible to others.
 	maxConns := cfg.MaxOpenConns
 	if maxConns <= 0 {
-		maxConns = 4
+		maxConns = 8
 	}
 	if path == ":memory:" {
 		maxConns = 1
@@ -189,6 +258,9 @@ func openPostgres(cfg *config.PostgresConfig) (*sql.DB, error) {
 
 // Close closes database connection
 func (db *DB) Close() error {
+	if db.ckptStop != nil {
+		db.ckptStopOnce.Do(func() { close(db.ckptStop) })
+	}
 	if db.DB != nil {
 		return db.DB.Close()
 	}

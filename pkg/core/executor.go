@@ -260,14 +260,16 @@ type Executor struct {
 
 	// storageHosts records hosts observed to front object storage (a response
 	// carried a storage backend signal) so the static-file carve-out keeps
-	// sibling static assets on the same host. Key: host → struct{}.
-	storageHosts sync.Map
+	// sibling static assets on the same host. Key: host → struct{}. Bounded LRU
+	// (not an unbounded sync.Map) so a long-lived executor can't accumulate one
+	// entry per distinct storage-fronting host for the process lifetime.
+	storageHosts *lru.Cache[string, struct{}]
 }
 
 // markStorageHost records that host fronts object storage.
 func (e *Executor) markStorageHost(host string) {
 	if host != "" {
-		e.storageHosts.Store(host, struct{}{})
+		e.storageHosts.Add(host, struct{}{})
 	}
 }
 
@@ -277,8 +279,7 @@ func (e *Executor) isLearnedStorageHost(host string) bool {
 	if host == "" {
 		return false
 	}
-	_, ok := e.storageHosts.Load(host)
-	return ok
+	return e.storageHosts.Contains(host)
 }
 
 // staticStorageCandidate reports whether a static-file request looks like an
@@ -294,6 +295,13 @@ func (e *Executor) staticStorageCandidate(rr *httpmsg.HttpRequestResponse) bool 
 	}
 	return rr.Service() != nil && e.isLearnedStorageHost(rr.Service().Host())
 }
+
+// perHostClaimCacheSize bounds each per-host claim LRU. With ~31 per-host
+// modules this covers roughly 500 distinct hosts before the oldest claims
+// evict — large enough that re-firing is rare during a single host's scan
+// window, small enough that the maps can't grow unbounded over a multi-day
+// server run.
+const perHostClaimCacheSize = 16384
 
 // scanCaches groups the Executor's per-scan lookup and dedup state. Every field
 // is safe for concurrent use (bounded LRU / sharded map / sync.Map).
@@ -312,9 +320,14 @@ type scanCaches struct {
 
 	// perHostActiveClaimed / perHostPassiveClaimed ensure per-host modules run
 	// exactly once per (module, host) pair even with concurrent workers.
-	// Key: "moduleID:host" → struct{}.
-	perHostActiveClaimed  sync.Map
-	perHostPassiveClaimed sync.Map
+	// Key: "moduleID:host" → struct{}. Bounded LRUs rather than unbounded
+	// sync.Maps: in a long-lived scan-on-receive executor the (module, host)
+	// key space grows with every distinct host ingested, so an unbounded map
+	// leaks for the process lifetime. The LRU caps that growth and, by evicting
+	// the least-recently-claimed pairs, lets per-host modules re-fire for a host
+	// whose claim has aged out — restoring coverage on hosts seen long ago.
+	perHostActiveClaimed  *lru.Cache[string, struct{}]
+	perHostPassiveClaimed *lru.Cache[string, struct{}]
 
 	// moduleTechReq is a per-module required-tech cache. Populated lazily by
 	// passesTechFilter since module tags are immutable for the scan's lifetime.
@@ -395,6 +408,13 @@ func NewExecutor(
 		ipCache, _ = lru.New[string, []httpmsg.InsertionPoint](ipCacheSize)
 	}
 
+	// Bounded LRUs for the per-host run-once claims (size <= 0 is the only error
+	// lru.New returns, and perHostClaimCacheSize is a positive constant, so the
+	// ignored error is provably nil).
+	perHostActiveClaimed, _ := lru.New[string, struct{}](perHostClaimCacheSize)
+	perHostPassiveClaimed, _ := lru.New[string, struct{}](perHostClaimCacheSize)
+	storageHosts, _ := lru.New[string, struct{}](perHostClaimCacheSize)
+
 	e := &Executor{
 		cfg:            cfg,
 		source:         src,
@@ -408,9 +428,12 @@ func NewExecutor(
 		findingWriter:  cfg.FindingWriter,
 		scanUUID:       cfg.ScanUUID,
 		projectUUID:    cfg.ProjectUUID,
+		storageHosts:   storageHosts,
 		caches: scanCaches{
-			requestUUIDs: newShardedMap(cfg.Workers),
-			ipCache:      ipCache,
+			requestUUIDs:          newShardedMap(cfg.Workers),
+			ipCache:               ipCache,
+			perHostActiveClaimed:  perHostActiveClaimed,
+			perHostPassiveClaimed: perHostPassiveClaimed,
 		},
 		pool: workerPool{
 			feedbackCh: make(chan *work.WorkItem, cfg.Workers*16),
@@ -1210,9 +1233,16 @@ func (e *Executor) fetchBaselineResponse(ctx context.Context, req *httpmsg.HttpR
 		return nil, nil, nil, false
 	}
 
-	fullResp := respChain.FullResponseBytes()
-	rawResponseCopy := getResponseBuffer(len(fullResp))
-	copy(rawResponseCopy, fullResp)
+	// Compose headers+body directly into one pooled buffer. Using
+	// FullResponseBytes() here would allocate a throwaway full-size copy that we
+	// then copy *again* into the pooled buffer — two full-size allocations per
+	// record on the hot path. HeadersBytes()/BodyBytes() alias the chain's own
+	// buffers (valid until Close()), so a single splice into the pool suffices.
+	headers := respChain.HeadersBytes()
+	body := respChain.BodyBytes()
+	rawResponseCopy := getResponseBuffer(len(headers) + len(body))
+	copy(rawResponseCopy, headers)
+	copy(rawResponseCopy[len(headers):], body)
 	respChain.Close()
 
 	httpResp := httpmsg.NewHttpResponse(rawResponseCopy)
@@ -1489,6 +1519,14 @@ func (e *Executor) runPassiveWithTimeout(
 	module modules.PassiveModule,
 	item *httpmsg.HttpRequestResponse,
 ) []*output.ResultEvent {
+	// Fast exit when the scan/phase context is already cancelled: skip the
+	// watchdog goroutine + pooled timer + result channel entirely. During
+	// shutdown or after a phase deadline, many modules are still dispatched and
+	// would each otherwise spawn a doomed goroutine.
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	timeout := e.passiveModuleTimeout()
 	// Allow modules to override with a per-module timeout hint
 	if hinter, ok := module.(modules.TimeoutHinter); ok {
@@ -1552,6 +1590,14 @@ func (e *Executor) runActiveWithTimeout(
 	module modules.Module,
 	item *httpmsg.HttpRequestResponse,
 ) ([]*output.ResultEvent, bool) {
+	// Fast exit when the scan/phase context is already cancelled: skip the
+	// watchdog goroutine + pooled timer + result channel entirely (mirrors the
+	// <-ctx.Done() arm below). Avoids spawning doomed goroutines for the many
+	// modules still dispatched during shutdown or after a phase deadline.
+	if ctx.Err() != nil {
+		return nil, false
+	}
+
 	timeout := e.activeModuleTimeout()
 	// Allow modules to override with a per-module timeout hint (e.g. diffscan
 	// timing analysis legitimately needs longer than the global default).

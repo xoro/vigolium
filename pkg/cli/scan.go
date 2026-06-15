@@ -12,10 +12,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dustin/go-humanize"
 	fileutil "github.com/projectdiscovery/utils/file"
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/atomicfile"
 	"github.com/vigolium/vigolium/internal/config"
+	"github.com/vigolium/vigolium/internal/memlimit"
 	"github.com/vigolium/vigolium/internal/runner"
 	"github.com/vigolium/vigolium/pkg/agent"
 	"github.com/vigolium/vigolium/pkg/database"
@@ -94,6 +96,8 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	// --fail-on gate: validate up front, then convert a tripped gate into a
 	// non-zero exit once the body has returned (so reports/JSON are written
 	// first). evaluateFailOnGate sets the flag during reportNativeScanSuccess.
+	// Under -P/--parallel the gate is a no-op here — each child process runs its
+	// own runScanCmd and exits non-zero on its own findings.
 	if gateErr := resetFailOnGate(); gateErr != nil {
 		return gateErr
 	}
@@ -316,9 +320,9 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 		}
 	}
 
-	for _, f := range []string{"report", "pdf"} {
+	for _, f := range []string{"report", "pdf", "sqlite"} {
 		if scanOpts.HasFormat(f) && scanOpts.Output == "" && !splitByHostNaming {
-			return fmt.Errorf("--format %s requires -o/--output to specify the report file path (or pass --split-by-host to name per-host files by hostname)", f)
+			return fmt.Errorf("--format %s requires -o/--output to specify the output file path (or pass --split-by-host to name per-host files by hostname)", f)
 		}
 	}
 
@@ -1020,12 +1024,26 @@ func reconcileOutputFormats(opts *types.Options) error {
 		opts.JSONOutput = true
 		opts.Silent = true
 	}
+	// Normalize the sqlite aliases (sqlite3, db) to the canonical "sqlite" so the
+	// downstream switch / path helpers only deal with one spelling.
+	for i, f := range opts.OutputFormats {
+		switch strings.ToLower(f) {
+		case "sqlite", "sqlite3", "db":
+			opts.OutputFormats[i] = "sqlite"
+		}
+	}
 	for _, f := range opts.OutputFormats {
 		switch f {
-		case "console", "jsonl", "html", "report", "pdf":
+		case "console", "jsonl", "html", "report", "pdf", "sqlite":
 		default:
-			return fmt.Errorf("invalid --format value %q; valid formats: console, jsonl, html, report, pdf", f)
+			return fmt.Errorf("invalid --format value %q; valid formats: console, jsonl, html, report, pdf, sqlite", f)
 		}
+	}
+	// The sqlite format dumps this run's database to a standalone file, which is
+	// only well-defined in stateless mode (a per-run temp DB). A persisted run
+	// writes into the shared project DB, where "this scan's sqlite" is ambiguous.
+	if opts.HasFormat("sqlite") && !globalStateless {
+		return fmt.Errorf("--format sqlite requires -S/--stateless (it exports the standalone per-run database; for the persisted DB use `vigolium export`)")
 	}
 	// Route jsonl through the post-scan project-scoped envelope export so the
 	// scan output matches `vigolium export`/stateless. CI output keeps its own
@@ -1102,6 +1120,8 @@ func finishStatelessExport(db *database.DB, opts *types.Options, outputPath stri
 			exportStatelessConsole(ctx, db, outPath, opts.OmitResponse)
 		case "jsonl":
 			exportStatelessJSONL(ctx, db, opts, outPath)
+		case "sqlite":
+			exportStatelessSQLite(ctx, db, outPath)
 		default:
 			for _, rf := range reportFormats {
 				if rf.format != format {
@@ -1342,6 +1362,32 @@ func exportStatelessJSONL(ctx context.Context, db *database.DB, opts *types.Opti
 		terminal.InfoSymbol(), terminal.Cyan(outputPath), n)
 }
 
+// exportStatelessSQLite materializes the stateless run's database to a
+// standalone SQLite file via VACUUM INTO, which produces a clean, fully
+// checkpointed copy (WAL contents included, page freelist compacted) from the
+// live connection. The result is a self-contained .sqlite the operator can open
+// later with `vigolium finding/traffic -S --db <file>.sqlite`. VACUUM INTO
+// refuses to overwrite, so any stale target (and its WAL/SHM sidecars) is
+// removed first.
+func exportStatelessSQLite(ctx context.Context, db *database.DB, outputPath string) {
+	for _, p := range []string{outputPath, outputPath + "-wal", outputPath + "-shm"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s Failed to prepare SQLite export path %s: %v\n",
+				terminal.ErrorPrefix(), terminal.Cyan(outputPath), err)
+			return
+		}
+	}
+	// outputPath is operator-supplied (not attacker-controlled); single-quote
+	// escape keeps a path with quotes from breaking the statement.
+	stmt := fmt.Sprintf("VACUUM INTO '%s'", strings.ReplaceAll(outputPath, "'", "''"))
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		fmt.Fprintf(os.Stderr, "%s Failed to export SQLite database: %v\n", terminal.ErrorPrefix(), err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "%s SQLite database exported to %s\n",
+		terminal.InfoSymbol(), terminal.Cyan(outputPath))
+}
+
 // finishScanJSONLExport emits the post-scan unified JSONL envelope for a scan
 // run with --format jsonl. Persisted runs are scoped to the scan's project;
 // stateless runs export the whole temp DB. Output goes to the -o file or, when
@@ -1492,6 +1538,28 @@ func setupScanSignalHandler(r *runner.Runner) {
 	}()
 }
 
+// heapCeilingBannerLine renders the colored memory-ceiling line shown after the
+// scan banner under a parallel fan-out (-P > 1): a cyan ◆ prefix and label with
+// the byte amounts highlighted, matching the rest of the config banner. The
+// common auto-derived case reads "◆ Memory ceiling 12 GiB/process (auto from
+// 36 GiB RAM)"; explicit/percent/disabled/inherited ceilings fall back to the
+// raw note (which carries its own descriptor). Returns "" when there is nothing
+// to report (machine too small or RAM undetectable).
+func heapCeilingBannerLine(res memlimit.Result) string {
+	if res.Note == "" {
+		return ""
+	}
+	symbol := terminal.InfoSymbol()
+	if res.Auto && res.TotalRAMBytes > 0 {
+		return fmt.Sprintf("%s %s %s %s",
+			symbol,
+			terminal.White("Memory ceiling"),
+			terminal.Orange(humanize.IBytes(uint64(res.LimitBytes)))+terminal.Gray("/process"),
+			terminal.Gray("(auto from ")+terminal.Orange(humanize.IBytes(res.TotalRAMBytes))+terminal.Gray(" RAM)"))
+	}
+	return symbol + " " + terminal.Cyan(res.Note)
+}
+
 // printScanSummary prints a human-readable scan configuration overview to stderr.
 func printScanSummary(opts *types.Options, settings *config.Settings, strategyName string, repo *database.Repository) {
 	if opts.Silent || globalJSON || globalCIOutput {
@@ -1504,6 +1572,15 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 		fmt.Fprint(os.Stderr, GetDiscoveryBanner())
 	} else {
 		fmt.Fprint(os.Stderr, GetBanner())
+	}
+
+	// Under a parallel fan-out (-P > 1), surface the per-process heap ceiling the
+	// isolated child scans inherit, right after the banner. A single scan omits it
+	// — the ceiling is rarely worth a line when only one process runs.
+	if opts.Parallel > 1 {
+		if line := heapCeilingBannerLine(scanHeapCeiling); line != "" {
+			fmt.Fprintln(os.Stderr, line)
+		}
 	}
 
 	// Phase status indicators: symbol + colored name + optional pace detail

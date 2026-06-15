@@ -18,6 +18,13 @@ import (
 
 var masterKeyPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// localSecretPattern matches the hex secret_key_base Rails writes to
+// tmp/local_secret.txt (SecureRandom.hex → lowercase hex, 128 chars in modern
+// Rails). It is anchored so a blank body, an HTML shell, or any non-hex
+// catch-all placeholder fails — the same empty-200 false positive the /up
+// health-check probe hits.
+var localSecretPattern = regexp.MustCompile(`^[0-9a-f]{32,}$`)
+
 type notFoundFingerprint struct {
 	bodyHash string
 	bodyLen  int
@@ -227,7 +234,12 @@ func (m *Module) probeFile(
 			matchedMarkers = append(matchedMarkers, "encrypted credentials blob")
 
 		case "/tmp/local_secret.txt":
-			if len(body) >= 256 {
+			// A real local secret is a long hex secret_key_base. A blank or
+			// non-hex body (the catch-all / CDN empty-200 placeholder) carries no
+			// signal: the upper bound alone let an empty body through and report a
+			// secret leak. Require the hex token, bounded above to stay terse.
+			trimmed := strings.TrimSpace(body)
+			if len(trimmed) >= 256 || !localSecretPattern.MatchString(trimmed) {
 				return nil
 			}
 			matchedMarkers = append(matchedMarkers, "local secret content")

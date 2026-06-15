@@ -11,6 +11,19 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
+// defaultDiskSetMaxKeys bounds the number of keys a DiskSet retains before it
+// starts evicting. Without a cap, a long-lived dedup Manager (e.g. the
+// process-lifetime one in scan-on-receive) lets every DiskSet's on-disk
+// keyspace grow without limit as new request/payload fingerprints are seen,
+// inflating disk and LevelDB memtables for days. Eviction is FN-safe: an
+// evicted fingerprint may be re-processed once, and findings are deduplicated
+// again at the database layer.
+const defaultDiskSetMaxKeys = 1_000_000
+
+// diskSetEvictBatch is how many keys are dropped each time the cap is crossed,
+// amortizing the iterator+batch-delete cost across many inserts.
+const diskSetEvictBatch = 16384
+
 // DiskSet provides disk-backed deduplication using LevelDB.
 // Thread-safe for concurrent access.
 type DiskSet struct {
@@ -18,6 +31,7 @@ type DiskSet struct {
 	mu      sync.Mutex // Required for atomic check-then-put in IsSeen
 	hits    atomic.Uint64
 	size    atomic.Int64
+	maxKeys int64
 	path    string
 	cleanup bool
 }
@@ -30,6 +44,11 @@ type DiskSetOptions struct {
 
 	// Cleanup removes the disk files on Close() if true.
 	Cleanup bool
+
+	// MaxKeys caps the retained keyspace; once exceeded, the oldest-in-keyspace
+	// keys are evicted in batches. Zero uses defaultDiskSetMaxKeys; a negative
+	// value disables the cap (unbounded — legacy behavior).
+	MaxKeys int
 }
 
 // DefaultDiskSetOptions provides sensible defaults.
@@ -60,10 +79,18 @@ func NewDiskSet(opts DiskSetOptions) (*DiskSet, error) {
 		return nil, err
 	}
 
+	maxKeys := int64(opts.MaxKeys)
+	if opts.MaxKeys == 0 {
+		maxKeys = defaultDiskSetMaxKeys
+	} else if opts.MaxKeys < 0 {
+		maxKeys = 0 // disabled (unbounded)
+	}
+
 	return &DiskSet{
 		db:      db,
 		path:    path,
 		cleanup: opts.Cleanup,
+		maxKeys: maxKeys,
 	}, nil
 }
 
@@ -82,12 +109,37 @@ func (d *DiskSet) IsSeen(key string) bool {
 	has, err := d.db.Has(keyBytes, nil)
 	if err != nil || !has {
 		_ = d.db.Put(keyBytes, nil, nil)
-		d.size.Add(1)
+		if d.size.Add(1) > d.maxKeys && d.maxKeys > 0 {
+			d.evictLocked()
+		}
 		return false
 	}
 
 	d.hits.Add(1)
 	return true
+}
+
+// evictLocked drops a batch of keys to keep the set under maxKeys. The caller
+// must hold d.mu. Eviction order follows LevelDB's key sort order (effectively
+// arbitrary), which is acceptable: dropping a fingerprint only risks
+// re-processing it once. The batch delete keeps d.db stable (no close/reopen),
+// so the lock-free Contains reader is unaffected.
+func (d *DiskSet) evictLocked() {
+	iter := d.db.NewIterator(nil, nil)
+	defer iter.Release()
+
+	batch := new(leveldb.Batch)
+	n := 0
+	for n < diskSetEvictBatch && iter.Next() {
+		// iter.Key() is only valid until the next Next(); copy it.
+		batch.Delete(append([]byte(nil), iter.Key()...))
+		n++
+	}
+	if n > 0 {
+		if err := d.db.Write(batch, nil); err == nil {
+			d.size.Add(int64(-n))
+		}
+	}
 }
 
 // Contains returns true if key exists (read-only check).

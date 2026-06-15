@@ -14,21 +14,44 @@ import (
 // ParameterFindingRegistry tracks which (URL, parameter, vulnerability class)
 // combinations have already produced findings. Modules can check this to
 // avoid redundant scanning of already-confirmed vulnerabilities.
+//
+// The backing store is a bounded LRU rather than an unbounded sync.Map: the key
+// space is (host+path, param, vuln-class), which in a long-lived scan-on-receive
+// executor grows with every distinct URL+param ever scanned — the highest-
+// cardinality of all the ScanContext registries. Eviction only forgets that a
+// location was already found, so at worst an aged-out location is re-scanned
+// once (it re-marks itself); it never produces a false finding.
 type ParameterFindingRegistry struct {
-	found sync.Map // key: "host+path|param_name|vuln_tag" → struct{}
+	once  sync.Once
+	found *lru.Cache[string, struct{}]
+}
+
+// cache lazily initializes the bounded LRU so a zero-value
+// &ParameterFindingRegistry{} (used by the executor and several tests) is safe.
+func (r *ParameterFindingRegistry) cache() *lru.Cache[string, struct{}] {
+	r.once.Do(func() {
+		// lru.New only errors on size <= 0; paramFindingCacheSize is positive.
+		r.found, _ = lru.New[string, struct{}](paramFindingCacheSize)
+	})
+	return r.found
 }
 
 // MarkFound records that a vulnerability of the given class was found
 // at the specified location and parameter.
 func (r *ParameterFindingRegistry) MarkFound(hostPath, paramName, vulnTag string) {
-	r.found.Store(hostPath+"|"+paramName+"|"+vulnTag, struct{}{})
+	if r == nil {
+		return
+	}
+	r.cache().Add(hostPath+"|"+paramName+"|"+vulnTag, struct{}{})
 }
 
 // HasFinding returns true if a vulnerability of the given class was already
 // found at the specified location and parameter.
 func (r *ParameterFindingRegistry) HasFinding(hostPath, paramName, vulnTag string) bool {
-	_, ok := r.found.Load(hostPath + "|" + paramName + "|" + vulnTag)
-	return ok
+	if r == nil {
+		return false
+	}
+	return r.cache().Contains(hostPath + "|" + paramName + "|" + vulnTag)
 }
 
 // RequestFeeder allows modules to inject discovered requests back into the scanning pipeline.
@@ -81,6 +104,17 @@ type InsertionPointProvider interface {
 }
 
 const baselineCacheSize = 4096
+
+// perHostRegistryCacheSize bounds the per-host TechStack / WAFStack /
+// ContentClass registries so a long-lived scan-on-receive executor can't
+// accumulate one entry per distinct host for the whole process lifetime.
+// Eviction only forgets a host's cached gating hint (re-derived, or fail-open,
+// on the next sighting).
+const perHostRegistryCacheSize = 8192
+
+// paramFindingCacheSize bounds the cross-module finding-dedup registry — see
+// ParameterFindingRegistry.
+const paramFindingCacheSize = 65536
 
 // ScanContext provides shared resources to modules during scanning.
 type ScanContext struct {

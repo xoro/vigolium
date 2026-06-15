@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/agent/agenttypes"
 	"github.com/vigolium/vigolium/pkg/olium"
@@ -184,13 +185,21 @@ func buildOliumEngineWithSpec(cfg *config.OliumConfig, spec SessionSpec) (*oengi
 	return oengine.New(ecfg), nil
 }
 
+// transcriptSeqCacheSize bounds the (sessionDir, template) → counter LRU. The
+// counter only needs to disambiguate concurrent same-template calls within a
+// single run (a swarm plan batch), which all happen close together, so a few
+// thousand recent entries is ample. A flat map here was an unbounded leak: each
+// run has a unique sessionDir, so its keys accumulated for the whole process
+// lifetime even after the session dir was cleaned off disk.
+const transcriptSeqCacheSize = 4096
+
 // transcriptSeq tracks how many recorders have been opened per
 // (sessionDir, template) within this process, so concurrent same-template
 // calls (swarm plan batches run up to BatchConcurrency goroutines deep) get
 // distinct files instead of interleaving large tool-result lines into one.
 var (
 	transcriptSeqMu sync.Mutex
-	transcriptSeq   = map[string]int{}
+	transcriptSeq   *lru.Cache[string, int]
 )
 
 // uniqueTranscriptName returns the per-phase transcript basename for a session
@@ -204,8 +213,12 @@ func uniqueTranscriptName(sessionDir, template string) string {
 	safe := sanitizeTemplateSegment(template)
 	key := sessionDir + "\x00" + safe
 	transcriptSeqMu.Lock()
-	n := transcriptSeq[key]
-	transcriptSeq[key]++
+	if transcriptSeq == nil {
+		// lru.New only errors on size <= 0; the constant is positive.
+		transcriptSeq, _ = lru.New[string, int](transcriptSeqCacheSize)
+	}
+	n, _ := transcriptSeq.Get(key)
+	transcriptSeq.Add(key, n+1)
 	transcriptSeqMu.Unlock()
 	if n == 0 {
 		return "transcript-" + safe + ".jsonl"

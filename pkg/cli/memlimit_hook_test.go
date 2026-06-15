@@ -18,6 +18,7 @@ func restoreMemHookState(t *testing.T) {
 	origLimit := debug.SetMemoryLimit(-1)
 	origEnv, hadEnv := os.LookupEnv("GOMEMLIMIT")
 	origMemLimit, origParallel, origSilent := globalMemLimit, globalParallel, globalSilent
+	origCeil := scanHeapCeiling
 	t.Cleanup(func() {
 		debug.SetMemoryLimit(origLimit)
 		if hadEnv {
@@ -26,6 +27,7 @@ func restoreMemHookState(t *testing.T) {
 			_ = os.Unsetenv("GOMEMLIMIT")
 		}
 		globalMemLimit, globalParallel, globalSilent = origMemLimit, origParallel, origSilent
+		scanHeapCeiling = origCeil
 	})
 	globalSilent = true // keep the note off the test output
 }

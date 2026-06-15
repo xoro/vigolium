@@ -98,6 +98,51 @@ vigolium traffic --host target.example --status 200 --json -n 5
 vigolium traffic search-term --json --full-body -n 1
 ```
 
+## Read a standalone export (`-S/--stateless`)
+
+`finding` and `traffic` can read a file directly instead of your project DB —
+handy for inspecting a `--format jsonl` export or a foreign `.sqlite` lying
+around. `-S/--stateless` requires `--db` and turns project scoping **off**, so
+every row in the file is shown regardless of the `project_uuid` it carries.
+Nothing is written to your project DB (a JSONL source is loaded into a throwaway
+in-memory SQLite).
+
+```bash
+# Browse a scan's JSONL export with all the normal filters/sorting.
+vigolium finding -S --db ./scan-target.jsonl --min-severity medium
+vigolium traffic -S --db ./scan-target.jsonl --status 500 -n 20
+
+# A standalone .sqlite works too (auto-detected by extension / header sniff).
+vigolium finding -S --db ./run.sqlite --json --with-records
+```
+
+A stateless scan can emit that `.sqlite` directly with `--format sqlite` (aliases
+`sqlite3`, `db`) — it dumps the per-run DB to `<output>.sqlite` and combines with
+other formats. Under `--split-by-host` each per-host file is named
+`<base>-<host>.sqlite`:
+
+```bash
+vigolium scan -S --format sqlite,html -o scan -t target.example   # → scan.sqlite + scan.html
+vigolium scan -S --format sqlite -o run --split-by-host -P 4 -T targets.txt  # → run-<host>.sqlite per target
+vigolium finding -S --db ./run-target.example.sqlite --min-severity high
+```
+
+## Render one finding/record as Markdown (`--markdown`)
+
+`--markdown` prints the selected findings/records as Markdown (evidence +
+request/response in fenced `http` blocks) to stdout — pipe it to a file or a
+viewer like `glow`. Pair with `--id` / a fuzzy term / `-n 1` to focus one item.
+
+Under `-S/--stateless`, add `--compact` to window the response around the
+finding's `matched_at` / `extracted_results` (records cap the body to a preview)
+so a long page doesn't flood the console:
+
+```bash
+vigolium finding -S --db ./scan-target.jsonl --id 42 --markdown            # full bodies
+vigolium finding -S --db ./scan-target.jsonl --id 42 --markdown --compact  # response windowed at the match
+vigolium traffic -S --db ./scan-target.jsonl search-term -n 1 --markdown
+```
+
 ## AI / agentic scans
 
 These run an LLM-driven scan into the DB. With `--json`, the live agent stream

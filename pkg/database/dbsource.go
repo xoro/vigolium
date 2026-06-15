@@ -354,6 +354,19 @@ func (s *DBInputSource) ack(seq uint64) {
 	}
 	ack.acked = true
 
+	// Drain the contiguous run of acked records from the head, then advance the
+	// cursor ONCE to the furthest record with delta = run length. The cursor
+	// keyset is monotonic, so the final (createdAt, uuid) covers every record in
+	// between and processed_count increments by the run length — identical to a
+	// per-record advance, but one UPDATE instead of N. At the ingest rate, the
+	// per-record UPDATE contended with the RecordWriter for the SQLite write
+	// lock; coalescing collapses that to one write per drain. Still done under
+	// s.mu so cursor advances stay serialized and monotonic.
+	var (
+		advanced int64
+		lastAt   time.Time
+		lastUUID string
+	)
 	for {
 		head, ok := s.pendingBySeq[s.nextAckSeq]
 		if !ok || !head.acked {
@@ -361,9 +374,14 @@ func (s *DBInputSource) ack(seq uint64) {
 		}
 		delete(s.pendingBySeq, s.nextAckSeq)
 		s.nextAckSeq++
-		if err := s.repo.AdvanceScanCursorBy(context.Background(), s.scanUUID, head.createdAt, head.uuid, 1); err != nil {
+		advanced++
+		lastAt = head.createdAt
+		lastUUID = head.uuid
+	}
+
+	if advanced > 0 {
+		if err := s.repo.AdvanceScanCursorBy(context.Background(), s.scanUUID, lastAt, lastUUID, advanced); err != nil {
 			zap.L().Warn("DBInputSource: failed to acknowledge cursor", zap.Error(err))
-			return
 		}
 	}
 }

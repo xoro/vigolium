@@ -40,6 +40,7 @@ var (
 	// Display-only flags
 	findingRaw         bool
 	findingBurp        bool
+	findingMarkdown    bool
 	findingWithRecords bool
 	findingColumns     []string
 	findingExclude     []string
@@ -131,6 +132,8 @@ func init() {
 	f := findingCmd.Flags()
 	f.BoolVar(&findingRaw, "raw", false, "Show full raw HTTP request and response for each finding")
 	f.BoolVar(&findingBurp, "burp", false, "Display in Burp Suite-style format (colored request/response)")
+	f.BoolVar(&findingMarkdown, "markdown", false, "Render the matched findings as Markdown (evidence + request/response in fenced http blocks) to stdout")
+	f.BoolVarP(&globalStateless, "stateless", "S", false, "Read from --db (a .jsonl export or standalone .sqlite) with project scoping off; never writes to your project DB")
 	f.BoolVar(&findingWithRecords, "with-records", false, "With --json: resolve and embed the linked HTTP records (self-contained triage bundle)")
 	f.StringSliceVar(&findingColumns, "columns", nil, "Columns to show (comma-separated, e.g. ID,SEVERITY,MODULE)")
 	f.StringSliceVar(&findingExclude, "exclude-columns", nil, "Columns to hide (comma-separated)")
@@ -141,7 +144,7 @@ func init() {
 func runFinding(cmd *cobra.Command, args []string) error {
 	defer closeDatabaseOnExit()
 
-	db, err := getDB()
+	db, err := openReadDB()
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
@@ -187,6 +190,8 @@ func runFinding(cmd *cobra.Command, args []string) error {
 
 		if globalJSON {
 			return displayFindingsJSON(ctx, db, findings, total, filters.ProjectUUID)
+		} else if findingMarkdown {
+			return displayFindingsMarkdown(ctx, db, findings)
 		} else if findingBurp {
 			return displayFindingsBurp(db, ctx, findings)
 		} else if findingRaw {
@@ -223,7 +228,7 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		}
 	}
 
-	projectUUID, err := resolveProjectUUID()
+	projectUUID, err := effectiveProjectUUID()
 	if err != nil {
 		return database.QueryFilters{}, err
 	}
@@ -365,7 +370,8 @@ func loadFindingRecords(ctx context.Context, repo *database.Repository, f *datab
 }
 
 func findingDisplayTable(db *database.DB, ctx context.Context, findings []*database.Finding, total int64) error {
-	projectUUID, _ := resolveProjectUUID()
+	// Stateless counts across the whole file (effectiveProjectUUID returns "").
+	projectUUID, _ := effectiveProjectUUID()
 
 	// Build severity and confidence breakdown summary
 	sevLine := ""

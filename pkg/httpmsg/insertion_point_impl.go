@@ -1006,53 +1006,73 @@ func encodePayloadForIP(ip InsertionPoint, payload []byte) []byte {
 	}
 }
 
-// batchReplaceByOffset performs batch replacement on a request.
+// batchReplaceByOffset performs batch replacement on a request, splicing every
+// spec's encoded payload into its [startOffset,endOffset) range.
+//
+// It does this in a SINGLE allocation: the previous implementation reallocated a
+// fresh full-size request slice per spec inside the loop (N specs → N
+// full-request allocations, each immediately discarded), which on the active-
+// fuzzing hot path was a dominant allocation source. Specs come from distinct
+// insertion points (distinct parameter value ranges), so they are
+// non-overlapping; we sort ascending and apply all splices in one forward pass
+// into one buffer sized from the precomputed total length delta. An overlapping
+// spec (a logic error that shouldn't occur for real insertion points) is skipped
+// rather than corrupting the walk.
 func batchReplaceByOffset(request []byte, specs []injectionSpec) ([]byte, []offsetDelta) {
 	if len(specs) == 0 {
 		return request, nil
 	}
 
 	sort.Slice(specs, func(i, j int) bool {
-		return specs[i].startOffset > specs[j].startOffset
+		return specs[i].startOffset < specs[j].startOffset
 	})
 
-	result := make([]byte, len(request))
-	copy(result, request)
-
+	// Pass 1: keep valid, non-overlapping specs; accumulate the total size delta,
+	// the per-spec deltas, and whether any spec needs a Content-Length update.
+	// adjustOffset (the sole consumer of deltas) sums by position, so the
+	// ascending order here is equivalent to the previous descending order. The
+	// kept specs are compacted in place into specs[:n] (specs is already sorted
+	// and owned by this call), avoiding a second slice allocation.
+	totalDelta := 0
 	needsContentLengthUpdate := false
 	var deltas []offsetDelta
-
+	prevEnd := 0
+	n := 0
 	for _, spec := range specs {
-		if spec.startOffset < 0 || spec.endOffset > len(result) || spec.startOffset > spec.endOffset {
+		if spec.startOffset < 0 || spec.endOffset > len(request) || spec.startOffset > spec.endOffset {
 			continue
 		}
-
-		oldLen := spec.endOffset - spec.startOffset
-		newLen := len(spec.encoded)
-		sizeDiff := newLen - oldLen
-
-		if sizeDiff != 0 {
-			deltas = append(deltas, offsetDelta{
-				position: spec.startOffset,
-				delta:    sizeDiff,
-			})
+		if spec.startOffset < prevEnd {
+			continue // overlapping spec — skip to keep the single-pass walk well-defined
 		}
+		prevEnd = spec.endOffset
 
-		newResult := make([]byte, len(result)+sizeDiff)
-		copy(newResult[0:spec.startOffset], result[0:spec.startOffset])
-		copy(newResult[spec.startOffset:spec.startOffset+newLen], spec.encoded)
-		copy(newResult[spec.startOffset+newLen:], result[spec.endOffset:])
-
-		result = newResult
-
+		sizeDiff := len(spec.encoded) - (spec.endOffset - spec.startOffset)
+		totalDelta += sizeDiff
+		if sizeDiff != 0 {
+			deltas = append(deltas, offsetDelta{position: spec.startOffset, delta: sizeDiff})
+		}
 		if spec.needsCL {
 			needsContentLengthUpdate = true
 		}
+		specs[n] = spec
+		n++
 	}
+	valid := specs[:n]
+
+	// Pass 2: one allocation, one forward copy of [original prefix | encoded]*
+	// segments followed by the trailing remainder.
+	result := make([]byte, len(request)+totalDelta)
+	w, r := 0, 0
+	for _, spec := range valid {
+		w += copy(result[w:], request[r:spec.startOffset])
+		w += copy(result[w:], spec.encoded)
+		r = spec.endOffset
+	}
+	copy(result[w:], request[r:])
 
 	if needsContentLengthUpdate {
-		updated, err := UpdateContentLength(result)
-		if err == nil {
+		if updated, err := UpdateContentLength(result); err == nil {
 			result = updated
 		}
 	}

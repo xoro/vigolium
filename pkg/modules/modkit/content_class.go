@@ -2,8 +2,8 @@ package modkit
 
 import (
 	"strings"
-	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 )
 
@@ -98,13 +98,18 @@ func ContentClassAllows(required []string, class ContentClass) bool {
 // record's own Content-Type is indeterminate, so module gating can still defer
 // markup-only modules on a host whose root was a JSON/XML API. Thread-safe.
 type ContentClassRegistry struct {
-	mu     sync.RWMutex
-	byHost map[string]ContentClass
+	// byHost is a bounded LRU (see perHostRegistryCacheSize). It needs no extra
+	// mutex: Set/Get each perform a single internally-locked LRU op with no
+	// read-modify-write (unlike TechRegistry/WAFRegistry, which do).
+	byHost *lru.Cache[string, ContentClass]
 }
 
-// NewContentClassRegistry returns an empty registry.
+// NewContentClassRegistry returns an empty registry. The host map is a bounded
+// LRU so a long-lived executor can't grow it per distinct host without limit; an
+// evicted host reads as ContentClassUnknown (fail-open) until re-seeded.
 func NewContentClassRegistry() *ContentClassRegistry {
-	return &ContentClassRegistry{byHost: make(map[string]ContentClass)}
+	c, _ := lru.New[string, ContentClass](perHostRegistryCacheSize)
+	return &ContentClassRegistry{byHost: c}
 }
 
 // Set records the content class observed for host. Empty host or unknown class
@@ -117,9 +122,7 @@ func (r *ContentClassRegistry) Set(host string, c ContentClass) {
 	if host == "" {
 		return
 	}
-	r.mu.Lock()
-	r.byHost[host] = c
-	r.mu.Unlock()
+	r.byHost.Add(host, c)
 }
 
 // Get returns the recorded content class for host, or ContentClassUnknown.
@@ -131,7 +134,6 @@ func (r *ContentClassRegistry) Get(host string) ContentClass {
 	if host == "" {
 		return ContentClassUnknown
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.byHost[host]
+	v, _ := r.byHost.Get(host)
+	return v
 }

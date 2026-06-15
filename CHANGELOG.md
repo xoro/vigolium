@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.33-beta] - 2026-06-16
+
+A performance and memory-footprint release: unbounded caches across the long-lived server become bounded LRUs, SQLite WALs are kept compact, and the native-scan hot path sheds redundant allocations. Adds a standalone `--format sqlite` export, stateless reads of `.jsonl`/`.sqlite` files, and Markdown rendering for findings and traffic.
+
+### Added
+
+- **`--format sqlite`** — dumps the run's standalone DB to `<output>.sqlite` via `VACUUM INTO`; requires `-S/--stateless` + `-o`, combines with other formats, and names per-host files under `--split-by-host`. Aliases: `sqlite3`, `db`.
+- **`finding`/`traffic -S/--stateless`** — read a `--db` source (a `--format jsonl` export or standalone `.sqlite`) directly with project scoping off; nothing is written to your project DB.
+- **`finding`/`traffic -m/--markdown`** — render matched findings/records as Markdown (request/response in fenced `http` blocks) to stdout; under `-S`, `--compact` windows the response around the match.
+
+### Performance
+
+- **Unbounded maps → bounded LRUs across the long-lived server** — the per-host run-once claims, storage-host set, OAST nonce tracker, per-host Tech/WAF/ContentClass registries, the ParameterFinding dedup registry, and the transcript-sequence counter were all process-lifetime leaks in a scan-on-receive server. Each is now a capped LRU; eviction only forgets a cached hint or run-once claim, so at worst a stale entry is re-derived/re-fired once.
+- **SQLite WAL kept compact** — a background TRUNCATE checkpointer (every 5m) plus per-connection `wal_autocheckpoint`/`mmap_size`/`temp_store` tuning and an on-open checkpoint stop the ingest DB's WAL ballooning over a multi-day run; reader pool raised 4 → 8.
+- **Disk-backed dedup set bounded** — `DiskSet` caps its keyspace (default 1M keys, batched eviction) so a process-lifetime dedup manager can't grow LevelDB without limit. FN-safe: an evicted fingerprint is re-processed once and re-deduped at the DB layer.
+- **Native-scan hot path allocations cut** — single-allocation insertion-point splice (was N reallocs/fuzz), baseline response composed into one pooled buffer, body hashed only when stubbed/truncated, and `--with-records` batch-loads linked records in one query (no N+1).
+- **Bounded memory on big scans/audits** — the re-spider phase pages candidates body-free instead of holding 5000 bodies at once; the coverage probe and code-audit query metadata-only (skip `raw_request`/`raw_response` BLOBs) when they need only method/URL.
+- **Fewer doomed goroutines/writes** — module dispatch fast-exits an already-cancelled context; `DBInputSource` coalesces a run of acks into one cursor UPDATE; the disk-queue Ack deletes the record instead of rewriting it; the server sheds the heavy `Result`/`SwarmResult` blobs from the status map once persisted.
+
+### Fixed
+
+- **`rails-info-exposure` / `rails-sensitive-files` blank-body catch-all FPs** — a blank `200` on `/up` or `/tmp/local_secret.txt` (a catch-all/CDN placeholder) slipped past the soft-404 fingerprint and was reported as a health check / leaked secret. The markerless paths now reject an empty body, and the local-secret case requires an anchored hex token.
+- **Host rate-limiter no longer evicts an in-flight host** — forced-cap eviction could pick a host with acquired-but-not-released slots, orphaning its semaphore accounting; it now evicts the least-recently-used *idle* entry (or briefly exceeds the soft cap if all are busy).
+- **Disk-queue segment data race** — `tryDequeue`/`Ack` ranged over `q.segments[:]`, aliasing the backing array mutated concurrently by segment create/cleanup; they now copy the slice under the lock.
+- **Combined audit keeps running after client disconnect** — a dropped SSE stream during a `driver=auto/both` run left the multi-hour subprocess running against nobody; the SSE pump now cancels the run on first write error.
+
 ## [v0.1.32-beta] - 2026-06-15
 
 ### Changed

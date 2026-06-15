@@ -2,10 +2,8 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"time"
 
@@ -405,15 +403,12 @@ func runListScans(ctx context.Context, db *database.DB) error {
 	views := buildScanViews(scans)
 
 	if globalJSON {
-		output := map[string]interface{}{
+		return writeAgentJSON(map[string]any{
 			"total":  total,
 			"offset": listOffset,
 			"limit":  listLimit,
 			"scans":  views,
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		})
 	}
 
 	fmt.Printf("Showing %d-%d of %d scans\n\n",
@@ -564,17 +559,14 @@ func runListGenericTable(ctx context.Context, db *database.DB, tableName string)
 	}
 
 	if globalJSON {
-		output := map[string]interface{}{
+		return writeAgentJSON(map[string]any{
 			"table":   tableName,
 			"total":   total,
 			"offset":  listOffset,
 			"limit":   listLimit,
 			"columns": headers,
 			"rows":    rows,
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(output)
+		})
 	}
 
 	fmt.Printf("Showing %d-%d of %d rows from %s\n\n",

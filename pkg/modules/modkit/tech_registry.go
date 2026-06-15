@@ -3,6 +3,8 @@ package modkit
 import (
 	"strings"
 	"sync"
+
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 // TechRegistry tracks technology stack detections per host during a scan.
@@ -12,7 +14,7 @@ import (
 // Thread-safe for concurrent reads and writes.
 type TechRegistry struct {
 	mu     sync.RWMutex
-	byHost map[string]map[string]struct{}
+	byHost *lru.Cache[string, map[string]struct{}] // bounded: see perHostRegistryCacheSize
 
 	// OnDetect fires exactly once per (host, tag) pair on first observation.
 	// The callback runs without the registry lock held; implementations must
@@ -20,9 +22,12 @@ type TechRegistry struct {
 	OnDetect func(host, tag string)
 }
 
-// NewTechRegistry returns an empty registry.
+// NewTechRegistry returns an empty registry. The host map is a bounded LRU so a
+// long-lived executor can't grow it per distinct host without limit; an evicted
+// host simply reads as unknown (fail-open) until re-fingerprinted.
 func NewTechRegistry() *TechRegistry {
-	return &TechRegistry{byHost: make(map[string]map[string]struct{})}
+	c, _ := lru.New[string, map[string]struct{}](perHostRegistryCacheSize)
+	return &TechRegistry{byHost: c}
 }
 
 // Mark records that the given tech tag was observed for host.
@@ -37,10 +42,10 @@ func (r *TechRegistry) Mark(host, tag string) {
 		return
 	}
 	r.mu.Lock()
-	set, ok := r.byHost[host]
+	set, ok := r.byHost.Get(host)
 	if !ok {
 		set = make(map[string]struct{})
-		r.byHost[host] = set
+		r.byHost.Add(host, set)
 	}
 	_, already := set[tag]
 	if !already {
@@ -64,7 +69,7 @@ func (r *TechRegistry) Has(host, tag string) bool {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	set, ok := r.byHost[host]
+	set, ok := r.byHost.Get(host)
 	if !ok {
 		return false
 	}
@@ -84,7 +89,7 @@ func (r *TechRegistry) HasAny(host string, tags []string) bool {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	set, ok := r.byHost[host]
+	set, ok := r.byHost.Get(host)
 	if !ok || len(set) == 0 {
 		return false
 	}
@@ -117,7 +122,7 @@ func (r *TechRegistry) Allows(host string, candidates []string) bool {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	set, ok := r.byHost[host]
+	set, ok := r.byHost.Get(host)
 	if !ok || len(set) == 0 {
 		return true // fail-open: host unknown
 	}
@@ -140,6 +145,6 @@ func (r *TechRegistry) HostKnown(host string) bool {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	set, ok := r.byHost[host]
+	set, ok := r.byHost.Get(host)
 	return ok && len(set) > 0
 }

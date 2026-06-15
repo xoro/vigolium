@@ -14,9 +14,11 @@ func (e *Executor) runPassivePerHostFiltered(ctx context.Context, item *httpmsg.
 	host := hostFromItem(item)
 
 	for _, module := range eligible {
-		// Claim this (module, host) pair — skip if another worker already claimed it
+		// Claim this (module, host) pair — skip if another worker already claimed
+		// it. ContainsOrAdd is atomic (single lock) so two concurrent workers
+		// can't both win the claim; ok==true means the pair was already claimed.
 		claimKey := module.ID() + ":" + host
-		if _, loaded := e.caches.perHostPassiveClaimed.LoadOrStore(claimKey, struct{}{}); loaded {
+		if ok, _ := e.caches.perHostPassiveClaimed.ContainsOrAdd(claimKey, struct{}{}); ok {
 			continue
 		}
 

@@ -399,8 +399,12 @@ func (q *DiskQueue) tryDequeue() (*ScanTask, error) {
 		return nil, ErrQueueClosed
 	}
 
+	// Copy the segment slice under the lock — q.segments[:] would alias the
+	// backing array, which createNewSegment (append) and cleanupCompletedSegments
+	// (reassign) mutate concurrently, racing this range.
 	q.mu.RLock()
-	segments := q.segments[:]
+	segments := make([]*Segment, len(q.segments))
+	copy(segments, q.segments)
 	q.mu.RUnlock()
 
 	// Iterate from oldest segment first
@@ -426,8 +430,11 @@ func (q *DiskQueue) tryDequeue() (*ScanTask, error) {
 
 // Ack marks a task as completed.
 func (q *DiskQueue) Ack(taskID string) error {
+	// Copy under the lock (see tryDequeue) to avoid racing concurrent mutations
+	// of q.segments.
 	q.mu.RLock()
-	segments := q.segments[:]
+	segments := make([]*Segment, len(q.segments))
+	copy(segments, q.segments)
 	q.mu.RUnlock()
 
 	// Try to find and ack the task in any segment

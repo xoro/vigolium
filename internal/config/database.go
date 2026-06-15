@@ -42,11 +42,12 @@ func DefaultDatabaseConfig() *DatabaseConfig {
 		Enabled: true,
 		Driver:  "sqlite",
 		SQLite: SQLiteConfig{
-			Path:        "~/.vigolium/database-vgnm.sqlite",
-			BusyTimeout: 15000,
-			JournalMode: "WAL",
-			Synchronous: "NORMAL",
-			CacheSize:   10000,
+			Path:         "~/.vigolium/database-vgnm.sqlite",
+			BusyTimeout:  15000,
+			JournalMode:  "WAL",
+			Synchronous:  "NORMAL",
+			CacheSize:    10000,
+			MaxOpenConns: 8, // WAL: concurrent readers + 1 writer (see openSQLite)
 		},
 		Postgres: PostgresConfig{
 			Host:            "localhost",

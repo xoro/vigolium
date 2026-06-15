@@ -328,43 +328,7 @@ func parseSeverity(s string) severity.Severity {
 
 func exportMarkdown(records []*database.HTTPRecord, out *os.File) error {
 	for i, rec := range records {
-		// Heading: method, URL, status code, response time
-		heading := fmt.Sprintf("## %s %s", rec.Method, rec.URL)
-		if rec.HasResponse {
-			heading += fmt.Sprintf(" → %d (%dms)", rec.StatusCode, rec.ResponseTimeMs)
-		}
-		_, _ = fmt.Fprintln(out, heading)
-		_, _ = fmt.Fprintln(out)
-
-		// Metadata line
-		uuidShort := rec.UUID
-		if len(uuidShort) > 8 {
-			uuidShort = uuidShort[:8]
-		}
-		_, _ = fmt.Fprintf(out, "**UUID:** `%s` | **Source:** %s | **Sent:** %s\n",
-			uuidShort, rec.Source, rec.SentAt.Format("2006-01-02 15:04:05"))
-		_, _ = fmt.Fprintln(out)
-
-		// Request section
-		if len(rec.RawRequest) > 0 {
-			_, _ = fmt.Fprintln(out, "### Request")
-			_, _ = fmt.Fprintln(out)
-			_, _ = fmt.Fprintln(out, "```http")
-			_, _ = fmt.Fprintln(out, strings.TrimRight(string(rec.RawRequest), "\n\r"))
-			_, _ = fmt.Fprintln(out, "```")
-			_, _ = fmt.Fprintln(out)
-		}
-
-		// Response section (unless --request-only)
-		if !exportRequestOnly && rec.HasResponse && len(rec.RawResponse) > 0 {
-			_, _ = fmt.Fprintln(out, "### Response")
-			_, _ = fmt.Fprintln(out)
-			_, _ = fmt.Fprintln(out, "```http")
-			_, _ = fmt.Fprintln(out, strings.TrimRight(string(rec.RawResponse), "\n\r"))
-			_, _ = fmt.Fprintln(out, "```")
-			_, _ = fmt.Fprintln(out)
-		}
-
+		renderRecordMarkdown(rec, out, exportRequestOnly, false)
 		// Divider between records (skip after last)
 		if i < len(records)-1 {
 			_, _ = fmt.Fprintln(out, "---")

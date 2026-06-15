@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
@@ -47,12 +48,9 @@ var (
 
 // registerAgentJSONFlags adds the shared --fields / --compact / --full-body flags
 // to a command's local flag set.
-func registerAgentJSONFlags(flags interface {
-	StringSliceVar(p *[]string, name string, value []string, usage string)
-	BoolVar(p *bool, name string, value bool, usage string)
-}) {
+func registerAgentJSONFlags(flags *pflag.FlagSet) {
 	flags.StringSliceVar(&jsonFields, "fields", nil, "Restrict --json output to these top-level keys (comma-separated, e.g. id,severity,url)")
-	flags.BoolVar(&jsonCompact, "compact", false, "Compact --json: metadata only, omit request/response bodies (best for surveys)")
+	flags.BoolVar(&jsonCompact, "compact", false, "Compact output: with --json, metadata only (omit bodies); with --stateless --markdown, window the response around matched_at/extracted_results")
 	flags.BoolVar(&jsonFullBody, "full-body", false, "Include complete request/response bodies in --json (no truncation or binary stubbing)")
 }
 
@@ -115,7 +113,7 @@ func maybeGunzip(body []byte) []byte {
 	if err != nil {
 		return body
 	}
-	defer zr.Close()
+	defer func() { _ = zr.Close() }()
 	out, err := io.ReadAll(io.LimitReader(zr, agentGunzipCap))
 	if err != nil || len(out) == 0 {
 		return body
@@ -157,12 +155,19 @@ func bodyView(raw []byte, contentType string, max int, opts agentViewOptions) ma
 		return v
 	}
 	body = maybeGunzip(body)
-	sum := sha256.Sum256(body)
 	v["body_size"] = len(body)
-	v["body_sha256"] = hex.EncodeToString(sum[:])
+	// Only fingerprint the body when the caller can't see the full bytes
+	// (stubbed or truncated) — that's when an agent needs the hash to dedupe or
+	// decide to re-fetch. Hashing a fully-inlined body would just burn cycles
+	// over (potentially MBs of) bytes the caller already has.
+	addHash := func() {
+		sum := sha256.Sum256(body)
+		v["body_sha256"] = hex.EncodeToString(sum[:])
+	}
 
 	if !opts.fullBody && (modkit.IsStaticAssetContentType(contentType) || looksBinaryBytes(body)) {
 		v["body_omitted"] = "binary"
+		addHash()
 		return v
 	}
 	if opts.fullBody || len(body) <= max {
@@ -171,6 +176,7 @@ func bodyView(raw []byte, contentType string, max int, opts agentViewOptions) ma
 	}
 	v["body"] = string(body[:max])
 	v["body_truncated"] = true
+	addHash()
 	return v
 }
 
@@ -381,21 +387,54 @@ func compactFindingView(f *database.Finding, records []*database.HTTPRecord, opt
 }
 
 // findingViews renders a slice of findings, optionally resolving + embedding the
-// linked HTTP records (--with-records).
+// linked HTTP records (--with-records). Records for the whole page are fetched in
+// one query (not per finding) to avoid an N+1 round-trip pattern.
 func findingViews(ctx context.Context, db *database.DB, findings []*database.Finding, opts agentViewOptions, withRecords bool) []map[string]any {
-	var repo *database.Repository
+	var byUUID map[string]*database.HTTPRecord
 	if withRecords {
-		repo = database.NewRepository(db)
+		byUUID = batchLoadFindingRecords(ctx, db, findings)
 	}
 	views := make([]map[string]any, 0, len(findings))
 	for _, f := range findings {
 		var recs []*database.HTTPRecord
 		if withRecords {
-			recs = loadFindingRecords(ctx, repo, f)
+			for _, u := range f.HTTPRecordUUIDs {
+				if r := byUUID[u]; r != nil {
+					recs = append(recs, r)
+				}
+			}
 		}
 		views = append(views, compactFindingView(f, recs, opts))
 	}
 	return views
+}
+
+// batchLoadFindingRecords fetches every HTTP record referenced across the given
+// findings in a single query, keyed by UUID, so embedding records into N
+// findings costs one round-trip instead of N.
+func batchLoadFindingRecords(ctx context.Context, db *database.DB, findings []*database.Finding) map[string]*database.HTTPRecord {
+	seen := make(map[string]struct{})
+	var uuids []string
+	for _, f := range findings {
+		for _, u := range f.HTTPRecordUUIDs {
+			if _, ok := seen[u]; !ok {
+				seen[u] = struct{}{}
+				uuids = append(uuids, u)
+			}
+		}
+	}
+	if len(uuids) == 0 {
+		return nil
+	}
+	records, err := database.NewRepository(db).GetRecordsByUUIDs(ctx, uuids)
+	if err != nil {
+		return nil
+	}
+	byUUID := make(map[string]*database.HTTPRecord, len(records))
+	for _, r := range records {
+		byUUID[r.UUID] = r
+	}
+	return byUUID
 }
 
 // recordViews renders a slice of HTTP records for agent consumption.

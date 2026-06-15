@@ -269,6 +269,13 @@ func (h *Handlers) prepareCombinedAuditRun(plan combinedAuditPlan) (combinedAudi
 func (h *Handlers) runDriversSequentially(ctx context.Context, plan combinedAuditPlan, setup combinedAuditSetup, sseWriter *bufio.Writer) []driverResult {
 	results := make([]driverResult, 0, 2)
 
+	// Cancelling runCtx stops the in-flight driver and skips any remaining driver
+	// in the sequence. The SSE pump invokes runCancel on client disconnect so a
+	// dropped stream doesn't leave a 6–12h audit/piolium subprocess running (and
+	// pinning a heavy agent slot) against nobody.
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
 	// For driver=auto/both a chain may contain modes only one driver
 	// understands; the other driver's filtered chain is empty and that
 	// leg is skipped rather than running a bogus mode.
@@ -292,7 +299,7 @@ func (h *Handlers) runDriversSequentially(ctx context.Context, plan combinedAudi
 
 	auditRan := false
 	if auditEligible {
-		auditRes := h.runOneCombinedDriver(ctx, agent.AuditDriverAudit, plan, setup, sseWriter)
+		auditRes := h.runOneCombinedDriver(runCtx, agent.AuditDriverAudit, plan, setup, sseWriter, runCancel)
 		results = append(results, auditRes)
 		auditRan = true
 	} else {
@@ -307,8 +314,13 @@ func (h *Handlers) runDriversSequentially(ctx context.Context, plan combinedAudi
 		return results
 	}
 
+	// Client disconnected (or run cancelled) during the audit leg — skip piolium.
+	if runCtx.Err() != nil {
+		return results
+	}
+
 	if pioliumHasModes {
-		results = append(results, h.runOneCombinedDriver(ctx, agent.AuditDriverPiolium, plan, setup, sseWriter))
+		results = append(results, h.runOneCombinedDriver(runCtx, agent.AuditDriverPiolium, plan, setup, sseWriter, runCancel))
 	} else {
 		zap.L().Info("Combined audit: piolium leg skipped — no piolium-supported modes in chain",
 			zap.String("agentic_scan_uuid", plan.parentUUID))
@@ -320,7 +332,7 @@ func (h *Handlers) runDriversSequentially(ctx context.Context, plan combinedAudi
 // run with its own per-driver timeout (so an audit hang doesn't burn
 // piolium's budget). Stream multiplexing for SSE is handled here so the
 // driver-end marker fires on subprocess exit.
-func (h *Handlers) runOneCombinedDriver(ctx context.Context, name string, plan combinedAuditPlan, setup combinedAuditSetup, sseWriter *bufio.Writer) driverResult {
+func (h *Handlers) runOneCombinedDriver(ctx context.Context, name string, plan combinedAuditPlan, setup combinedAuditSetup, sseWriter *bufio.Writer, onDisconnect func()) driverResult {
 	res := driverResult{
 		name:       name,
 		sessionDir: filepath.Join(setup.parentSessionDir, name),
@@ -385,7 +397,7 @@ func (h *Handlers) runOneCombinedDriver(ctx context.Context, name string, plan c
 		return res
 	}
 
-	pumpDone := runDriverSSEPump(sseWriter, pipeReader, name)
+	pumpDone := runDriverSSEPump(sseWriter, pipeReader, name, onDisconnect)
 
 	res.runErr = h.waitAuditRunner(driverCtx, res.runner)
 
@@ -428,11 +440,13 @@ func buildDriverStreamWriter(sseWriter *bufio.Writer, logFile *os.File) (io.Writ
 
 // runDriverSSEPump reads chunks from pipeReader and forwards them as
 // driver-tagged SSE events. On the first writeSSE error (typically
-// client disconnect) it stops forwarding but keeps draining the pipe so
-// the runner doesn't block on a full pipe — back-pressure stays at the
-// SSE socket, not on the audit subprocess. Returns a channel that
-// closes when the pump exits.
-func runDriverSSEPump(sseWriter *bufio.Writer, pipeReader *io.PipeReader, driver string) <-chan struct{} {
+// client disconnect) it invokes onDisconnect once — used to cancel the run so
+// the heavyweight audit/piolium subprocess stops instead of running to its
+// multi-hour timeout against nobody — then stops forwarding but keeps draining
+// the pipe so the runner doesn't block on a full pipe while it unwinds
+// (back-pressure stays at the SSE socket, not on the subprocess). Returns a
+// channel that closes when the pump exits.
+func runDriverSSEPump(sseWriter *bufio.Writer, pipeReader *io.PipeReader, driver string, onDisconnect func()) <-chan struct{} {
 	done := make(chan struct{})
 	if pipeReader == nil {
 		close(done)
@@ -447,6 +461,9 @@ func runDriverSSEPump(sseWriter *bufio.Writer, pipeReader *io.PipeReader, driver
 			if n > 0 && !clientGone {
 				if err := writeSSE(sseWriter, sseEvent{Type: "chunk", Driver: driver, Text: string(buf[:n])}); err != nil {
 					clientGone = true
+					if onDisconnect != nil {
+						onDisconnect()
+					}
 				}
 			}
 			if readErr != nil {

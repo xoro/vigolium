@@ -752,6 +752,10 @@ func (h *Handlers) handleSwarmSSE(c fiber.Ctx, agenticScanUUID string, req Agent
 		if clientConnected {
 			_ = sink.send(sseEvent{Type: "done", SwarmResult: res.result})
 		}
+
+		// Drop the heavy swarm result from the long-lived status map now that
+		// it's persisted and streamed (the SSE used res.result, not the stored copy).
+		h.shedAgenticScanResult(agenticScanUUID)
 		zap.L().Info("Agent swarm completed (streaming)",
 			zap.String("agentic_scan_uuid", agenticScanUUID),
 			zap.Int("findings", res.result.TotalFindings))
@@ -870,6 +874,10 @@ func (h *Handlers) runBackgroundAgentSwarm(agenticScanUUID string, req AgentSwar
 	h.agentMu.Unlock()
 
 	h.persistAgenticScanCompleted(agenticScanUUID, &statusSnapshot)
+
+	// Drop the heavy swarm result blob from the status map post-persist (findings
+	// /records remain queryable from the DB).
+	h.shedAgenticScanResult(agenticScanUUID)
 
 	if runErr != nil {
 		webhook.FireAgenticScan(h.settings, h.repo, agenticScanUUID)

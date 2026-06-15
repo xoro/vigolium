@@ -83,7 +83,7 @@ func SetColorEnabled(enabled bool) {
 // is re-checked here (not just in init()) because this unconditionally resets the
 // color state, so it must re-apply that opt-out rather than assume init() stuck.
 func EnableCLIColor(noColor, ciOutput bool) {
-	SetColorEnabled(!(noColor || ciOutput || os.Getenv("NO_COLOR") != ""))
+	SetColorEnabled(!noColor && !ciOutput && os.Getenv("NO_COLOR") == "")
 }
 
 // SetCIMode enables CI mode (suppresses decorative output)

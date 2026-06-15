@@ -117,7 +117,8 @@ func (s *SwarmRunner) runCodeAudit(ctx context.Context, cfg SwarmConfig, targetU
 
 	// Query existing routes from DB to give the agent endpoint context
 	if hostname != "" {
-		dbRecords, recErr := s.repo.GetRecordsByHostname(ctx, cfg.ProjectUUID, hostname, 100)
+		// Only rec.Method/rec.URL are rendered below — skip the body BLOBs.
+		dbRecords, recErr := s.repo.GetRecordMetadataByHostname(ctx, cfg.ProjectUUID, hostname, 100)
 		if recErr == nil && len(dbRecords) > 0 {
 			var rs strings.Builder
 			for i, rec := range dbRecords {
