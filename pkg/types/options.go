@@ -9,8 +9,8 @@ import (
 type Options struct {
 	Concurrency int // Number of parallel workers
 
-	TargetsFilePath string
-	InputFileMode   string // json, jsonb, list
+	TargetsFilePaths []string // target-list files (-T/--target-file, repeatable); lines from all are merged
+	InputFileMode    string   // json, jsonb, list
 	Stream          bool
 	Stdin           bool
 	// Time to wait between each input read operation before closing the stream

@@ -82,6 +82,17 @@ func (m *Module) ScanPerInsertionPoint(
 	// 	return nil, nil
 	// }
 
+	// Behavioral diffing on a cache/CDN-fronted response or a large rendered HTML
+	// page is unreliable: cache HIT/MISS swings and per-request dynamic content
+	// (ads, recommendations, rotating blocks) manufacture phantom break-vs-escape
+	// differentials. Skip such surfaces before the expensive, many-probe baseline
+	// build — this is the slowest active module, so gating here also saves
+	// significant scan time. (Cosmetic/unconsumed insertion points are already
+	// handled downstream by the VerySimilar(softBase, crudeFuzz) baseline guard.)
+	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
+		return nil, nil
+	}
+
 	httpService := ctx.Service()
 	if httpService == nil {
 		return nil, nil

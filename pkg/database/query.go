@@ -38,6 +38,7 @@ type QueryFilters struct {
 	FindingID      int      // Filter by finding ID
 	FindingIDAfter int64    // Filter findings with ID greater than this value
 	Severity       []string // Finding severity (critical, high, medium, low, info)
+	Confidence     []string // Finding confidence (certain, firm, tentative)
 	ModuleName     string   // Filter findings by module name
 	ModuleType     string   // Filter findings by module type (active, passive, nuclei, etc.)
 	FindingSource  string   // Filter findings by source (audit, spa, agent, etc.)
@@ -609,6 +610,11 @@ func (fqb *FindingsQueryBuilder) applyFindingFilters(query *bun.SelectQuery) {
 	// Severity filtering
 	if len(fqb.filters.Severity) > 0 {
 		query.Where("f.severity IN (?)", bun.List(fqb.filters.Severity))
+	}
+
+	// Confidence filtering
+	if len(fqb.filters.Confidence) > 0 {
+		query.Where("f.confidence IN (?)", bun.List(fqb.filters.Confidence))
 	}
 
 	// Module name filtering

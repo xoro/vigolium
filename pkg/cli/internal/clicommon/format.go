@@ -56,6 +56,22 @@ func ColorSeverity(sev string) string {
 	}
 }
 
+// ColorConfidence colorizes a finding confidence label, matching the palette
+// used in the finding/db summary lines (certain→purple, firm→yellow,
+// tentative→gray). Unknown values are returned unchanged.
+func ColorConfidence(conf string) string {
+	switch strings.ToLower(conf) {
+	case "certain":
+		return terminal.HiPurple(conf)
+	case "firm":
+		return terminal.BoldYellow(conf)
+	case "tentative":
+		return terminal.Gray(conf)
+	default:
+		return conf
+	}
+}
+
 // FormatSeverityWithSymbols renders a one-line summary of severity counts using
 // per-severity symbols, omitting zero-count severities.
 func FormatSeverityWithSymbols(counts map[string]int) string {

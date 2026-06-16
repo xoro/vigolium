@@ -61,18 +61,22 @@ func (m *Module) confirmLogic(
 			f = form{cmp: "<>", tl: a, tr: b, fl: a, fr: a}
 		}
 
-		_, tSig, err := m.sendPayload(ctx, httpClient, ip, cond(logic, f.cmp, f.tl, f.tr))
+		_, tSig, tBlocked, err := m.sendPayload(ctx, httpClient, ip, cond(logic, f.cmp, f.tl, f.tr))
 		if err != nil {
 			return false, err
 		}
-		_, fSig, err := m.sendPayload(ctx, httpClient, ip, cond(logic, f.cmp, f.fl, f.fr))
+		_, fSig, fBlocked, err := m.sendPayload(ctx, httpClient, ip, cond(logic, f.cmp, f.fl, f.fr))
 		if err != nil {
 			return false, err
 		}
 
-		// Factor: both forms must be HTTP 200 and produce different pages. If a
-		// branch flips to a redirect/error the differential is a status flip, not
-		// a 200-vs-200 boolean signal — reject.
+		// Factor: neither form may be a WAF/CDN block, and both must be HTTP 200
+		// producing different pages. A blocked probe or a branch flipping to a
+		// redirect/error is a status/edge artifact, not a 200-vs-200 boolean
+		// signal — reject.
+		if tBlocked || fBlocked {
+			return false, nil
+		}
 		if !statusOK(tSig) || !statusOK(fSig) {
 			return false, nil
 		}
@@ -94,9 +98,12 @@ func (m *Module) confirmLogic(
 	// is a syntax error on every SQL dialect. If the endpoint still renders the
 	// deterministic TRUE page, it does not react to SQL at all → false positive.
 	c, d := distinctNums()
-	_, invSig, err := m.sendPayload(ctx, httpClient, ip, baseValue+prefix+" AND "+c+" "+d+suffix)
+	_, invSig, invBlocked, err := m.sendPayload(ctx, httpClient, ip, baseValue+prefix+" AND "+c+" "+d+suffix)
 	if err != nil {
 		return false, err
+	}
+	if invBlocked {
+		return false, nil
 	}
 	if ratioSimilar(invSig, trueSigs[0]) {
 		return false, nil
@@ -116,13 +123,18 @@ func (m *Module) detectLogicOp(
 ) (string, bool, error) {
 	for _, logic := range []string{"AND", "OR"} {
 		a, b := distinctNums()
-		_, tSig, err := m.sendPayload(ctx, httpClient, ip, cond(logic, "=", a, a))
+		_, tSig, tBlocked, err := m.sendPayload(ctx, httpClient, ip, cond(logic, "=", a, a))
 		if err != nil {
 			return "", false, err
 		}
-		_, fSig, err := m.sendPayload(ctx, httpClient, ip, cond(logic, "=", a, b))
+		_, fSig, fBlocked, err := m.sendPayload(ctx, httpClient, ip, cond(logic, "=", a, b))
 		if err != nil {
 			return "", false, err
+		}
+		// A blocked probe proves nothing about the boolean oracle — try the other
+		// operator instead of accepting an edge-induced divergence.
+		if tBlocked || fBlocked {
+			continue
 		}
 		// Require a 200-vs-200 divergence: a 200↔redirect/error split is a status
 		// flip, not the boolean oracle we want.
@@ -133,10 +145,14 @@ func (m *Module) detectLogicOp(
 	return "", false, nil
 }
 
-// confirmRepeat is the fallback for opaque (curated/bypass) pairs whose breakout
-// boundary is not modelled: it re-runs the matched TRUE/FALSE differential for
-// confirmRounds rounds and requires the divergence and per-branch stability to
-// reproduce every time.
+// confirmRepeat is the last-resort fallback for an opaque pair whose comparison
+// operands could not be re-derived (so confirmRandomized cannot prove the
+// differential follows boolean truth). It re-runs the matched TRUE/FALSE
+// differential for confirmRounds rounds and requires the divergence and
+// per-branch stability to reproduce every time. It cannot, on its own,
+// distinguish a real oracle from a deterministic non-SQL differential (a WAF
+// tautology signature), so confirmRandomized — which varies the operands — is
+// always preferred and headers are denied this path entirely.
 func (m *Module) confirmRepeat(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
@@ -145,16 +161,19 @@ func (m *Module) confirmRepeat(
 ) (bool, error) {
 	var trueSigs, falseSigs []responseSignature
 	for i := 0; i < confirmRounds; i++ {
-		_, tSig, err := m.sendPayload(ctx, httpClient, ip, truePayload)
+		_, tSig, tBlocked, err := m.sendPayload(ctx, httpClient, ip, truePayload)
 		if err != nil {
 			return false, err
 		}
-		_, fSig, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
+		_, fSig, fBlocked, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
 		if err != nil {
 			return false, err
 		}
-		// Both forms must stay HTTP 200 (reject status-flip differentials) and
-		// produce different pages.
+		// A blocked probe or a status flip is an edge/status artifact, not a
+		// 200-vs-200 boolean signal — reject.
+		if tBlocked || fBlocked {
+			return false, nil
+		}
 		if !statusOK(tSig) || !statusOK(fSig) {
 			return false, nil
 		}

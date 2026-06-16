@@ -67,6 +67,27 @@ const (
 	// fails the same-condition similarity check and is dropped.
 	boolTrueSamples  = 3
 	boolFalseSamples = 2
+
+	// boolNeutralSamples is how many times a benign, operator-free CONTROL value is
+	// re-sent, interleaved with the true/false probes on the SAME cadence. Its job
+	// is to measure the endpoint's variance under the exact request schedule the
+	// comparison uses: if a benign value sampled this way is not self-consistent,
+	// the endpoint's per-request variance is correlated with the request cadence
+	// (round-robin upstreams, alternating cache HIT/MISS) and any true/false
+	// divergence is a scheduling artifact, not a query boolean.
+	boolNeutralSamples = 2
+
+	// benignProbeSuffix is an operator-free, quote-free token appended to the base
+	// value to form the benign control: it exercises the insertion point exactly
+	// like the payloads but carries no NoSQL syntax.
+	benignProbeSuffix = "vglmctl"
+
+	// booleanInertMax is the similarity at or above which a benign control response
+	// is considered indistinguishable from the baseline. For path-segment / header
+	// insertion points this marks the point as inert (a cosmetic catch-all path
+	// segment or a header the app never consumes); a boolean true/false differential
+	// on an inert point is noise, not query control.
+	booleanInertMax = 0.97
 )
 
 // booleanDiffPair couples an always-true probe with the STRUCTURALLY MATCHING
@@ -80,15 +101,25 @@ const (
 type booleanDiffPair struct {
 	truePayload  string
 	falsePayload string
-	desc         string
+	// secTruePayload / secFalsePayload re-run the SAME experiment with DIFFERENT
+	// constants (9==9 / 4==4 always-true, 9==8 / 4==5 always-false). After the
+	// primary pair flags a differential, the secondary pair must reproduce it: a
+	// genuine boolean oracle flips the response for ANY always-true/always-false
+	// constant, whereas a one-off transient divergence that mimicked one — a cache
+	// miss, a round-robin upstream, a momentary content variant — will not recur
+	// with new constants. The constants differ from the primary so a cached or
+	// replayed primary response cannot satisfy the recheck.
+	secTruePayload  string
+	secFalsePayload string
+	desc            string
 }
 
 // booleanDiffPairs is the source of truth for the boolean-differential probes.
 var booleanDiffPairs = []booleanDiffPair{
-	{`' || '1'=='1`, `' || '1'=='2`, "NoSQL string injection — single-quote OR tautology"},
-	{`" || "1"=="1`, `" || "1"=="2`, "NoSQL string injection — double-quote OR tautology"},
-	{`'; return true; var a='`, `'; return false; var a='`, "NoSQL JS injection — return true vs false"},
-	{`"; return true; var a="`, `"; return false; var a="`, "NoSQL JS injection — return true vs false (double-quote)"},
+	{`' || '1'=='1`, `' || '1'=='2`, `' || '9'=='9`, `' || '9'=='8`, "NoSQL string injection — single-quote OR tautology"},
+	{`" || "1"=="1`, `" || "1"=="2`, `" || "9"=="9`, `" || "9"=="8`, "NoSQL string injection — double-quote OR tautology"},
+	{`'; return true; var a='`, `'; return false; var a='`, `'; return 4==4; var a='`, `'; return 4==5; var a='`, "NoSQL JS injection — return true vs false"},
+	{`"; return true; var a="`, `"; return false; var a="`, `"; return 4==4; var a="`, `"; return 4==5; var a="`, "NoSQL JS injection — return true vs false (double-quote)"},
 }
 
 // binaryContentTypePrefixes mark a response body that is NOT analyzable text. A
@@ -292,6 +323,29 @@ func confirmBooleanDiff(trueBody1, trueBody2, falseBody, baselineBody string) bo
 	return confirmBooleanDiffMulti([]string{trueBody1, trueBody2}, []string{falseBody}, baselineBody)
 }
 
+// confirmBooleanDiffWithControl extends confirmBooleanDiffMulti with a benign
+// CONTROL cluster sampled on the same interleaved cadence as the true/false probes.
+// The control's self-consistency is the parity guard against schedule-correlated
+// variance: if a benign operator-free value sampled this way splits across its own
+// samples, the endpoint's per-request variance is correlated with the request
+// cadence (round-robin upstreams, alternating cache HIT/MISS), so a self-consistent
+// always-true cluster and a self-consistent always-false cluster that diverge are a
+// scheduling artifact, not a query boolean. With the control stable, it defers to
+// the established true/false cluster confirmation.
+func confirmBooleanDiffWithControl(neutralBodies, trueBodies, falseBodies []string, baselineBody string) bool {
+	if len(neutralBodies) < 2 {
+		return false // need repeated control samples to measure cadence-correlated noise
+	}
+	nn := make([]string, len(neutralBodies))
+	for i, b := range neutralBodies {
+		nn[i] = normalizeResponse(b)
+	}
+	if minPairwiseSimilarity(nn) < booleanStabilityMin {
+		return false // benign control split on the same cadence — scheduling artifact
+	}
+	return confirmBooleanDiffMulti(trueBodies, falseBodies, baselineBody)
+}
+
 // containsNoSQLError checks if the response body contains NoSQL error patterns.
 func containsNoSQLError(body string) bool {
 	for _, pattern := range nosqlErrorPatterns {
@@ -345,4 +399,3 @@ func analyzeTimeDelay(baselineDuration, probeDuration time.Duration) bool {
 	delta := probeDuration - baselineDuration
 	return delta.Milliseconds() >= timeDelayThresholdMs
 }
-

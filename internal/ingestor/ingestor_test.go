@@ -37,6 +37,38 @@ func TestDefaultOptions(t *testing.T) {
 	}
 }
 
+// TestInputSources verifies the primary input + -T/--target-file ordering and
+// the empty-Input skip (so a -T-only run does not block reading stdin).
+func TestInputSources(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		files []string
+		want  []string
+	}{
+		{"stdin only", "-", nil, []string{"-"}},
+		{"file only", "in.txt", nil, []string{"in.txt"}},
+		{"target files only (no primary input)", "", []string{"a.txt", "b.txt"}, []string{"a.txt", "b.txt"}},
+		{"primary stdin plus target files", "-", []string{"a.txt"}, []string{"-", "a.txt"}},
+		{"empty entries skipped", "", []string{"", "b.txt", ""}, []string{"b.txt"}},
+		{"nothing", "", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &Options{Input: tt.input, TargetFiles: tt.files}
+			got := opts.inputSources()
+			if len(got) != len(tt.want) {
+				t.Fatalf("inputSources() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("inputSources()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestNewClient(t *testing.T) {
 	t.Run("trims trailing slash", func(t *testing.T) {
 		c := NewClient("http://localhost:8080/", "key", 50)

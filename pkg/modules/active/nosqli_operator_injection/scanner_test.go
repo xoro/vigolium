@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +15,28 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/modules/modtest"
 )
+
+// testCmpRe extracts `A==B` comparisons (after quote stripping) so a mock backend
+// can evaluate an injected boolean for ANY constant, the way a real vulnerable
+// endpoint does — exercising the secondary-literal reconfirmation, not just the
+// primary `1`/`2` constants.
+var testCmpRe = regexp.MustCompile(`(\w+)==(\w+)`)
+
+// injectedConditionIsFalse mimics a backend that genuinely evaluates an injected
+// boolean: it returns true when the value carries an always-FALSE condition for any
+// constant (1==2, 9==8, 4==5, or "return false").
+func injectedConditionIsFalse(v string) bool {
+	if strings.Contains(v, "return false") {
+		return true
+	}
+	stripped := strings.NewReplacer("'", "", `"`, "").Replace(v)
+	for _, m := range testCmpRe.FindAllStringSubmatch(stripped, -1) {
+		if m[1] != m[2] {
+			return true
+		}
+	}
+	return false
+}
 
 func TestContainsNoSQLError(t *testing.T) {
 	tests := []struct {
@@ -328,6 +351,27 @@ func TestBooleanDiffPairsAreTrueFalse(t *testing.T) {
 		if !falseIsContradiction {
 			t.Errorf("false payload %q is not an always-false condition", p.falsePayload)
 		}
+
+		// The secondary recheck must use DIFFERENT always-true/always-false
+		// constants so a cached or coincidental primary divergence cannot satisfy it.
+		if p.secTruePayload == p.truePayload || p.secFalsePayload == p.falsePayload {
+			t.Errorf("secondary constants must differ from primary: %q / %q", p.truePayload, p.falsePayload)
+		}
+		if p.secTruePayload == p.secFalsePayload {
+			t.Errorf("secondary pair has identical true/false payloads: %q", p.secTruePayload)
+		}
+		secTrueIsTautology := strings.Contains(p.secTruePayload, "9'=='9") ||
+			strings.Contains(p.secTruePayload, `9"=="9`) ||
+			strings.Contains(p.secTruePayload, "return 4==4")
+		secFalseIsContradiction := strings.Contains(p.secFalsePayload, "9'=='8") ||
+			strings.Contains(p.secFalsePayload, `9"=="8`) ||
+			strings.Contains(p.secFalsePayload, "return 4==5")
+		if !secTrueIsTautology {
+			t.Errorf("secondary true payload %q is not an always-true condition", p.secTruePayload)
+		}
+		if !secFalseIsContradiction {
+			t.Errorf("secondary false payload %q is not an always-false condition", p.secFalsePayload)
+		}
 	}
 }
 
@@ -478,7 +522,10 @@ func TestScanPerInsertionPoint_GenuineBooleanInjection(t *testing.T) {
 		_ = r.ParseForm()
 		v := r.FormValue("q")
 		w.Header().Set("Content-Type", "text/html")
-		if strings.Contains(v, "=='2") || strings.Contains(v, "return false") {
+		// A real injectable backend evaluates the condition for ANY constant, so
+		// both the primary (1==2) and the secondary recheck (9==8 / 4==5) flip the
+		// response — exactly what the secondary-literal confirmation requires.
+		if injectedConditionIsFalse(v) {
 			_, _ = io.WriteString(w, empty)
 			return
 		}
@@ -542,5 +589,161 @@ func TestGetPayloadsForType(t *testing.T) {
 	}
 	if !hasArray {
 		t.Error("URL payloads should include array syntax")
+	}
+}
+
+// firstPathFolderIP returns the first URL-path-folder insertion point in rr, the
+// surface where the chope false positives lived (a cosmetic `{city}-restaurants`
+// segment).
+func firstPathFolderIP(t *testing.T, rr *httpmsg.HttpRequestResponse) httpmsg.InsertionPoint {
+	t.Helper()
+	points, err := httpmsg.CreateAllInsertionPoints(rr.Request().Raw(), true)
+	if err != nil {
+		t.Fatalf("CreateAllInsertionPoints: %v", err)
+	}
+	for _, p := range points {
+		if p.Type() == httpmsg.INS_URL_PATH_FOLDER {
+			return p
+		}
+	}
+	t.Fatal("no path-folder insertion point found")
+	return nil
+}
+
+// TestScanPerInsertionPoint_SecondaryLiteralNonReproduction reproduces the core
+// chope false positive at the logic layer: a NON-injectable endpoint whose response
+// happens to diverge for the PRIMARY always-false literal (=='2) — a one-off quirk,
+// a transient, an unrelated routing rule — but does NOT reproduce that divergence
+// for the secondary constants (9==8 / 4==5). The secondary-literal confirmation
+// must reject it.
+func TestScanPerInsertionPoint_SecondaryLiteralNonReproduction(t *testing.T) {
+	list := "<html><body><ul>" + strings.Repeat("<li>record</li>", 60) + "</ul></body></html>"
+	empty := "<html><body><p>No matching records found.</p></body></html>"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		v := r.FormValue("q")
+		w.Header().Set("Content-Type", "text/html")
+		// Only the exact primary false literal flips the response — a real boolean
+		// oracle would flip for every always-false constant, this does not.
+		if strings.Contains(v, "=='2") {
+			_, _ = io.WriteString(w, empty)
+			return
+		}
+		_, _ = io.WriteString(w, list)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "POST", srv.URL+"/api/users", "q=smith")
+	rr = modtest.Response(rr, "text/html", list)
+	ip := modtest.InsertionPoint(t, rr, "q")
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("a differential that does not reproduce with new constants must not be reported, got %d: %+v", len(res), res)
+	}
+}
+
+// TestScanPerInsertionPoint_InertPathSegmentSkipped reproduces the chope path-FP
+// surface: a catch-all route that returns the SAME page for any path-segment value
+// (the `{city}-restaurants` segment is cosmetic, not a query key). The relevance
+// precheck (#5) sends one benign value, sees the baseline page returned, and skips
+// the boolean-diff path before running any full probe set.
+func TestScanPerInsertionPoint_InertPathSegmentSkipped(t *testing.T) {
+	page := "<html><body>" + strings.Repeat("<p>restaurant listing</p>", 40) + "</body></html>"
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, page) // identical regardless of the path segment
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/city-restaurants/restaurant/rise", "")
+	rr = modtest.Response(rr, "text/html", page)
+	ip := firstPathFolderIP(t, rr)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("a cosmetic catch-all path segment must not be reported, got %d: %+v", len(res), res)
+	}
+	if n := atomic.LoadInt64(&hits); n > 2 {
+		t.Fatalf("relevance precheck should skip after a single benign probe, got %d requests", n)
+	}
+}
+
+// TestScanPerInsertionPoint_LargeHTMLPageSkipped covers the surface gate (#4): a
+// large rendered text/html content page (the chope ~200 KB restaurant page) is not
+// a compact query/auth endpoint, so the boolean-diff path skips it WITHOUT sending
+// any probe traffic.
+func TestScanPerInsertionPoint_LargeHTMLPageSkipped(t *testing.T) {
+	big := "<html><body>" + strings.Repeat("<div>content block</div>", 6000) + "</body></html>" // >100 KB
+	var hits int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt64(&hits, 1)
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = io.WriteString(w, big)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "GET", srv.URL+"/city-restaurants/restaurant/rise", "")
+	rr = modtest.Response(rr, "text/html", big)
+	ip := firstPathFolderIP(t, rr)
+
+	res, err := New().ScanPerInsertionPoint(rr, ip, client, &modkit.ScanContext{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("a large HTML content page must not be boolean-diffed, got %d: %+v", len(res), res)
+	}
+	if n := atomic.LoadInt64(&hits); n != 0 {
+		t.Fatalf("surface gate should send no traffic on a large HTML page, got %d requests", n)
+	}
+}
+
+func TestConfirmBooleanDiffWithControl(t *testing.T) {
+	list := "<html><body><ul>" + strings.Repeat("<li>user record</li>", 40) + "</ul></body></html>"
+	empty := "<html><body><p>No results</p></body></html>"
+
+	// Stable benign control + clear true/false divergence → confirm.
+	if !confirmBooleanDiffWithControl([]string{list, list}, []string{list, list, list}, []string{empty, empty}, list) {
+		t.Error("stable control with clear true/false divergence should confirm")
+	}
+
+	// The benign control splits across its own samples (cadence-correlated variance):
+	// even a clean true/false divergence must be rejected as a scheduling artifact.
+	splitNeutral := []string{
+		list,
+		"<html><body><div>" + strings.Repeat("an entirely different control body shape", 40) + "</div></body></html>",
+	}
+	if confirmBooleanDiffWithControl(splitNeutral, []string{list, list, list}, []string{empty, empty}, list) {
+		t.Error("a control that splits on the same cadence must be rejected (scheduling artifact)")
+	}
+
+	// Fewer than two control samples cannot measure cadence-correlated noise.
+	if confirmBooleanDiffWithControl([]string{list}, []string{list, list, list}, []string{empty, empty}, list) {
+		t.Error("fewer than two control samples must not confirm")
+	}
+}
+
+func TestPathOrHeaderInsertionTypes(t *testing.T) {
+	for _, ty := range []httpmsg.InsertionPointType{httpmsg.INS_HEADER, httpmsg.INS_URL_PATH_FOLDER, httpmsg.INS_URL_PATH_FILENAME} {
+		if !pathOrHeaderInsertionTypes.Contains(ty) {
+			t.Errorf("type %d should be classified path/header", ty)
+		}
+	}
+	for _, ty := range []httpmsg.InsertionPointType{httpmsg.INS_PARAM_URL, httpmsg.INS_PARAM_BODY, httpmsg.INS_PARAM_JSON} {
+		if pathOrHeaderInsertionTypes.Contains(ty) {
+			t.Errorf("type %d should NOT be classified path/header", ty)
+		}
 	}
 }

@@ -19,7 +19,7 @@ import (
 // commands that ingest or scan from external sources.
 func registerInputSourceFlags(flags *pflag.FlagSet) {
 	flags.StringSliceVarP(&globalTargets, "target", "t", nil, "Target URL to scan (can be specified multiple times)")
-	flags.StringVarP(&globalTargetFile, "target-file", "T", "", "File containing target URLs (one per line)")
+	flags.StringSliceVarP(&globalTargetFiles, "target-file", "T", nil, "File containing target URLs (one per line; repeatable for multiple files)")
 	flags.StringVarP(&globalInput, "input", "i", "-", "Input file path or spec (use - for stdin)")
 	flags.StringVarP(&globalInputMode, "input-mode", "I", "urls", "Input format: urls, openapi, swagger, burp, curl, nuclei, har (see --list-input-mode)")
 	flags.DurationVar(&globalInputReadTimeout, "input-read-timeout", 3*time.Minute, "Timeout for reading input from stdin or file")

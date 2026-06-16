@@ -2,8 +2,10 @@ package dbimport
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -288,23 +290,16 @@ func ImportJSONL(ctx context.Context, repo *database.Repository, r io.Reader, pr
 		lineNum  int
 	)
 
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 10*1024*1024), 10*1024*1024)
-
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
+	// processLine parses a single JSONL envelope and appends to records/findings.
+	// A bare return here behaves like the old `continue` (skip this line, keep going).
+	processLine := func(line []byte) {
 		var envelope struct {
 			Type string          `json:"type"`
 			Data json.RawMessage `json:"data"`
 		}
-		if err := json.Unmarshal([]byte(line), &envelope); err != nil {
+		if err := json.Unmarshal(line, &envelope); err != nil {
 			res.ParseErrors++
-			continue
+			return
 		}
 
 		switch envelope.Type {
@@ -312,7 +307,7 @@ func ImportJSONL(ctx context.Context, repo *database.Repository, r io.Reader, pr
 			var rec database.HTTPRecord
 			if err := json.Unmarshal(envelope.Data, &rec); err != nil {
 				res.ParseErrors++
-				continue
+				return
 			}
 			rec.ProjectUUID = projectUUID
 			if rec.UUID == "" {
@@ -330,7 +325,7 @@ func ImportJSONL(ctx context.Context, repo *database.Repository, r io.Reader, pr
 			var finding database.Finding
 			if err := json.Unmarshal(envelope.Data, &finding); err != nil {
 				res.ParseErrors++
-				continue
+				return
 			}
 			finding.ProjectUUID = projectUUID
 			if finding.FindingSource == "" {
@@ -351,8 +346,24 @@ func ImportJSONL(ctx context.Context, repo *database.Repository, r io.Reader, pr
 			res.SkippedTypes[envelope.Type]++
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading JSONL stream: %w", err)
+
+	// Read line-by-line with bufio.Reader rather than bufio.Scanner: an exported
+	// http_record can carry a multi-megabyte response/request body on a single
+	// line, which overflows Scanner's fixed token cap ("token too long").
+	// ReadBytes grows its buffer to the full line length, so any line size loads.
+	reader := bufio.NewReaderSize(r, 1024*1024)
+	for {
+		lineBytes, readErr := reader.ReadBytes('\n')
+		if trimmed := bytes.TrimSpace(lineBytes); len(trimmed) > 0 {
+			lineNum++
+			processLine(trimmed)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, fmt.Errorf("error reading JSONL stream: %w", readErr)
+		}
 	}
 
 	if len(records) == 0 && len(findings) == 0 {

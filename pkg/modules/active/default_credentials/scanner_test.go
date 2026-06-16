@@ -1,6 +1,7 @@
 package default_credentials
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/vigolium/vigolium/pkg/httpmsg"
@@ -100,7 +101,7 @@ func TestIsLoginSuccess(t *testing.T) {
 		statusCode     int
 		body           string
 		baselineStatus int
-		baselineLength int
+		baselineBody   string
 		hasSetCookie   bool
 		want           bool
 	}{
@@ -109,7 +110,7 @@ func TestIsLoginSuccess(t *testing.T) {
 			statusCode:     200,
 			body:           "Welcome to dashboard",
 			baselineStatus: 401,
-			baselineLength: 50,
+			baselineBody:   strings.Repeat("x", 50),
 			hasSetCookie:   true,
 			want:           true,
 		},
@@ -118,7 +119,7 @@ func TestIsLoginSuccess(t *testing.T) {
 			statusCode:     302,
 			body:           "",
 			baselineStatus: 200,
-			baselineLength: 500,
+			baselineBody:   strings.Repeat("x", 500),
 			hasSetCookie:   false,
 			want:           true,
 		},
@@ -127,7 +128,7 @@ func TestIsLoginSuccess(t *testing.T) {
 			statusCode:     200,
 			body:           "Invalid credentials",
 			baselineStatus: 200,
-			baselineLength: 19,
+			baselineBody:   "Invalid credentials",
 			hasSetCookie:   false,
 			want:           false,
 		},
@@ -136,15 +137,24 @@ func TestIsLoginSuccess(t *testing.T) {
 			statusCode:     200,
 			body:           string(make([]byte, 300)),
 			baselineStatus: 200,
-			baselineLength: 50,
+			baselineBody:   strings.Repeat("x", 50),
 			hasSetCookie:   true,
 			want:           true,
+		},
+		{
+			name:           "success indicator present in baseline is not auth-gated",
+			statusCode:     200,
+			body:           "Acme Dashboard — Sign in to continue. Long enough body to trip the length delta gate here.",
+			baselineStatus: 200,
+			baselineBody:   "Acme Dashboard — login failed",
+			hasSetCookie:   false,
+			want:           false, // "dashboard" appears in the failed-login baseline → branding, not success
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isLoginSuccess(tt.statusCode, tt.body, tt.baselineStatus, tt.baselineLength, tt.hasSetCookie)
+			got := isLoginSuccess(tt.statusCode, tt.body, tt.baselineStatus, tt.baselineBody, tt.hasSetCookie)
 			if got != tt.want {
 				t.Errorf("isLoginSuccess() = %v, want %v", got, tt.want)
 			}

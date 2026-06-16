@@ -76,6 +76,7 @@ func runIngestCmd(cmd *cobra.Command, args []string) error {
 	// Copy global flags into ingestOpts
 	ingestOpts.Input = globalInput
 	ingestOpts.InputFormat = globalInputMode
+	ingestOpts.TargetFiles = globalTargetFiles
 	ingestOpts.RateLimit = globalRateLimit
 	ingestOpts.Concurrency = globalConcurrency
 	ingestOpts.EnableModules = resolveModules()
@@ -93,16 +94,25 @@ func runIngestCmd(cmd *cobra.Command, args []string) error {
 		ingestOpts.TargetURL = globalTargets[0]
 	}
 
-	// Check for blank input: no targets, no input file, and no piped stdin
+	// Check for blank input: no targets, no input file, no target file, and no
+	// piped stdin
 	hasTargets := len(globalTargets) > 0
 	hasInputFile := ingestOpts.Input != "" && ingestOpts.Input != "-"
+	hasTargetFiles := len(globalTargetFiles) > 0
 	hasStdin := fileutil.HasStdin()
-	if !hasTargets && !hasInputFile && !hasStdin {
-		fmt.Fprintf(os.Stderr, "%s Tip: use %s, %s, or pipe data via stdin\n",
+	if !hasTargets && !hasInputFile && !hasTargetFiles && !hasStdin {
+		fmt.Fprintf(os.Stderr, "%s Tip: use %s, %s, %s, or pipe data via stdin\n",
 			terminal.InfoSymbol(),
 			terminal.Cyan("-t <url>"),
+			terminal.Cyan("-T <file>"),
 			terminal.Cyan("-i <file>"))
 		return fmt.Errorf("no input provided")
+	}
+
+	// "-" means read stdin; when nothing is actually piped, drop it so a -T/-t-only
+	// run does not block waiting on a TTY (an explicit -i <file> keeps its path).
+	if ingestOpts.Input == "-" && !hasStdin {
+		ingestOpts.Input = ""
 	}
 
 	// Validate mutual exclusivity: -t/--target and --spec-url cannot both be set
@@ -215,6 +225,7 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 		built, err := source.NewInputSource(source.SourceConfig{
 			Targets:    globalTargets,
 			FilePath:   filePath,
+			FilePaths:  globalTargetFiles,
 			Format:     inputFormat,
 			UseStdin:   useStdin,
 			BufferSize: 100,
@@ -223,6 +234,20 @@ func runLocalIngest(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("failed to create input source: %w", err)
 		}
 		inputSource = built
+	}
+	// If raw-HTTP/burp/curl was preloaded from stdin or -i but -T target files
+	// were also supplied, fold those URL-list files in so they aren't dropped
+	// (the preloaded branch above builds a slice source that ignores them).
+	if len(preloadedItems) > 0 && len(globalTargetFiles) > 0 {
+		tfSrc, tfErr := source.NewInputSource(source.SourceConfig{
+			FilePaths:  globalTargetFiles,
+			Format:     inputFormat,
+			BufferSize: 100,
+		})
+		if tfErr != nil {
+			return fmt.Errorf("failed to create target-file source: %w", tfErr)
+		}
+		inputSource = source.NewMultiSource(inputSource, tfSrc)
 	}
 	defer func() { _ = inputSource.Close() }()
 

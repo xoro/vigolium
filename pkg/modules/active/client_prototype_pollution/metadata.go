@@ -15,8 +15,8 @@ var (
 
 **Fix:** Avoid recursive merge of untrusted URL input, strip __proto__ and constructor keys, and use Object.create(null) or Map for parameter stores.`
 
-	ModuleConfirmation = "Confirmed when JavaScript static analysis identifies known prototype pollution source patterns in the page's scripts"
-	ModuleSeverity     = severity.High
-	ModuleConfidence   = severity.Firm
+	ModuleConfirmation = "Reported when static analysis finds a prototype pollution source pattern AND, for generic deep-merge/recursive-assign shapes, an attacker-controllable URL source (location.search/hash/href, URLSearchParams, …) within proximity of the sink. Runtime pollution is not confirmed, so findings are Tentative and warrant manual verification."
+	ModuleSeverity     = severity.Medium
+	ModuleConfidence   = severity.Tentative
 	ModuleTags         = []string{"prototype-pollution", "xss", "light"}
 )

@@ -216,7 +216,7 @@ func (r *Runner) SetSharedInfra(infra *SharedInfra) {
 func New(options *types.Options) (*Runner, error) {
 	inputSource, err := source.NewInputSource(source.SourceConfig{
 		Targets:               options.Targets,
-		FilePath:              options.TargetsFilePath,
+		FilePaths:             options.TargetsFilePaths,
 		Format:                options.InputFileMode,
 		UseStdin:              options.Stdin,
 		SkipFormatValidation:  options.SkipFormatValidation,

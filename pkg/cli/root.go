@@ -26,7 +26,7 @@ var (
 	globalProxy                   string
 	globalDB                      string
 	globalTargets                 []string
-	globalTargetFile              string
+	globalTargetFiles             []string
 	globalInputMode               string
 	globalInputReadTimeout        time.Duration
 	globalTimeout                 time.Duration
@@ -260,7 +260,7 @@ func init() {
 	pf.StringVar(&globalConfig, "config", "", `Path to config file (default "~/.vigolium/vigolium-configs.yaml")`)
 	pf.StringVar(&globalProxy, "proxy", "", "Route all requests through this proxy (HTTP/SOCKS5 URL)")
 	pf.StringVar(&globalDB, "db", "", `Path to SQLite database file (default "~/.vigolium/database-vgnm.sqlite")`)
-	pf.StringVar(&globalMemLimit, "mem-limit", "", "Soft heap ceiling (GOMEMLIMIT) for scans: empty = auto (~⅓ of RAM, scaled down by -P/--parallel so all children stay under ⅔ of RAM), 'off' to disable, or an explicit size/percent like 6GiB or 50%. An existing GOMEMLIMIT env var overrides this.")
+	pf.StringVar(&globalMemLimit, "mem-limit", "", "Soft heap ceiling (GOMEMLIMIT) for scans: empty = auto (1/3 of RAM, scaled down by -P/--parallel so all children stay under ⅔ of RAM), 'off' to disable, or an explicit size/percent like 6GiB or 50%. An existing GOMEMLIMIT env var overrides this.")
 
 	pf.BoolVarP(&globalListModules, "list-modules", "M", false, "List all available scanner modules")
 	pf.BoolVar(&globalListInputModes, "list-input-mode", false, "List all supported input modes with examples")

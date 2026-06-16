@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/vigolium/vigolium/internal/config"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/terminal"
@@ -59,7 +61,7 @@ func validateParallelScan(opts *types.Options) error {
 	// out, so -P (and the --split-by-host it would pair with) can't take effect.
 	// Rather than reject the combination, warn and degrade to a normal one-target
 	// scan — the dispatch already falls through to the single-pass path here.
-	if opts.TargetsFilePath == "" {
+	if len(opts.TargetsFilePaths) == 0 {
 		if !opts.Silent {
 			fmt.Fprintf(os.Stderr,
 				"%s --parallel/-P and --split-by-host apply only to multi-target scans (-T/--target-file); with a single target they are ignored — running a normal scan\n",
@@ -89,33 +91,54 @@ type targetResult struct {
 	statsOK     bool
 }
 
-// childStats are the per-target counts the parent recovers from a child's JSONL
+// childStats are the per-target counts the parent recovers from a child's
 // output once it finishes: HTTP records ingested, findings, and a severity
-// breakdown. Only populated when jsonl is among the requested formats.
+// breakdown. Populated from whichever of the child's output files can carry
+// them — JSONL or the standalone SQLite export (see readChildStats).
 type childStats struct {
 	records  int
 	findings int
 	sev      map[string]int
 }
 
-// readChildStats counts a child's HTTP records and findings (by severity) from
-// its per-target JSONL output. The unified export writes one {"type":...} JSON
-// object per line, so consecutive json.Decode calls recover the counts without a
-// line-length limit (response bodies can make individual lines large). Returns
-// ok=false when jsonl wasn't requested or the file is missing/unreadable, so the
-// caller simply omits the stats segment rather than guessing.
+// readChildStats recovers a child's HTTP-record and finding counts (by severity)
+// from whichever of its per-target output files can carry them. It prefers the
+// JSONL export (a cheap streaming line-count, no DB driver), then falls back to
+// the standalone SQLite database the child writes under --format sqlite — so the
+// parent's per-target stats segment and final Totals roll-up render even when the
+// operator never requested jsonl (e.g. --format sqlite,html). Returns ok=false
+// when neither readable format was produced, so the caller simply omits the
+// stats segment rather than guessing.
 func readChildStats(output string, formats []string) (childStats, bool) {
-	hasJSONL := false
-	for _, f := range formats {
-		if f == "jsonl" {
-			hasJSONL = true
-			break
+	if formatsContain(formats, "jsonl") {
+		if st, ok := readChildStatsJSONL(output); ok {
+			return st, true
 		}
 	}
-	if !hasJSONL {
-		return childStats{}, false
+	if formatsContain(formats, "sqlite") {
+		if st, ok := readChildStatsSQLite(output); ok {
+			return st, true
+		}
 	}
+	return childStats{}, false
+}
 
+// formatsContain reports whether want is among the requested output formats.
+func formatsContain(formats []string, want string) bool {
+	for _, f := range formats {
+		if f == want {
+			return true
+		}
+	}
+	return false
+}
+
+// readChildStatsJSONL counts a child's HTTP records and findings (by severity)
+// from its per-target JSONL output. The unified export writes one {"type":...}
+// JSON object per line, so consecutive json.Decode calls recover the counts
+// without a line-length limit (response bodies can make individual lines large).
+// Returns ok=false when the file is missing or unreadable.
+func readChildStatsJSONL(output string) (childStats, bool) {
 	f, err := os.Open(types.StripFormatExtension(output) + ".jsonl")
 	if err != nil {
 		return childStats{}, false
@@ -143,6 +166,57 @@ func readChildStats(output string, formats []string) (childStats, bool) {
 				st.sev[strings.ToLower(env.Data.Severity)]++
 			}
 		}
+	}
+	return st, true
+}
+
+// readChildStatsSQLite counts a child's HTTP records and findings (by severity)
+// from the standalone .sqlite the child writes under --format sqlite. The export
+// is a fully checkpointed VACUUM INTO copy (no WAL sidecar), so it is opened
+// query-only with a short busy timeout — read-only SELECTs against the default
+// (non-WAL) journal never create -wal/-shm files next to the operator's artifact.
+// Returns ok=false when the file is missing or any query fails.
+func readChildStatsSQLite(output string) (childStats, bool) {
+	path := types.StripFormatExtension(output) + ".sqlite"
+	if _, err := os.Stat(path); err != nil {
+		return childStats{}, false
+	}
+
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(2000)&_pragma=query_only(true)", path)
+	db, err := sql.Open(sqliteshim.ShimName, dsn)
+	if err != nil {
+		return childStats{}, false
+	}
+	defer func() { _ = db.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	st := childStats{sev: make(map[string]int)}
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM http_records").Scan(&st.records); err != nil {
+		return childStats{}, false
+	}
+
+	rows, err := db.QueryContext(ctx, "SELECT severity, COUNT(*) FROM findings GROUP BY severity")
+	if err != nil {
+		return childStats{}, false
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			sev string
+			n   int
+		)
+		if err := rows.Scan(&sev, &n); err != nil {
+			return childStats{}, false
+		}
+		st.findings += n
+		if sev != "" {
+			st.sev[strings.ToLower(sev)] += n
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return childStats{}, false
 	}
 	return st, true
 }
@@ -407,12 +481,12 @@ func fanOutTargetScans(ctx context.Context, exe string, targets []string, parall
 // each child writes into a temporary staging directory (never the operator's
 // --output prefix); the staging directory is removed when the batch finishes.
 func runIsolatedTargetsParallel(cmd *cobra.Command, settings *config.Settings, strategyName string) error {
-	targets, err := readTargetFileLines(scanOpts.TargetsFilePath)
+	targets, err := readTargetFilesLines(scanOpts.TargetsFilePaths)
 	if err != nil {
 		return err
 	}
 	if len(targets) == 0 {
-		return fmt.Errorf("target file %q contains no targets", scanOpts.TargetsFilePath)
+		return fmt.Errorf("target file(s) %s contain no targets", strings.Join(scanOpts.TargetsFilePaths, ", "))
 	}
 
 	// One target (or -P 1) has nothing to fan out: a single in-process db-isolate
@@ -679,8 +753,9 @@ func printParallelSummary(results []targetResult, failed, interrupted int) {
 
 // statsSegment renders the per-target "<R> records · <F> findings[ (sev)] · "
 // fragment shown on a done line, trailing separator included so it slots in
-// before the progress counter. Returns "" when stats are unavailable (jsonl not
-// requested or unreadable) so the line collapses to just the counter.
+// before the progress counter. Returns "" when stats are unavailable (neither a
+// jsonl nor a sqlite export the parent could tally) so the line collapses to
+// just the counter.
 func statsSegment(st childStats, ok bool) string {
 	if !ok {
 		return ""

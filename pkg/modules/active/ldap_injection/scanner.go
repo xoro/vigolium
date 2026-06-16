@@ -179,6 +179,15 @@ func (m *Module) ScanPerInsertionPoint(
 		resp.Close()
 	}
 
+	// Boolean-based detection is a body-size differential, so skip it on an
+	// unreliable surface — a cache/CDN-fronted response (HIT/MISS swings) or a large
+	// rendered HTML page (per-request dynamic content) manufactures phantom
+	// wildcard-vs-control deltas. The error-based pass above is a token match and is
+	// unaffected, so it still runs on these surfaces.
+	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
+		return results, nil
+	}
+
 	// Boolean-based detection: send a TRUE-like wildcard probe and a
 	// "no-match" control probe alongside the baseline. The wildcard is only
 	// flagged if its response is *uniquely* different — substantially diverging

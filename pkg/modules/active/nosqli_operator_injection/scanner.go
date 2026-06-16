@@ -493,75 +493,96 @@ type boolSample struct {
 }
 
 // testBooleanDiff tests structurally-matched always-true / always-false payload
-// pairs to detect boolean-based NoSQL injection. Each condition is sampled
-// several times (interleaved) so a randomizing or flapping endpoint cannot
-// manufacture a phantom differential: the always-true responses must stay mutually
-// similar, the always-false responses must stay mutually similar, and the two
-// clusters must clearly diverge. Binary and blocked responses abandon the pair (or
-// the whole insertion point), defeating the CDN-image / Akamai-block false positive.
+// pairs to detect boolean-based NoSQL injection. Each condition is sampled several
+// times, interleaved with a benign operator-free CONTROL on the same cadence, so a
+// randomizing, flapping, or schedule-correlated endpoint cannot manufacture a
+// phantom differential: the always-true responses must stay mutually similar, the
+// always-false responses must stay mutually similar, the benign control must be
+// self-consistent (parity guard), and the true/false clusters must clearly diverge.
+// A surviving hit must additionally REPRODUCE with a second set of constants before
+// it is reported. Binary and blocked responses abandon the pair (or the whole
+// insertion point), defeating the CDN-image / Akamai-block false positive.
+//
+// Two gates run before any pair is probed:
+//   - the surface gate (#4) skips large rendered HTML pages and cache/CDN-fronted
+//     responses, whose dynamic content / cache HIT-MISS swings drown the signal;
+//   - the relevance precheck (#5) skips path-segment and header insertion points
+//     whose benign value returns the same page as the baseline (a cosmetic
+//     catch-all segment or a header the application never consumes).
 func (m *Module) testBooleanDiff(
 	ctx *httpmsg.HttpRequestResponse,
 	ip httpmsg.InsertionPoint,
 	httpClient *http.Requester,
 	baselineBody string,
 ) (*output.ResultEvent, error) {
-	order := interleavedProbeOrder(boolTrueSamples, boolFalseSamples)
+	// #4 surface gate — header/size only, sends no traffic.
+	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
+		return nil, nil
+	}
+
+	// #5 relevance precheck for path-segment / header insertion points.
+	if pathOrHeaderInsertionTypes.Contains(ip.Type()) {
+		inert, err := m.insertionPointIsInert(ctx, ip, httpClient, baselineBody)
+		if err != nil {
+			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
+				return nil, err
+			}
+			// A transient error during the precheck skips the precheck, not the scan.
+		} else if inert {
+			return nil, nil
+		}
+	}
+
+	order := interleavedProbeOrder3(boolTrueSamples, boolFalseSamples, boolNeutralSamples)
 
 	for _, pair := range booleanDiffPairs {
-		var trueBodies, falseBodies []string
-		skipPair := false
-
-		for _, wantTrue := range order {
-			value := pair.falsePayload
-			if wantTrue {
-				value = pair.truePayload
+		trueBodies, falseBodies, neutralBodies, outcome, err := m.runBooleanProbeSet(
+			ctx, ip, httpClient, order, pair.truePayload, pair.falsePayload)
+		if err != nil {
+			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
+				return nil, err
 			}
-
-			s, err := m.probeBoolean(ctx, ip, httpClient, value)
-			if err != nil {
-				if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
-					return nil, err
-				}
-				return nil, nil // transport hiccup — abandon the boolean diff
-			}
-
-			// A binary body means the endpoint serves non-text content (e.g. a CDN
-			// image object); a text differential is meaningless for any pair, so
-			// abandon the whole insertion point rather than try the next payload.
-			if s.binary {
-				return nil, nil
-			}
-			// A blocked page (WAF/auth/rate-limit) or a NoSQL error surface, or a
-			// non-2xx/3xx always-true response, disqualifies THIS pair — move on.
-			if s.blocked || s.nosqlErr {
-				skipPair = true
-				break
-			}
-			if wantTrue {
-				if s.status < 200 || s.status >= 400 {
-					skipPair = true
-					break
-				}
-				trueBodies = append(trueBodies, s.body)
-			} else {
-				falseBodies = append(falseBodies, s.body)
-			}
+			return nil, nil // transport hiccup — abandon the boolean diff
 		}
-		if skipPair {
+		switch outcome {
+		case probeAbortIP:
+			return nil, nil
+		case probeSkipPair:
 			continue
 		}
 
-		if !confirmBooleanDiffMulti(trueBodies, falseBodies, baselineBody) {
+		if !confirmBooleanDiffWithControl(neutralBodies, trueBodies, falseBodies, baselineBody) {
+			continue
+		}
+
+		// Secondary-literal confirmation: the differential must reproduce with a
+		// DIFFERENT always-true / always-false constant pair, or it was a transient
+		// fluke (cache miss, round-robin upstream, momentary variant), not a boolean
+		// oracle that flips the response for every constant.
+		secTrue, secFalse, secNeutral, secOutcome, secErr := m.runBooleanProbeSet(
+			ctx, ip, httpClient, order, pair.secTruePayload, pair.secFalsePayload)
+		if secErr != nil {
+			if errors.Is(secErr, hosterrors.ErrUnresponsiveHost) {
+				return nil, secErr
+			}
+			continue
+		}
+		if secOutcome != probeOK ||
+			!confirmBooleanDiffWithControl(secNeutral, secTrue, secFalse, baselineBody) {
 			continue
 		}
 
 		trueReq := string(ip.BuildRequest([]byte(ip.BaseValue() + pair.truePayload)))
 		falseReq := string(ip.BuildRequest([]byte(ip.BaseValue() + pair.falsePayload)))
+		secTrueReq := string(ip.BuildRequest([]byte(ip.BaseValue() + pair.secTruePayload)))
+		secFalseReq := string(ip.BuildRequest([]byte(ip.BaseValue() + pair.secFalsePayload)))
 
 		ev := modkit.NewEvidenceCollector()
 		ev.Add("baseline", modkit.CtxRequestRaw(ctx), modkit.CtxResponseRaw(ctx))
 		ev.Add("true-payload", trueReq, trueBodies[0])
 		ev.Add("false-payload", falseReq, falseBodies[0])
+		ev.Add("recheck-true-payload", secTrueReq, secTrue[0])
+		ev.Add("recheck-false-payload", secFalseReq, secFalse[0])
 
 		urlx, _ := ctx.URL()
 		return &output.ResultEvent{
@@ -574,8 +595,8 @@ func (m *Module) testBooleanDiff(
 			Info: output.Info{
 				Name: "NoSQL Boolean-based Injection",
 				Description: fmt.Sprintf(
-					"Boolean differential reproduced across %d always-true and %d always-false probes: the conditions return structurally different responses while each condition stays self-consistent across repeats (beyond the endpoint's own per-request variance) via parameter %q — %s",
-					len(trueBodies), len(falseBodies), ip.Name(), pair.desc,
+					"Boolean differential reproduced across %d always-true and %d always-false probes against a benign same-cadence control, then reconfirmed with independent constants (%s vs %s): each condition stays self-consistent across repeats while the true/false clusters diverge beyond the endpoint's own per-request variance — via parameter %q — %s",
+					len(trueBodies), len(falseBodies), pair.secTruePayload, pair.secFalsePayload, ip.Name(), pair.desc,
 				),
 				Severity:   severity.High,
 				Confidence: severity.Tentative,
@@ -593,23 +614,133 @@ func (m *Module) testBooleanDiff(
 	return nil, nil
 }
 
-// interleavedProbeOrder returns a true/false send schedule (true=always-true
-// probe) that alternates the two conditions so any slow drift in the endpoint
-// affects both equally rather than biasing one cluster.
-func interleavedProbeOrder(trueN, falseN int) []bool {
-	order := make([]bool, 0, trueN+falseN)
-	for trueN > 0 || falseN > 0 {
+// probeCond identifies which condition a scheduled probe sends.
+type probeCond int
+
+const (
+	condTrue probeCond = iota
+	condFalse
+	condNeutral
+)
+
+// probeOutcome is the disposition of a full probe set for one true/false pair.
+type probeOutcome int
+
+const (
+	probeOK       probeOutcome = iota
+	probeSkipPair              // non-analyzable here (block / NoSQL error / non-2xx true) — try the next pair
+	probeAbortIP               // the whole insertion point is non-analyzable (binary body)
+)
+
+// interleavedProbeOrder3 returns a send schedule that round-robins the always-true,
+// always-false, and benign-control conditions so any slow drift — and, crucially,
+// any cadence-correlated variance (round-robin upstreams, alternating cache
+// HIT/MISS) — lands on all three conditions rather than biasing one cluster.
+func interleavedProbeOrder3(trueN, falseN, neutralN int) []probeCond {
+	order := make([]probeCond, 0, trueN+falseN+neutralN)
+	for trueN > 0 || falseN > 0 || neutralN > 0 {
 		if trueN > 0 {
-			order = append(order, true)
+			order = append(order, condTrue)
 			trueN--
 		}
 		if falseN > 0 {
-			order = append(order, false)
+			order = append(order, condFalse)
 			falseN--
+		}
+		if neutralN > 0 {
+			order = append(order, condNeutral)
+			neutralN--
 		}
 	}
 	return order
 }
+
+// runBooleanProbeSet sends one interleaved schedule of always-true, always-false,
+// and benign-control probes for a single true/false constant pair, classifying each
+// response. It returns the per-condition bodies plus an outcome telling the caller
+// whether to use the set, skip this pair, or abandon the insertion point.
+func (m *Module) runBooleanProbeSet(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	order []probeCond,
+	truePayload, falsePayload string,
+) (trueBodies, falseBodies, neutralBodies []string, outcome probeOutcome, err error) {
+	for _, cond := range order {
+		suffix := benignProbeSuffix
+		switch cond {
+		case condTrue:
+			suffix = truePayload
+		case condFalse:
+			suffix = falsePayload
+		}
+
+		s, perr := m.probeBoolean(ctx, ip, httpClient, suffix)
+		if perr != nil {
+			return nil, nil, nil, probeAbortIP, perr
+		}
+		// A binary body means the endpoint serves non-text content (a CDN image
+		// object); a text differential is meaningless, so abandon the whole point.
+		if s.binary {
+			return nil, nil, nil, probeAbortIP, nil
+		}
+		// A blocked page (WAF/auth/rate-limit) or a NoSQL error surface disqualifies
+		// this pair — try the next.
+		if s.blocked || s.nosqlErr {
+			return nil, nil, nil, probeSkipPair, nil
+		}
+		switch cond {
+		case condTrue:
+			if s.status < 200 || s.status >= 400 {
+				return nil, nil, nil, probeSkipPair, nil
+			}
+			trueBodies = append(trueBodies, s.body)
+		case condFalse:
+			falseBodies = append(falseBodies, s.body)
+		case condNeutral:
+			neutralBodies = append(neutralBodies, s.body)
+		}
+	}
+	return trueBodies, falseBodies, neutralBodies, probeOK, nil
+}
+
+// insertionPointIsInert reports whether a path-segment or header insertion point
+// ignores its value: it sends one benign, operator-free value and compares the
+// response to the captured baseline. A cosmetic catch-all path segment or a header
+// the application never consumes returns the SAME page for any value, so a boolean
+// true/false differential there is endpoint noise, not query control. It fails OPEN
+// (not inert) whenever it cannot decide — no baseline, a transport error, or a
+// non-analyzable (blocked/binary/NoSQL-error) probe — so the main path still runs.
+func (m *Module) insertionPointIsInert(
+	ctx *httpmsg.HttpRequestResponse,
+	ip httpmsg.InsertionPoint,
+	httpClient *http.Requester,
+	baselineBody string,
+) (bool, error) {
+	if baselineBody == "" {
+		return false, nil
+	}
+	s, err := m.probeBoolean(ctx, ip, httpClient, benignProbeSuffix)
+	if err != nil {
+		return false, err
+	}
+	if s.blocked || s.binary || s.nosqlErr {
+		return false, nil
+	}
+	nb := normalizeResponse(baselineBody)
+	ns := normalizeResponse(s.body)
+	if nb == "" || ns == "" {
+		return false, nil
+	}
+	return diceSimilarity(nb, ns) >= booleanInertMax, nil
+}
+
+// pathOrHeaderInsertionTypes are the high-noise, low-yield surfaces for boolean
+// NoSQLi — URL path segments and HTTP headers — where the relevance precheck
+// applies (a cosmetic path segment or an unconsumed header yields no query signal).
+var pathOrHeaderInsertionTypes = modkit.NewInsertionPointTypeSet(
+	httpmsg.INS_HEADER, httpmsg.INS_URL_PATH_FOLDER, httpmsg.INS_URL_PATH_FILENAME,
+)
 
 // probeBoolean sends one boolean-diff payload and classifies the response. It
 // bypasses the response cache (NoClustering) so repeated identical sends are

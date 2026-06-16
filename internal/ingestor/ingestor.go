@@ -26,6 +26,10 @@ type Options struct {
 	// Input
 	Input       string
 	InputFormat string
+	// TargetFiles are additional URL-list files (-T/--target-file, repeatable).
+	// Their lines are read and submitted alongside Input/stdin for the urls and
+	// nuclei formats.
+	TargetFiles []string
 
 	// Spec Target
 	TargetURL      string
@@ -119,25 +123,29 @@ func Run(ctx context.Context, opts *Options) (RunStats, error) {
 			// OpenAPI/Swagger handles its own input loading (file or URL)
 			parseSpecInput(ctx, reqChan, opts)
 		case "nuclei":
-			reader, closer, err := openInput(opts.Input)
-			if err != nil {
-				zap.L().Error("Failed to open input", zap.Error(err))
-				return
+			for _, in := range opts.inputSources() {
+				reader, closer, err := openInput(in)
+				if err != nil {
+					zap.L().Error("Failed to open input", zap.String("input", in), zap.Error(err))
+					continue
+				}
+				parseNucleiInput(ctx, reader, reqChan, opts)
+				if closer != nil {
+					_ = closer.Close()
+				}
 			}
-			if closer != nil {
-				defer func() { _ = closer.Close() }()
-			}
-			parseNucleiInput(ctx, reader, reqChan, opts)
 		default: // "urls"
-			reader, closer, err := openInput(opts.Input)
-			if err != nil {
-				zap.L().Error("Failed to open input", zap.Error(err))
-				return
+			for _, in := range opts.inputSources() {
+				reader, closer, err := openInput(in)
+				if err != nil {
+					zap.L().Error("Failed to open input", zap.String("input", in), zap.Error(err))
+					continue
+				}
+				parseURLsInput(ctx, reader, reqChan, opts)
+				if closer != nil {
+					_ = closer.Close()
+				}
 			}
-			if closer != nil {
-				defer func() { _ = closer.Close() }()
-			}
-			parseURLsInput(ctx, reader, reqChan, opts)
 		}
 	}()
 
@@ -149,6 +157,23 @@ func Run(ctx context.Context, opts *Options) (RunStats, error) {
 		Errors:    errors.Load(),
 		Elapsed:   time.Since(startTime),
 	}, nil
+}
+
+// inputSources returns the ordered list of inputs to read for plain URL /
+// nuclei ingestion: the primary -i/stdin input (when set) followed by each
+// -T/--target-file. An empty Input means "no primary input" (e.g. only -T was
+// given with no piped stdin) and is skipped so the run never blocks on a TTY.
+func (opts *Options) inputSources() []string {
+	srcs := make([]string, 0, len(opts.TargetFiles)+1)
+	if opts.Input != "" {
+		srcs = append(srcs, opts.Input)
+	}
+	for _, tf := range opts.TargetFiles {
+		if tf != "" {
+			srcs = append(srcs, tf)
+		}
+	}
+	return srcs
 }
 
 func openInput(input string) (io.Reader, io.Closer, error) {

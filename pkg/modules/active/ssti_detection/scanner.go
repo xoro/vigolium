@@ -62,6 +62,16 @@ func (m *Module) ScanPerInsertionPoint(
 		return nil, nil
 	}
 
+	// Behavioral/error-diff SSTI detection on a cache/CDN-fronted response or a
+	// large rendered HTML page is unreliable: cache HIT/MISS swings and per-request
+	// dynamic content manufacture phantom softBase-vs-probe differentials. Skip such
+	// surfaces before the expensive baseline build. (Cosmetic/unconsumed insertion
+	// points are already handled downstream by the VerySimilar(softBase, crudeFuzz)
+	// baseline guard.)
+	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
+		return nil, nil
+	}
+
 	httpService := ctx.Service()
 	if httpService == nil {
 		return nil, nil

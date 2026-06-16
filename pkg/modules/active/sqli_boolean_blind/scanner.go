@@ -1,6 +1,8 @@
 package sqli_boolean_blind
 
 import (
+	"strings"
+
 	"github.com/pkg/errors"
 	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/dedup"
@@ -10,6 +12,28 @@ import (
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
 )
+
+// negotiationHeaders are request headers consumed by content-negotiation /
+// locale middleware that legitimately varies the response body (language,
+// encoding, charset). A boolean-blind differential on them is a mangled-locale
+// artifact, not SQL logic, and a genuine injection through them is rare — so
+// they are excluded from injection-point testing. Headers that commonly reach a
+// backend store (User-Agent, Referer, X-Forwarded-*) are deliberately NOT here.
+var negotiationHeaders = map[string]bool{
+	"accept-language": true,
+	"accept-encoding": true,
+	"accept-charset":  true,
+	"accept":          true,
+}
+
+// isExcludedHeader reports whether ip is a high-false-positive content-negotiation
+// request header that boolean-blind detection should not test.
+func isExcludedHeader(ip httpmsg.InsertionPoint) bool {
+	if ip.Type() != httpmsg.INS_HEADER {
+		return false
+	}
+	return negotiationHeaders[strings.ToLower(ip.Name())]
+}
 
 type Module struct {
 	modkit.BaseActiveModule
@@ -51,6 +75,15 @@ func (m *Module) ScanPerRequest(
 		return results, nil
 	}
 
+	// A cache/CDN-fronted response or a large rendered HTML page is an unreliable
+	// boolean-differential surface: cache HIT/MISS swings and per-request dynamic
+	// content (ads, recommendations, rotating blocks) manufacture phantom TRUE/FALSE
+	// differentials. Boolean-blind detection is entirely a body differential, so
+	// skip the whole request on such a surface.
+	if modkit.DifferentialSurfaceUnreliable(ctx.Response()) {
+		return results, nil
+	}
+
 	// Create all insertion points (uses cached provider when available)
 	points, err := scanCtx.GetInsertionPoints(ctx.Request().Raw(), ctx.Request().ID(), true)
 	if err != nil {
@@ -73,17 +106,28 @@ func (m *Module) ScanPerRequest(
 
 ipScan:
 	for _, ip := range points {
+		// Skip content-negotiation request headers (see negotiationHeaders).
+		if isExcludedHeader(ip) {
+			continue
+		}
 		baseValue := ip.BaseValue()
 
 		// Get baseline signature by sending the original unmodified value.
 		// This lets us detect cases where both TRUE and FALSE payloads differ
 		// from baseline in the same way (e.g., mangled header values causing
 		// different responses due to syntax breakage, not SQL logic).
-		baselineFull, baselineSig, err := m.sendPayload(ctx, httpClient, ip, baseValue)
+		baselineFull, baselineSig, baselineBlocked, err := m.sendPayload(ctx, httpClient, ip, baseValue)
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {
 				return results, nil
 			}
+			continue
+		}
+
+		// A WAF/CDN block on the *unmodified* request means this surface is fronted
+		// by hostile edge logic — every payload differential below would be the
+		// edge talking, not the application. Skip the insertion point.
+		if baselineBlocked {
 			continue
 		}
 
@@ -137,15 +181,23 @@ func (m *Module) testPayloadPair(
 	falsePayload := baseValue + pair.falseVal
 
 	// Step 1: Send TRUE payload
-	trueFull, trueSig1, err := m.sendPayload(ctx, httpClient, ip, truePayload)
+	trueFull, trueSig1, trueBlocked, err := m.sendPayload(ctx, httpClient, ip, truePayload)
 	if err != nil {
 		return nil, err
 	}
 
 	// Step 2: Send FALSE payload
-	falseFull, falseSig1, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
+	falseFull, falseSig1, falseBlocked, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
 	if err != nil {
 		return nil, err
+	}
+
+	// Step 2b: Block gate. If either branch is a WAF/CDN block or challenge, the
+	// differential is the edge reacting to a payload signature (the literal `1=1`
+	// tautology, the `/**/` comment-evasion form), not the application's SQL logic.
+	// This is the single most common boolean-blind false positive — kill it here.
+	if trueBlocked || falseBlocked {
+		return nil, nil
 	}
 
 	// Step 3a: All three responses must be HTTP 200. Boolean-blind manifests as
@@ -197,25 +249,25 @@ func (m *Module) testPayloadPair(
 	}
 
 	// Step 5: Confirm TRUE is consistent across a retry (ratio-stable).
-	_, trueSig2, err := m.sendPayload(ctx, httpClient, ip, truePayload)
+	_, trueSig2, trueBlocked2, err := m.sendPayload(ctx, httpClient, ip, truePayload)
 	if err != nil {
 		return nil, err
 	}
-	if !ratioSimilar(trueSig1, trueSig2) {
-		return nil, nil // Unstable TRUE response
+	if trueBlocked2 || !ratioSimilar(trueSig1, trueSig2) {
+		return nil, nil // Unstable TRUE response (or now blocked)
 	}
 
 	// Step 6: Confirm FALSE is consistent across a retry.
-	_, falseSig2, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
+	_, falseSig2, falseBlocked2, err := m.sendPayload(ctx, httpClient, ip, falsePayload)
 	if err != nil {
 		return nil, err
 	}
-	if !ratioSimilar(falseSig1, falseSig2) {
-		return nil, nil // Unstable FALSE response
+	if falseBlocked2 || !ratioSimilar(falseSig1, falseSig2) {
+		return nil, nil // Unstable FALSE response (or now blocked)
 	}
 
 	// Step 7: Re-verify baseline hasn't drifted (catches dynamic content noise).
-	_, baselineSig2, err := m.sendPayload(ctx, httpClient, ip, ip.BaseValue())
+	_, baselineSig2, _, err := m.sendPayload(ctx, httpClient, ip, ip.BaseValue())
 	if err != nil {
 		return nil, err
 	}
@@ -226,15 +278,19 @@ func (m *Module) testPayloadPair(
 	// Step 8: Multi-round, multi-factor confirmation. Boolean-blind is the
 	// technique most prone to false positives, so a single TRUE/FALSE
 	// differential is never trusted on its own. For pairs whose breakout
-	// boundary is known (the randomized matrix), run a logic battery: several
-	// AND rounds with fresh random operands, an OR formulation, and an
-	// invalid-syntax probe — all must behave deterministically. For opaque
-	// curated/bypass pairs, re-run the differential across multiple rounds.
+	// boundary is known (the randomized matrix), run the full logic battery. For
+	// curated/bypass/WAF pairs — which historically only re-ran the same literal
+	// `1=1`/`1=2` strings and so could not tell a real boolean oracle from a WAF
+	// tautology signature — re-derive the condition with fresh RANDOM operands in
+	// the same boundary (preserving any comment/encoding evasion) and require the
+	// differential to reproduce. A differential bound to the literal token, not to
+	// boolean truth, vanishes under random operands and is rejected.
+	isHeader := ip.Type() == httpmsg.INS_HEADER
 	var confirmed bool
 	if pair.boundaried {
 		confirmed, err = m.confirmLogic(ctx, httpClient, ip, baseValue, pair.prefix, pair.suffix)
 	} else {
-		confirmed, err = m.confirmRepeat(ctx, httpClient, ip, truePayload, falsePayload)
+		confirmed, err = m.confirmRandomized(ctx, httpClient, ip, truePayload, falsePayload, isHeader)
 	}
 	if err != nil {
 		return nil, err
@@ -263,32 +319,41 @@ func (m *Module) testPayloadPair(
 	}, nil
 }
 
-// sendPayload sends a payload through an insertion point and returns the response signature.
+// sendPayload sends a payload through an insertion point and returns the response
+// body, its comparison signature, and whether the response came from a WAF/CDN
+// block or challenge. A blocked response carries no SQL signal: a boolean
+// differential that is really a WAF reacting to the literal `1=1` tautology
+// signature (the classic header/login false positive) must never be read as
+// injection, so every caller gates on the blocked flag before trusting a
+// differential.
 func (m *Module) sendPayload(
 	ctx *httpmsg.HttpRequestResponse,
 	httpClient *http.Requester,
 	ip httpmsg.InsertionPoint,
 	payload string,
-) (string, responseSignature, error) {
+) (string, responseSignature, bool, error) {
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
 
 	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
 	if err != nil {
-		return "", responseSignature{}, err
+		return "", responseSignature{}, false, err
 	}
 	fuzzedReq = fuzzedReq.WithService(ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
-		return "", responseSignature{}, err
+		return "", responseSignature{}, false, err
 	}
 	defer resp.Close()
 
+	// Classify the block status while the response chain is still open.
+	blocked := infra.IsBlockedResponse(resp)
+
 	if resp.Response() == nil {
-		return "", responseSignature{}, nil
+		return "", responseSignature{}, blocked, nil
 	}
 
 	body := resp.FullResponseString()
 	sig := newResponseSignature(resp.Response().StatusCode, body, payload)
-	return body, sig, nil
+	return body, sig, blocked, nil
 }

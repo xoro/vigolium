@@ -108,7 +108,7 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	scanOpts.Modules = resolveModules()
 	scanOpts.PassiveModules = []string{"all"}
 	scanOpts.Targets = globalTargets
-	scanOpts.TargetsFilePath = globalTargetFile
+	scanOpts.TargetsFilePaths = globalTargetFiles
 	scanOpts.InputFileMode = globalInputMode
 	scanOpts.InputReadTimeout = globalInputReadTimeout
 	scanOpts.Timeout = globalTimeout
@@ -153,7 +153,7 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	// Only true when the flag will actually take effect (the dispatch only takes the
 	// split path for a stateless multi-target file scan), so file-based formats still
 	// require -o everywhere else.
-	splitByHostNaming := scanOpts.SplitByHost && scanOpts.Stateless && scanOpts.TargetsFilePath != ""
+	splitByHostNaming := scanOpts.SplitByHost && scanOpts.Stateless && len(scanOpts.TargetsFilePaths) > 0
 
 	if scanOpts.DBIsolate && scanOpts.Stateless {
 		return fmt.Errorf("--db-isolate and --stateless are mutually exclusive (--stateless discards results; --db-isolate merges them into --db)")
@@ -447,13 +447,13 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	// fail loudly rather than running a zero-target scan that reports "completed".
 	// (The --split-by-host path re-checks this in runStatelessTargetFile; the
 	// shared fall-through below otherwise has no such guard.)
-	if scanOpts.TargetsFilePath != "" {
-		fileTargets, terr := readTargetFileLines(scanOpts.TargetsFilePath)
+	if len(scanOpts.TargetsFilePaths) > 0 {
+		fileTargets, terr := readTargetFilesLines(scanOpts.TargetsFilePaths)
 		if terr != nil {
 			return terr
 		}
 		if len(fileTargets) == 0 {
-			return fmt.Errorf("target file %q contains no targets", scanOpts.TargetsFilePath)
+			return fmt.Errorf("target file(s) %s contain no targets", strings.Join(scanOpts.TargetsFilePaths, ", "))
 		}
 	}
 
@@ -461,7 +461,7 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	// an isolated child that merges into --db, then export one unified output from
 	// the merged DB. -P 1 / a single target falls through to the single-process
 	// path below, which already scans the whole file into one scratch and merges.
-	if scanOpts.DBIsolate && scanOpts.Parallel > 1 && scanOpts.TargetsFilePath != "" {
+	if scanOpts.DBIsolate && scanOpts.Parallel > 1 && len(scanOpts.TargetsFilePaths) > 0 {
 		return runIsolatedTargetsParallel(cmd, settings, strategyName)
 	}
 
@@ -469,7 +469,7 @@ func runScanCmd(cmd *cobra.Command, args []string) (err error) {
 	// temp DB each time, writing one per-host output file per target. Without the
 	// flag, fall through to a single shared pass so the whole target file scans
 	// into one temp DB and exports to one unified output file (all formats).
-	if scanOpts.Stateless && scanOpts.TargetsFilePath != "" && scanOpts.SplitByHost {
+	if scanOpts.Stateless && len(scanOpts.TargetsFilePaths) > 0 && scanOpts.SplitByHost {
 		return runStatelessTargetFile(cmd, settings, strategyName)
 	}
 
@@ -613,7 +613,7 @@ func executeNativeScan(cmd *cobra.Command, settings *config.Settings, strategyNa
 
 	// If no targets/input/stdin, fall back to scanning DB records
 	hasTargets := len(scanOpts.Targets) > 0
-	hasTargetFile := scanOpts.TargetsFilePath != ""
+	hasTargetFile := len(scanOpts.TargetsFilePaths) > 0
 	hasStdin := scanOpts.Stdin
 	if !hasTargets && !hasTargetFile && !hasStdin {
 		return runDBScan(settings, db, repo, scanStart)
@@ -721,19 +721,19 @@ func reportNativeScanSuccess(db *database.DB, settings *config.Settings, repo *d
 }
 
 // runStatelessTargetFile iterates over each non-blank line in
-// scanOpts.TargetsFilePath, allocating an isolated temporary database per
+// scanOpts.TargetsFilePaths, allocating an isolated temporary database per
 // target and tearing it down before moving on. When --output is provided, the
 // output path is suffixed with the target's hostname so per-target results do
 // not overwrite each other. This is the --split-by-host path; without that flag
 // runScanCmd instead runs a single shared pass over the whole target file for a
 // unified output file.
 func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strategyName string) error {
-	targets, err := readTargetFileLines(scanOpts.TargetsFilePath)
+	targets, err := readTargetFilesLines(scanOpts.TargetsFilePaths)
 	if err != nil {
 		return err
 	}
 	if len(targets) == 0 {
-		return fmt.Errorf("target file %q contains no targets", scanOpts.TargetsFilePath)
+		return fmt.Errorf("target file(s) %s contain no targets", strings.Join(scanOpts.TargetsFilePaths, ", "))
 	}
 
 	// Parallel fan-out: with -P > 1 and more than one target, scan targets
@@ -745,13 +745,13 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 	}
 
 	origTargets := append([]string(nil), scanOpts.Targets...)
-	origFile := scanOpts.TargetsFilePath
+	origFiles := scanOpts.TargetsFilePaths
 	origOutput := scanOpts.Output
 	origPrinted := scanOpts.ScanConfigPrinted
-	scanOpts.TargetsFilePath = ""
+	scanOpts.TargetsFilePaths = nil
 	defer func() {
 		scanOpts.Targets = origTargets
-		scanOpts.TargetsFilePath = origFile
+		scanOpts.TargetsFilePaths = origFiles
 		scanOpts.Output = origOutput
 		scanOpts.ScanConfigPrinted = origPrinted
 	}()
@@ -792,6 +792,21 @@ func runStatelessTargetFile(cmd *cobra.Command, settings *config.Settings, strat
 	}
 
 	return nil
+}
+
+// readTargetFilesLines reads every target file in paths (each one URL/address
+// per line) and concatenates their lines in order, preserving duplicates. It is
+// the multi-file (`-T a -T b`) form of readTargetFileLines.
+func readTargetFilesLines(paths []string) ([]string, error) {
+	var lines []string
+	for _, p := range paths {
+		fileLines, err := readTargetFileLines(p)
+		if err != nil {
+			return nil, err
+		}
+		lines = append(lines, fileLines...)
+	}
+	return lines, nil
 }
 
 // readTargetFileLines reads a target file (one URL or address per line),
@@ -1677,8 +1692,12 @@ func printScanSummary(opts *types.Options, settings *config.Settings, strategyNa
 		fmt.Fprintf(os.Stderr, "  %s Profile: %s\n", terminal.Purple(terminal.SymbolInfo), terminal.HiTeal(opts.ScanningProfile))
 	}
 	targetsLine := fmt.Sprintf("Targets: %s (CLI: %s)", terminal.Orange(fmt.Sprintf("%d", len(opts.Targets))), terminal.HiBlue(summarizeTargetList(opts.Targets, 3)))
-	if opts.TargetsFilePath != "" {
-		targetsLine += fmt.Sprintf(" (+ file: %s)", terminal.HiTeal(opts.TargetsFilePath))
+	if len(opts.TargetsFilePaths) > 0 {
+		label := "file"
+		if len(opts.TargetsFilePaths) > 1 {
+			label = "files"
+		}
+		targetsLine += fmt.Sprintf(" (+ %s: %s)", label, terminal.HiTeal(strings.Join(opts.TargetsFilePaths, ", ")))
 	}
 	if repo != nil {
 		ctx := context.Background()

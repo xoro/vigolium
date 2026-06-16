@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -289,6 +291,47 @@ func TestNewInputSource_MultipleSources(t *testing.T) {
 	_, ok := src.(*MultiSource)
 	assert.True(t, ok)
 	_ = src.Close()
+}
+
+// TestNewInputSource_MultipleFilePaths verifies that repeated -T/--target-file
+// inputs (carried as FilePaths) are all read and their URLs merged into one
+// stream, alongside any single FilePath and direct Targets.
+func TestNewInputSource_MultipleFilePaths(t *testing.T) {
+	dir := t.TempDir()
+	f1 := filepath.Join(dir, "t1.txt")
+	f2 := filepath.Join(dir, "t2.txt")
+	require.NoError(t, os.WriteFile(f1, []byte("http://example.com/a\nhttp://example.com/b\n"), 0o644))
+	require.NoError(t, os.WriteFile(f2, []byte("http://example.com/c\n# comment\nhttp://example.com/d\n"), 0o644))
+
+	src, err := NewInputSource(SourceConfig{
+		Targets:   []string{"http://example.com/cli"},
+		FilePaths: []string{f1, f2},
+		Format:    "urls",
+	})
+	require.NoError(t, err)
+	defer func() { _ = src.Close() }()
+
+	var got []string
+	for {
+		item, nextErr := src.Next(context.Background())
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		require.NoError(t, nextErr)
+		u, urlErr := item.Request.URL()
+		require.NoError(t, urlErr)
+		got = append(got, u.String())
+	}
+	sort.Strings(got)
+
+	want := []string{
+		"http://example.com/a",
+		"http://example.com/b",
+		"http://example.com/c",
+		"http://example.com/cli",
+		"http://example.com/d",
+	}
+	assert.Equal(t, want, got, "URLs from the CLI target plus both -T files must all stream through")
 }
 
 func TestSupportedFormats(t *testing.T) {

@@ -20,6 +20,7 @@ type credentialResponse struct {
 	statusCode   int
 	body         string
 	hasSetCookie bool
+	blocked      bool // WAF/CDN block or challenge — carries no auth signal
 }
 
 type Module struct {
@@ -98,11 +99,30 @@ func (m *Module) ScanPerHost(
 		}
 	}
 
-	// Send baseline with invalid credentials
+	// Establish a failed-login baseline from TWO independent invalid-credential
+	// probes. This does double duty: it captures what a generic rejected login
+	// looks like, and — by requiring the two probes to agree — proves the endpoint
+	// is stable enough that a later "success" differential can be trusted. A login
+	// page that varies per request (rotating CSRF token, dynamic chrome) would
+	// otherwise manufacture a phantom success. A single anomalous baseline can no
+	// longer poison every comparison.
 	baseline, err := m.sendCredentials(ctx, httpClient, endpoint,
 		"vigolium-invalid-user-7a3f", "vigolium-invalid-pass-9b2e")
 	if err != nil {
 		return nil, err
+	}
+	if baseline.blocked {
+		return nil, nil // WAF/CDN fronting the login — no reliable auth signal
+	}
+
+	time.Sleep(500 * time.Millisecond)
+	baseline2, err := m.sendCredentials(ctx, httpClient, endpoint,
+		"vigolium-decoy-user-2c8d", "vigolium-decoy-pass-5f1a")
+	if err != nil {
+		return nil, err
+	}
+	if baseline2.blocked || !invalidResponsesStable(baseline, baseline2) {
+		return nil, nil // login surface too volatile (or blocked) to trust a differential
 	}
 
 	// Test credential pairs
@@ -118,31 +138,93 @@ func (m *Module) ScanPerHost(
 			continue
 		}
 
+		// A WAF/CDN block is neither a success nor a lockout — it is the edge, not
+		// the application. Skip it without ending the sweep.
+		if cr.blocked {
+			continue
+		}
+
 		// Check for lockout
 		if isLockout(cr.body) {
 			return results, nil // Stop testing
 		}
 
-		if isLoginSuccess(cr.statusCode, cr.body, baseline.statusCode, len(baseline.body), cr.hasSetCookie) {
-			rawReq := m.buildCredentialRequest(ctx, endpoint, cred.username, cred.password)
-			results = append(results, &output.ResultEvent{
-				URL:              ctx.Target(),
-				Request:          string(rawReq),
-				Response:         cr.body,
-				FuzzingParameter: endpoint.usernameField,
-				ExtractedResults: []string{
-					fmt.Sprintf("Username: %s", cred.username),
-					fmt.Sprintf("Password: %s", cred.password),
-				},
-				Info: output.Info{
-					Description: fmt.Sprintf("Default credentials found: %s/%s", cred.username, cred.password),
-				},
-			})
-			return results, nil // Stop on first success
+		if !isLoginSuccess(cr.statusCode, cr.body, baseline.statusCode, baseline.body, cr.hasSetCookie) {
+			continue
 		}
+
+		// Confirm before reporting: the verdict must reproduce on a re-send, and
+		// the "successful" response must be materially distinct from a freshly
+		// fetched invalid-credential response (a negative control). This rejects
+		// both transient one-off differentials and plain login-page variance that
+		// merely looks different from the original baseline.
+		if !m.confirmCredentialSuccess(ctx, httpClient, endpoint, cred, baseline, cr) {
+			continue
+		}
+
+		rawReq := m.buildCredentialRequest(ctx, endpoint, cred.username, cred.password)
+		results = append(results, &output.ResultEvent{
+			URL:              ctx.Target(),
+			Request:          string(rawReq),
+			Response:         cr.body,
+			FuzzingParameter: endpoint.usernameField,
+			ExtractedResults: []string{
+				fmt.Sprintf("Username: %s", cred.username),
+				fmt.Sprintf("Password: %s", cred.password),
+			},
+			Info: output.Info{
+				Description: fmt.Sprintf("Default credentials found: %s/%s", cred.username, cred.password),
+			},
+		})
+		return results, nil // Stop on first confirmed success
 	}
 
 	return results, nil
+}
+
+// invalidResponsesStable reports whether two independent failed-login responses
+// agree closely enough to trust a credential differential: same status and
+// textually similar bodies. If they disagree the login surface is too dynamic
+// (or non-deterministic) for a single "success" differential to mean anything.
+func invalidResponsesStable(a, b credentialResponse) bool {
+	if a.statusCode != b.statusCode {
+		return false
+	}
+	return modkit.BodiesSimilar(a.body, b.body)
+}
+
+// confirmCredentialSuccess re-verifies a candidate "success" before it is
+// reported: (1) re-sending the same credentials must reproduce the success
+// verdict (deterministic, not a transient), and (2) the candidate response must
+// be materially distinct from a fresh random-invalid control (so login-page
+// variance that merely differs from the original baseline is not mistaken for
+// authentication).
+func (m *Module) confirmCredentialSuccess(
+	ctx *httpmsg.HttpRequestResponse,
+	httpClient *http.Requester,
+	endpoint *loginEndpoint,
+	cred credentialPair,
+	baseline, candidate credentialResponse,
+) bool {
+	repeat, err := m.sendCredentials(ctx, httpClient, endpoint, cred.username, cred.password)
+	if err != nil || repeat.blocked {
+		return false
+	}
+	if !isLoginSuccess(repeat.statusCode, repeat.body, baseline.statusCode, baseline.body, repeat.hasSetCookie) {
+		return false
+	}
+
+	control, err := m.sendCredentials(ctx, httpClient, endpoint,
+		"vigolium-control-user-9d4b", "vigolium-control-pass-1e7c")
+	if err != nil || control.blocked {
+		return false
+	}
+	// If the "successful" response is indistinguishable from a generic failed
+	// login (same status and similar body), it is page variance, not auth.
+	if candidate.statusCode == control.statusCode && modkit.BodiesSimilar(candidate.body, control.body) {
+		return false
+	}
+	return true
 }
 
 // sendCredentials sends a login request with the given credentials and extracts response data.
@@ -172,6 +254,13 @@ func (m *Module) sendCredentials(
 		cr.hasSetCookie = resp.Response().Header.Get("Set-Cookie") != ""
 	}
 	cr.body = resp.FullResponseString()
+
+	// Flag only vendor-identified WAF/CDN edge blocks/challenges (Cloudflare,
+	// Akamai, CloudFront, Incapsula — including 200-status challenge bodies), NOT a
+	// plain application 401: a 401 is the *expected* failed-login baseline this
+	// module is built around, so infra.IsBlockedResponse (which treats 401/403 as
+	// blocked) is deliberately not used here.
+	cr.blocked = modkit.IsEdgeBlockedResponse(httpmsg.NewHttpResponse([]byte(cr.body)))
 
 	return cr, nil
 }

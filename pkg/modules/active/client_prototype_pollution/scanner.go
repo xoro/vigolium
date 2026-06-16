@@ -9,6 +9,7 @@ import (
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/modules/modkit"
 	"github.com/vigolium/vigolium/pkg/output"
+	"github.com/vigolium/vigolium/pkg/types/severity"
 	"github.com/vigolium/vigolium/pkg/utils"
 )
 
@@ -166,17 +167,17 @@ func (m *Module) ScanPerRequest(
 		}
 	}
 
-	// Detect source patterns
+	// Detect source patterns. Sink-only shapes (generic deep-merge / recursive bracket
+	// assignment) match identically whether the data is attacker-controlled URL input or
+	// internal library config, so firingSourcePatterns gates them on a nearby URL source;
+	// this drops benign library code (analytics serializers, script loaders, framework
+	// helpers) that merely shares the shape. Patterns embedding their own URL source are
+	// not gated, keeping it FN-safe for them.
 	for _, block := range blocks {
-		for _, sp := range ppSourcePatterns {
-			loc := sp.Pattern.FindStringIndex(block.content)
-			if loc == nil {
-				continue
-			}
-			// Extract matching line for evidence
-			matchLine := extractMatchLine(block.content, loc[0])
+		for _, hit := range firingSourcePatterns(block.content) {
+			matchLine := extractMatchLine(block.content, hit.Pos)
 			findings = append(findings, ppFinding{
-				Source:     sp,
+				Source:     hit.Pattern,
 				SourceFile: block.source,
 				SourceLine: matchLine,
 				Gadgets:    allGadgets,
@@ -230,6 +231,17 @@ func (m *Module) ScanPerRequest(
 		gadgetDesc,
 	)
 
+	// Calibrate severity to the strength of the evidence. This module is a static
+	// heuristic — the probe only verifies the URL is reachable, not that the prototype
+	// was actually polluted at runtime — so confidence stays Tentative. A bare source
+	// pattern with no reachable sink is Medium; finding an actual high-impact gadget
+	// (innerHTML/eval/document.write reading attacker-controllable keys) raises the
+	// realistic impact to High, but it still warrants manual confirmation.
+	sev := severity.Medium
+	if len(f.Gadgets) > 0 {
+		sev = severity.High
+	}
+
 	result := &output.ResultEvent{
 		URL:              urlx.String(),
 		Request:          probeRaw,
@@ -238,6 +250,8 @@ func (m *Module) ScanPerRequest(
 		Info: output.Info{
 			Name:        "Client-Side Prototype Pollution",
 			Description: description,
+			Severity:    sev,
+			Confidence:  severity.Tentative,
 			Reference: []string{
 				"https://portswigger.net/web-security/prototype-pollution",
 				"https://portswigger.net/web-security/prototype-pollution/client-side",

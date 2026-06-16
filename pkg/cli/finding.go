@@ -31,6 +31,7 @@ var (
 	findingOffset        int
 	findingSeverity      string
 	findingMinSeverity   string
+	findingConfidence    string
 	findingScanUUID      string
 	findingAgenticScan   string
 	findingModuleType    string
@@ -57,7 +58,7 @@ type findingColumnDef struct {
 var allFindingColumns = []findingColumnDef{
 	{"ID", "", func(f *database.Finding) string { return fmt.Sprintf("%d", f.ID) }, 6},
 	{"SEVERITY", "", func(f *database.Finding) string { return clicommon.ColorSeverity(f.Severity) }, 10},
-	{"CONFIDENCE", "", func(f *database.Finding) string { return f.Confidence }, 10},
+	{"CONFIDENCE", "", func(f *database.Finding) string { return clicommon.ColorConfidence(f.Confidence) }, 10},
 	{"MODULE", "", func(f *database.Finding) string { return clicommon.Truncate(f.ModuleName, 30) }, 30},
 	{"MODULE_ID", "", func(f *database.Finding) string { return clicommon.Truncate(f.ModuleID, 30) }, 30},
 	{"SHORT_DESC", "", func(f *database.Finding) string { return clicommon.Truncate(f.ModuleShort, 40) }, 40},
@@ -87,7 +88,7 @@ var allFindingColumns = []findingColumnDef{
 	}, 30},
 }
 
-var defaultFindingColumnNames = []string{"ID", "SEVERITY", "MODULE", "SHORT_DESC", "TYPE", "SOURCE", "HOST_REPO", "MATCHED_AT"}
+var defaultFindingColumnNames = []string{"ID", "SEVERITY", "CONFIDENCE", "MODULE", "SHORT_DESC", "TYPE", "SOURCE", "HOST_REPO", "MATCHED_AT"}
 
 var findingCmd = &cobra.Command{
 	Use:     "finding [search-term]",
@@ -122,6 +123,7 @@ func init() {
 	// Finding-specific filter flags
 	pf.StringVar(&findingSeverity, "severity", "", "Filter by severity: critical,high,medium,low,info (comma-separated)")
 	pf.StringVar(&findingMinSeverity, "min-severity", "", "Filter by minimum severity (e.g. high → high+critical); ignored when --severity is set")
+	pf.StringVar(&findingConfidence, "confidence", "", "Filter by confidence: certain,firm,tentative (comma-separated)")
 	pf.StringVar(&findingScanUUID, "scan-uuid", "", "Filter by scan UUID")
 	pf.StringVar(&findingAgenticScan, "agentic-scan", "", "Filter by agentic-scan UUID (findings produced by an agent autopilot/swarm/audit run)")
 	pf.StringVar(&findingModuleType, "module-type", "", "Filter by module type (active, passive, nuclei, secret-scan, agent, source-tools, oast, extension)")
@@ -228,6 +230,15 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		}
 	}
 
+	var confidences []string
+	if findingConfidence != "" {
+		for _, c := range strings.Split(findingConfidence, ",") {
+			if c = strings.ToLower(strings.TrimSpace(c)); c != "" {
+				confidences = append(confidences, c)
+			}
+		}
+	}
+
 	projectUUID, err := effectiveProjectUUID()
 	if err != nil {
 		return database.QueryFilters{}, err
@@ -243,6 +254,7 @@ func buildFindingFilters(fuzzyTerm string) (database.QueryFilters, error) {
 		Source:        findingSource,
 		ScanUUID:      findingScanUUID,
 		Severity:      severities,
+		Confidence:    confidences,
 		ModuleType:    findingModuleType,
 		FindingSource: findingFindingSource,
 		DateFrom:      dateFrom,

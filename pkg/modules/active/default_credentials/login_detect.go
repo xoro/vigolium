@@ -111,14 +111,20 @@ func hasCAPTCHA(body string) bool {
 	return false
 }
 
-// isLoginSuccess determines if a response indicates successful authentication.
-func isLoginSuccess(statusCode int, body string, baselineStatus int, baselineLength int, hasSetCookie bool) bool {
+// isLoginSuccess determines if a response indicates successful authentication,
+// judged against a failed-login baseline (the body of an invalid-credential
+// attempt). The baseline body — not just its length — is needed so brand/host
+// words that appear regardless of auth (e.g. "dashboard" on dashboard.example.com)
+// can be excluded from the success-indicator check.
+func isLoginSuccess(statusCode int, body string, baselineStatus int, baselineBody string, hasSetCookie bool) bool {
 	// A WAF/rate-limit response is not an auth success. Credential-stuffing probes
 	// frequently get throttled by Cloudflare et al. with 429+Set-Cookie (cf_chl_*,
 	// __cf_bm), which would otherwise trip the Set-Cookie+body-diff path below.
 	if statusCode == 401 || statusCode == 403 || statusCode == 429 || statusCode == 503 {
 		return false
 	}
+
+	baselineLength := len(baselineBody)
 
 	// Status code change from failure to success
 	if baselineStatus == 401 && (statusCode == 200 || statusCode == 302 || statusCode == 303) {
@@ -144,7 +150,14 @@ func isLoginSuccess(statusCode int, body string, baselineStatus int, baselineLen
 	// Check for success indicators in body (with significant status/length change)
 	if statusCode != baselineStatus || significantLengthDiff(len(body), baselineLength) {
 		bodyLower := strings.ToLower(body)
+		baselineLower := strings.ToLower(baselineBody)
 		for _, indicator := range successIndicators {
+			// An indicator that ALSO appears in the failed-login baseline is not
+			// auth-gated — it is page chrome/branding (the classic "dashboard" in
+			// dashboard.example.com), so it cannot evidence a successful login.
+			if strings.Contains(baselineLower, indicator) {
+				continue
+			}
 			if strings.Contains(bodyLower, indicator) {
 				return true
 			}

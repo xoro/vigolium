@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun/driver/sqliteshim"
 	"github.com/vigolium/vigolium/pkg/terminal"
 	"github.com/vigolium/vigolium/pkg/types"
 )
@@ -119,12 +121,12 @@ func TestValidateParallelScan(t *testing.T) {
 		{"negative parallel rejected", &types.Options{Parallel: -2}, true},
 		{
 			"parallel>1 with full stateless combo ok",
-			&types.Options{Parallel: 4, Stateless: true, TargetsFilePath: "t.txt", SplitByHost: true},
+			&types.Options{Parallel: 4, Stateless: true, TargetsFilePaths: []string{"t.txt"}, SplitByHost: true},
 			false,
 		},
 		{
 			"parallel>1 with db-isolate + target file ok (no split-by-host needed)",
-			&types.Options{Parallel: 4, DBIsolate: true, TargetsFilePath: "t.txt"},
+			&types.Options{Parallel: 4, DBIsolate: true, TargetsFilePaths: []string{"t.txt"}},
 			false,
 		},
 		{
@@ -136,7 +138,7 @@ func TestValidateParallelScan(t *testing.T) {
 		},
 		{
 			"parallel>1 with neither stateless nor db-isolate rejected",
-			&types.Options{Parallel: 4, TargetsFilePath: "t.txt", SplitByHost: true},
+			&types.Options{Parallel: 4, TargetsFilePaths: []string{"t.txt"}, SplitByHost: true},
 			true,
 		},
 		{
@@ -148,7 +150,7 @@ func TestValidateParallelScan(t *testing.T) {
 		},
 		{
 			"parallel>1 stateless missing split-by-host rejected",
-			&types.Options{Parallel: 4, Stateless: true, TargetsFilePath: "t.txt"},
+			&types.Options{Parallel: 4, Stateless: true, TargetsFilePaths: []string{"t.txt"}},
 			true,
 		},
 	}
@@ -248,7 +250,8 @@ func TestSummarizeTargetList(t *testing.T) {
 }
 
 // readChildStats counts http_record/finding envelopes (by severity) from a
-// child's JSONL output, and only when jsonl is among the formats.
+// child's JSONL output, falling back to the standalone .sqlite export when jsonl
+// was not requested.
 func TestReadChildStats(t *testing.T) {
 	dir := t.TempDir()
 	base := filepath.Join(dir, "scan-out-host")
@@ -277,7 +280,7 @@ func TestReadChildStats(t *testing.T) {
 		assert.Equal(t, 3, st.findings)
 	})
 
-	t.Run("not ok when jsonl not requested", func(t *testing.T) {
+	t.Run("not ok when no readable format requested", func(t *testing.T) {
 		_, ok := readChildStats(base, []string{"html"})
 		assert.False(t, ok)
 	})
@@ -286,6 +289,65 @@ func TestReadChildStats(t *testing.T) {
 		_, ok := readChildStats(filepath.Join(dir, "nope"), []string{"jsonl"})
 		assert.False(t, ok)
 	})
+}
+
+// readChildStats falls back to the standalone .sqlite export so the per-target
+// stats and Totals roll-up render under formats like --format sqlite,html that
+// never produce a jsonl the parent could tally.
+func TestReadChildStatsSQLiteFallback(t *testing.T) {
+	dir := t.TempDir()
+	base := filepath.Join(dir, "scan-out-host")
+	writeStatsSQLite(t, base+".sqlite", 4, map[string]int{"high": 2, "medium": 1, "info": 3})
+
+	t.Run("counts from sqlite when jsonl absent", func(t *testing.T) {
+		st, ok := readChildStats(base, []string{"sqlite", "html"})
+		require.True(t, ok)
+		assert.Equal(t, 4, st.records)
+		assert.Equal(t, 6, st.findings)
+		assert.Equal(t, 2, st.sev["high"])
+		assert.Equal(t, 1, st.sev["medium"])
+		assert.Equal(t, 3, st.sev["info"])
+	})
+
+	t.Run("prefers jsonl when both present", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(base+".jsonl",
+			[]byte(`{"type":"http_record","data":{}}`+"\n"+`{"type":"finding","data":{"severity":"low"}}`+"\n"), 0o644))
+		st, ok := readChildStats(base, []string{"jsonl", "sqlite"})
+		require.True(t, ok)
+		assert.Equal(t, 1, st.records) // jsonl values, not the sqlite ones
+		assert.Equal(t, 1, st.findings)
+		assert.Equal(t, 1, st.sev["low"])
+	})
+
+	t.Run("not ok when sqlite missing", func(t *testing.T) {
+		_, ok := readChildStats(filepath.Join(dir, "nope"), []string{"sqlite"})
+		assert.False(t, ok)
+	})
+}
+
+// writeStatsSQLite creates a minimal standalone .sqlite with the http_records
+// and findings tables readChildStatsSQLite queries, populated with recordCount
+// records and the given per-severity finding counts.
+func writeStatsSQLite(t *testing.T, path string, recordCount int, sevCounts map[string]int) {
+	t.Helper()
+	db, err := sql.Open(sqliteshim.ShimName, path)
+	require.NoError(t, err)
+	defer func() { _ = db.Close() }()
+
+	_, err = db.Exec(`CREATE TABLE http_records (id INTEGER PRIMARY KEY);
+CREATE TABLE findings (id INTEGER PRIMARY KEY, severity TEXT NOT NULL);`)
+	require.NoError(t, err)
+
+	for i := 0; i < recordCount; i++ {
+		_, err = db.Exec("INSERT INTO http_records DEFAULT VALUES")
+		require.NoError(t, err)
+	}
+	for sev, n := range sevCounts {
+		for i := 0; i < n; i++ {
+			_, err = db.Exec("INSERT INTO findings (severity) VALUES (?)", sev)
+			require.NoError(t, err)
+		}
+	}
 }
 
 // severityBreakdown lists present severities in descending order and is empty

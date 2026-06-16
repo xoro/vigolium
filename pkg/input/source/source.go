@@ -55,9 +55,12 @@ type SourceConfig struct {
 	// Direct targets (from -u flag)
 	Targets []string
 
-	// File-based input
-	FilePath string
-	Format   string // "urls", "nuclei", "openapi", etc.
+	// File-based input. FilePath is a single input file (e.g. -i/--input).
+	// FilePaths carries additional files (e.g. repeated -T/--target-file); every
+	// listed file is read and its items merged into the stream.
+	FilePath  string
+	FilePaths []string
+	Format    string // "urls", "nuclei", "openapi", etc.
 
 	// Stdin
 	UseStdin bool
@@ -84,14 +87,25 @@ func NewInputSource(cfg SourceConfig) (InputSource, error) {
 		sources = append(sources, NewTargetSource(cfg.Targets, cfg.EnableModules))
 	}
 
-	// Add file source if file path provided
+	// Add a file source per provided path. FilePath (single) and FilePaths
+	// (repeatable) are read in order and merged; an empty entry is skipped so a
+	// caller can pass either field without guarding.
+	filePaths := make([]string, 0, len(cfg.FilePaths)+1)
 	if cfg.FilePath != "" {
+		filePaths = append(filePaths, cfg.FilePath)
+	}
+	for _, fp := range cfg.FilePaths {
+		if fp != "" {
+			filePaths = append(filePaths, fp)
+		}
+	}
+	for _, fp := range filePaths {
 		bufSize := cfg.BufferSize
 		if bufSize <= 0 {
 			bufSize = 100
 		}
 		fs, err := NewFileSource(FileSourceConfig{
-			FilePath:      cfg.FilePath,
+			FilePath:      fp,
 			Format:        cfg.Format,
 			BufferSize:    bufSize,
 			EnableModules: cfg.EnableModules,

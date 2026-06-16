@@ -849,3 +849,37 @@ func errorSurfaceFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Reques
 	defer resp.Close()
 	return resp.Body().String(), infra.IsBlockedResponse(resp), infra.IsErrorSurfaceStatus(resp), true
 }
+
+// LargeDynamicHTMLBytes is the body-size ceiling above which a text/html response
+// is treated as a rendered content page rather than a compact query/auth endpoint.
+// Such pages carry enough per-request dynamic content (ads, recommendations,
+// rotating blocks) that a boolean / true-false body differential is dominated by
+// noise. The gate that uses it is content-type scoped to text/html, so JSON / auth
+// endpoints — the real injection-oracle surface — are never affected.
+const LargeDynamicHTMLBytes = 100 * 1024
+
+// DifferentialSurfaceUnreliable reports whether resp is a surface on which a
+// boolean / true-false body differential cannot be trusted:
+//
+//   - a cache / CDN layer fronts the origin (infra.CacheState().Layer), so a
+//     cached body may answer one probe and an origin render the next; or
+//   - the body is a large rendered text/html content page (>= LargeDynamicHTMLBytes),
+//     whose per-request dynamic content dwarfs any real true/false difference.
+//
+// Differential-oracle modules — boolean-based SQLi / NoSQLi / LDAPi — should skip
+// such surfaces before probing. It reads only response headers and the captured
+// body and sends no traffic. A nil response is treated as reliable (fail open) so a
+// caller without a captured baseline still runs.
+func DifferentialSurfaceUnreliable(resp *httpmsg.HttpResponse) bool {
+	if resp == nil {
+		return false
+	}
+	if infra.CacheState(resp.Header).Layer {
+		return true
+	}
+	if ClassifyContentType(resp.Header("Content-Type")) == ContentClassHTML &&
+		len(resp.Body()) >= LargeDynamicHTMLBytes {
+		return true
+	}
+	return false
+}
