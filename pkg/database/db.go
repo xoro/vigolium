@@ -120,6 +120,9 @@ func (db *DB) startWALCheckpointer() {
 				if _, err := db.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 					zap.L().Debug("WAL checkpoint failed", zap.Error(err))
 				}
+				// Refresh planner stats on the same cadence so a long-running
+				// server keeps good plans as the tables grow.
+				db.Optimize(ctx)
 				cancel()
 			}
 		}
@@ -262,9 +265,52 @@ func (db *DB) Close() error {
 		db.ckptStopOnce.Do(func() { close(db.ckptStop) })
 	}
 	if db.DB != nil {
+		// Persist query-planner statistics before closing so the next process to
+		// reopen this database (e.g. `vigolium finding`/`traffic` read commands)
+		// plans dedup/finding queries against real row counts rather than the
+		// SQLite defaults.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		db.Optimize(ctx)
+		cancel()
 		return db.DB.Close()
 	}
 	return nil
+}
+
+// Optimize refreshes the query-planner statistics so subsequent dedup and finding
+// queries plan against real row counts. Call it after a bulk ingest phase (e.g.
+// discovery) and before the heavy dedup passes; it also runs on Close and on the
+// WAL checkpointer cadence. Best-effort — a failure degrades plans, never
+// correctness.
+//
+// SQLite uses `PRAGMA optimize` (incremental: only re-analyzes tables that changed
+// enough to matter). PostgreSQL analyzes just the hot ingest tables rather than
+// the whole database, so a short-lived CLI run against a shared server doesn't
+// trigger a blocking full-DB ANALYZE on every close.
+func (db *DB) Optimize(ctx context.Context) {
+	if db.DB == nil {
+		return
+	}
+	stmt := "PRAGMA optimize"
+	if db.driver == "postgres" {
+		stmt = "ANALYZE http_records, findings"
+	}
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		zap.L().Debug("query-planner optimize failed", zap.Error(err))
+	}
+}
+
+// ftsIndexesBody reports whether an existing http_records_fts virtual table was
+// created with the legacy body columns (raw_request/raw_response), so the caller
+// knows to drop and recreate it as the slim metadata-only index. A missing table
+// or query failure reports false — there is nothing to migrate.
+func (db *DB) ftsIndexesBody(ctx context.Context) bool {
+	var ddl string
+	if err := db.QueryRowContext(ctx,
+		"SELECT sql FROM sqlite_master WHERE type='table' AND name='http_records_fts'").Scan(&ddl); err != nil {
+		return false
+	}
+	return strings.Contains(ddl, "raw_request") || strings.Contains(ddl, "raw_response")
 }
 
 // Driver returns the database driver name
@@ -591,7 +637,13 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_records_project_host_method_status ON http_records(project_uuid, hostname, method, status_code)",
 		"CREATE INDEX IF NOT EXISTS idx_records_project_scheme_host_port ON http_records(project_uuid, scheme, hostname, port)",
 		"CREATE INDEX IF NOT EXISTS idx_records_project_risk_score ON http_records(project_uuid, risk_score)",
-		"CREATE INDEX IF NOT EXISTS idx_records_dedup ON http_records(project_uuid, method, hostname, path)",
+		// Covering index for findDuplicateRecord: the duplicate probe filters on
+		// (project_uuid, method, hostname, path, url[, request_hash]) and selects
+		// only uuid. Indexing all of those plus uuid lets the lookup resolve
+		// entirely from the index (no per-candidate table row fetch). The old
+		// 4-column version (…, path) is dropped above so this definition takes
+		// effect on existing databases.
+		"CREATE INDEX IF NOT EXISTS idx_records_dedup ON http_records(project_uuid, method, hostname, path, url, request_hash, uuid)",
 		"CREATE INDEX IF NOT EXISTS idx_records_request_hash ON http_records(request_hash)",
 		"CREATE INDEX IF NOT EXISTS idx_records_response_hash ON http_records(response_hash)",
 		// Supports DeduplicateDeparosByNormHash: narrows the full http_records scan to
@@ -616,6 +668,15 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_scan ON findings(project_uuid, scan_uuid)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_status ON findings(project_uuid, status)",
 		"CREATE INDEX IF NOT EXISTS idx_findings_project_hostname ON findings(project_uuid, hostname)",
+		// Backs the per-round dynamic-assessment dedup grouping
+		// (DeduplicateFindings / GroupFindingsByValue): the WHERE narrows on
+		// (project_uuid, hostname) and the window function partitions by
+		// (module_id, severity, …) ordered by created_at. Indexing all five lets
+		// the host-scoped scan resolve from the index and arrive partially
+		// pre-ordered for the PARTITION BY, instead of a full findings scan + sort
+		// every feedback round. (matched_url is a json_extract expression and
+		// stays per-row, but the module_id/severity prefix is satisfied here.)
+		"CREATE INDEX IF NOT EXISTS idx_findings_project_host_module_sev ON findings(project_uuid, hostname, module_id, severity, created_at)",
 		// Sparse (nullzero column) — used by agent end-of-run summaries and
 		// webhook notifications to count findings per agentic-scan run.
 		"CREATE INDEX IF NOT EXISTS idx_findings_agentic_scan ON findings(agentic_scan_uuid)",
@@ -665,6 +726,13 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 	// finding_hash coexist across projects.
 	db.execBestEffort(ctx, "drop legacy index idx_findings_hash", "DROP INDEX IF EXISTS idx_findings_hash")
 	db.execBestEffort(ctx, "drop legacy index idx_findings_hash_unique", "DROP INDEX IF EXISTS idx_findings_hash_unique")
+
+	// idx_records_dedup was (project_uuid, method, hostname, path); it is
+	// recreated below as a covering index that also includes url, request_hash,
+	// and uuid so findDuplicateRecord resolves without a table fetch. Drop the
+	// old definition so the CREATE INDEX IF NOT EXISTS below actually applies on
+	// existing databases (IF NOT EXISTS would otherwise keep the stale shape).
+	db.execBestEffort(ctx, "drop legacy index idx_records_dedup", "DROP INDEX IF EXISTS idx_records_dedup")
 
 	// Drop old single-column indexes superseded by project-aware composites
 	oldIndexes := []string{
@@ -839,15 +907,32 @@ func (db *DB) SeedDefaults(ctx context.Context) error {
 	}
 
 	// Create FTS5 index for full-text search on HTTP records (SQLite only).
-	// This replaces the CAST(blob AS TEXT) LIKE pattern which forces full table scans.
+	//
+	// Only the cheap metadata columns (url, path, hostname) are indexed. The
+	// large raw_request/raw_response blobs are deliberately NOT in the FTS index:
+	// indexing them forced every record INSERT to CAST both blobs to TEXT and
+	// re-tokenize multi-KB bodies inline in the write transaction — roughly
+	// doubling steady-state ingest write volume purely to accelerate the rare
+	// body/header search. Body/header searches now use the CAST(...) LIKE scan in
+	// query.go (applyRawCorpusSearch); see also the legacy-table cleanup below
+	// which drops a previously body-indexed FTS so the slim definition applies.
 	if db.driver != "postgres" {
+		// Drop a legacy body-indexed FTS table (+ its triggers) from older
+		// databases so the metadata-only definition below takes effect. The FTS
+		// content is fully derivable from http_records, so dropping/recreating
+		// loses nothing.
+		db.execBestEffort(ctx, "drop legacy FTS insert trigger", "DROP TRIGGER IF EXISTS http_records_fts_ai")
+		db.execBestEffort(ctx, "drop legacy FTS delete trigger", "DROP TRIGGER IF EXISTS http_records_fts_ad")
+		db.execBestEffort(ctx, "drop legacy FTS update trigger", "DROP TRIGGER IF EXISTS http_records_fts_au")
+		if db.ftsIndexesBody(ctx) {
+			db.execBestEffort(ctx, "drop legacy body-indexed FTS table", "DROP TABLE IF EXISTS http_records_fts")
+		}
+
 		_, ftsErr := db.ExecContext(ctx, `
 			CREATE VIRTUAL TABLE IF NOT EXISTS http_records_fts USING fts5(
 				url,
 				path,
 				hostname,
-				raw_request,
-				raw_response,
 				content=http_records,
 				content_rowid=rowid,
 				tokenize='porter unicode61'
@@ -858,16 +943,12 @@ func (db *DB) SeedDefaults(ctx context.Context) error {
 			db.hasFTS = true
 			ftsTrigs := []string{
 				`CREATE TRIGGER IF NOT EXISTS http_records_fts_ai AFTER INSERT ON http_records BEGIN
-					INSERT INTO http_records_fts(rowid, url, path, hostname,
-						raw_request, raw_response)
-					VALUES (new.rowid, new.url, new.path, new.hostname,
-						CAST(new.raw_request AS TEXT), CAST(new.raw_response AS TEXT));
+					INSERT INTO http_records_fts(rowid, url, path, hostname)
+					VALUES (new.rowid, new.url, new.path, new.hostname);
 				END`,
 				`CREATE TRIGGER IF NOT EXISTS http_records_fts_ad AFTER DELETE ON http_records BEGIN
-					INSERT INTO http_records_fts(http_records_fts, rowid, url, path, hostname,
-						raw_request, raw_response)
-					VALUES ('delete', old.rowid, old.url, old.path, old.hostname,
-						CAST(old.raw_request AS TEXT), CAST(old.raw_response AS TEXT));
+					INSERT INTO http_records_fts(http_records_fts, rowid, url, path, hostname)
+					VALUES ('delete', old.rowid, old.url, old.path, old.hostname);
 				END`,
 			}
 			for _, trig := range ftsTrigs {

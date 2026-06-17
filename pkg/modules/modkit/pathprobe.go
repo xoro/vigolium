@@ -396,6 +396,13 @@ func MultiRoundExtDecoyCatchAll(
 	if rounds < 1 {
 		rounds = 1
 	}
+	// The candidate body is compared against every round's decoy, so tokenize it
+	// once up front instead of re-normalizing it on each BodiesSimilar call.
+	var candidateSig ResponseSignature
+	haveCandidate := candidateBody != ""
+	if haveCandidate {
+		candidateSig = BodySignature(candidateBody)
+	}
 	for i := 0; i < rounds; i++ {
 		// Pass a nil ScanContext so each round is a genuinely distinct fetch with
 		// a fresh canary — the multi-round confirmation deliberately wants several
@@ -407,7 +414,7 @@ func MultiRoundExtDecoyCatchAll(
 		if markerMatch != nil && markerMatch(decoyBody) {
 			return true // decoy carries the same markers → extension-scoped catch-all
 		}
-		if candidateBody != "" && BodiesSimilar(decoyBody, candidateBody) {
+		if haveCandidate && BodiesSimilarSig(candidateSig, decoyBody) {
 			return true // decoy body ≈ candidate body → catch-all shell
 		}
 	}

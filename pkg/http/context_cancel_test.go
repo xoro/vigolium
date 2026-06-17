@@ -2,12 +2,15 @@ package http
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/vigolium/vigolium/pkg/core/hosterrors"
 	"github.com/vigolium/vigolium/pkg/core/network"
+	"github.com/vigolium/vigolium/pkg/core/ratelimit"
 	"github.com/vigolium/vigolium/pkg/core/services"
 	"github.com/vigolium/vigolium/pkg/httpmsg"
 	"github.com/vigolium/vigolium/pkg/types"
@@ -52,6 +55,61 @@ func TestWithContext_CancelsInFlightExecute(t *testing.T) {
 	}
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Execute did not honour the bound context: took %s (cancel at 150ms, server sleeps 800ms)", elapsed)
+	}
+}
+
+// TestExecute_QuarantinedHostSkipsLimiterAcquire proves the quarantine check
+// runs BEFORE the per-host limiter acquire: a request to an unresponsive host
+// returns immediately even when the host's only limiter slot is occupied,
+// rather than blocking on a slot it would never use.
+func TestExecute_QuarantinedHostSkipsLimiterAcquire(t *testing.T) {
+	opts := types.DefaultOptions()
+	if err := network.Init(opts); err != nil {
+		t.Fatalf("network.Init: %v", err)
+	}
+
+	// One slot per host with a long acquire timeout: an acquire-first ordering
+	// would block ~5s on the saturated slot, blowing the sub-second bound below.
+	limiter := ratelimit.NewHostRateLimiter(ratelimit.HostRateLimiterConfig{
+		MaxPerHost:     1,
+		EvictInterval:  time.Hour,
+		AcquireTimeout: 5 * time.Second,
+	})
+	defer func() { _ = limiter.Close() }()
+
+	// MaxHostError 1 + tracked "boom" substring: a single MarkFailed quarantines.
+	hostErrors := hosterrors.New(1, 100, []string{"boom"})
+	defer hostErrors.Close()
+
+	svc := &services.Services{Options: opts, HostLimiter: limiter, HostErrors: hostErrors}
+	r, err := NewRequester(opts, svc)
+	if err != nil {
+		t.Fatalf("NewRequester: %v", err)
+	}
+
+	rr, err := httpmsg.GetRawRequestFromURL("http://127.0.0.1:9/")
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+
+	hostErrors.MarkFailed(rr.ID(), errors.New("boom"), false)
+	if !hostErrors.Check(rr.ID()) {
+		t.Fatal("precondition: request's host should be quarantined")
+	}
+	// Saturate the host's single limiter slot.
+	if err := limiter.Acquire(context.Background(), rr.Service().Host()); err != nil {
+		t.Fatalf("saturate slot: %v", err)
+	}
+
+	start := time.Now()
+	_, _, execErr := r.Execute(rr, Options{NoClustering: true})
+	elapsed := time.Since(start)
+
+	if !errors.Is(execErr, hosterrors.ErrUnresponsiveHost) {
+		t.Fatalf("Execute err = %v, want ErrUnresponsiveHost", execErr)
+	}
+	if elapsed > time.Second {
+		t.Errorf("quarantine check did not short-circuit before the limiter acquire: took %s (slot full, 5s acquire timeout)", elapsed)
 	}
 }
 

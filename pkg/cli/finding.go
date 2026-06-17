@@ -170,14 +170,9 @@ func runFinding(cmd *cobra.Command, args []string) error {
 			filters.AgenticScanUUIDs = resolveAgenticScanTree(ctx, db, findingAgenticScan)
 		}
 		fqb := database.NewFindingsQueryBuilder(db, filters)
-		findings, err := fqb.Execute(ctx)
+		findings, total, err := fqb.ExecuteWithCount(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to query findings: %w", err)
-		}
-
-		total, err := fqb.Count(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to count findings: %w", err)
 		}
 
 		if active, tuiErr := tui.Active(findingTUIFlag, findingNoTUIFlag, globalJSON); tuiErr != nil {
@@ -283,7 +278,8 @@ func displayFindingsJSON(ctx context.Context, db *database.DB, findings []*datab
 
 // displayFindingsBurp shows findings with their associated HTTP records in Burp-style format.
 func displayFindingsBurp(db *database.DB, ctx context.Context, findings []*database.Finding) error {
-	repo := database.NewRepository(db)
+	// Fetch every referenced record in one query instead of one per finding.
+	byUUID := batchLoadFindingRecords(ctx, db, findings)
 	for i, f := range findings {
 		if i > 0 {
 			fmt.Println(terminal.Gray(burpDivider))
@@ -301,7 +297,7 @@ func displayFindingsBurp(db *database.DB, ctx context.Context, findings []*datab
 		fmt.Println()
 
 		// Show associated HTTP records
-		records := loadFindingRecords(ctx, repo, f)
+		records := recordsForFinding(byUUID, f)
 		for _, rec := range records {
 			printBurpRequest(rec.RawRequest)
 			fmt.Println(terminal.Gray("---"))
@@ -320,7 +316,8 @@ func displayFindingsBurp(db *database.DB, ctx context.Context, findings []*datab
 
 // displayFindingsRaw shows findings with their associated HTTP records in raw format.
 func displayFindingsRaw(db *database.DB, ctx context.Context, findings []*database.Finding) error {
-	repo := database.NewRepository(db)
+	// Fetch every referenced record in one query instead of one per finding.
+	byUUID := batchLoadFindingRecords(ctx, db, findings)
 	for _, f := range findings {
 		fmt.Println("──────────────────────────────────────────────────────────────────")
 		fmt.Printf("Finding #%d - %s [%s] %s\n", f.ID, clicommon.ColorSeverity(f.Severity), f.ModuleName, f.ModuleShort)
@@ -334,7 +331,7 @@ func displayFindingsRaw(db *database.DB, ctx context.Context, findings []*databa
 			f.Confidence, f.FindingSource, f.FoundAt.Format("2006-01-02 15:04:05"))
 		fmt.Println("──────────────────────────────────────────────────────────────────")
 
-		records := loadFindingRecords(ctx, repo, f)
+		records := recordsForFinding(byUUID, f)
 		for _, rec := range records {
 			fmt.Println()
 			if len(rec.RawRequest) > 0 {
@@ -369,7 +366,10 @@ func displayFindingsRaw(db *database.DB, ctx context.Context, findings []*databa
 	return nil
 }
 
-// loadFindingRecords fetches the HTTP records associated with a finding.
+// loadFindingRecords fetches the HTTP records associated with a single finding.
+// Prefer batchLoadFindingRecords + recordsForFinding when rendering many
+// findings to avoid an N+1 round-trip; this single-finding form is for callers
+// that already operate on one finding at a time.
 func loadFindingRecords(ctx context.Context, repo *database.Repository, f *database.Finding) []*database.HTTPRecord {
 	if len(f.HTTPRecordUUIDs) == 0 {
 		return nil
@@ -377,6 +377,22 @@ func loadFindingRecords(ctx context.Context, repo *database.Repository, f *datab
 	records, err := repo.GetRecordsByUUIDs(ctx, f.HTTPRecordUUIDs)
 	if err != nil {
 		return nil
+	}
+	return records
+}
+
+// recordsForFinding resolves a finding's linked records from a pre-fetched
+// byUUID map (see batchLoadFindingRecords), preserving the finding's UUID order
+// and skipping any that weren't loaded.
+func recordsForFinding(byUUID map[string]*database.HTTPRecord, f *database.Finding) []*database.HTTPRecord {
+	if len(f.HTTPRecordUUIDs) == 0 {
+		return nil
+	}
+	records := make([]*database.HTTPRecord, 0, len(f.HTTPRecordUUIDs))
+	for _, u := range f.HTTPRecordUUIDs {
+		if r := byUUID[u]; r != nil {
+			records = append(records, r)
+		}
 	}
 	return records
 }

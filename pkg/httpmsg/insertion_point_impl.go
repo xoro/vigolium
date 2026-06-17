@@ -63,16 +63,27 @@ func computeCLRewrite(baseRequest []byte, param *Param) clRewrite {
 	if !param.RequiresContentLengthUpdate() {
 		return clRewrite{}
 	}
-	bodyOffset := findBodyOffsetStrict(baseRequest, 0)
+	return computeCLRewriteRaw(baseRequest)
+}
+
+// computeCLRewriteRaw locates the in-place Content-Length rewrite for raw: the
+// body offset plus the single Content-Length value's offsets, when raw has a
+// clean header block with exactly one Content-Length whose value precedes the
+// body. It returns clRewrite{fast:false} otherwise (no body marker, zero or
+// duplicate Content-Length, or the value past the body) so the caller takes its
+// slow path. It is the shared eligibility check behind both computeCLRewrite
+// (parameter splice) and replaceBodyWithCL (whole-body replace).
+func computeCLRewriteRaw(raw []byte) clRewrite {
+	bodyOffset := findBodyOffsetStrict(raw, 0)
 	if bodyOffset == -1 {
 		return clRewrite{}
 	}
 	// Exactly one Content-Length header: 0 means UpdateContentLength would add
 	// one, >1 means it would collapse duplicates — both need the slow path.
-	if countHeaderOccurrences(baseRequest, "Content-Length") != 1 {
+	if countHeaderOccurrences(raw, "Content-Length") != 1 {
 		return clRewrite{}
 	}
-	offsets := GetHeaderOffsets(baseRequest, "Content-Length")
+	offsets := GetHeaderOffsets(raw, "Content-Length")
 	if offsets == nil {
 		return clRewrite{}
 	}

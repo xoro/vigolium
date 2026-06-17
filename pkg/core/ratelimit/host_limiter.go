@@ -259,9 +259,20 @@ func (h *HostRateLimiter) Acquire(ctx context.Context, host string) error {
 // AcquireWithTimeout blocks until a slot is available or the configured timeout expires.
 // Returns context.DeadlineExceeded if the timeout is reached before a slot is available.
 func (h *HostRateLimiter) AcquireWithTimeout(host string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), h.acquireTimeout)
+	return h.AcquireWithTimeoutContext(context.Background(), host)
+}
+
+// AcquireWithTimeoutContext blocks until a slot is available, the configured
+// acquire timeout expires, or the caller's context is cancelled — whichever
+// comes first. Returns context.DeadlineExceeded on timeout, or the context's
+// error (e.g. context.Canceled) on cancellation. Deriving the acquire deadline
+// from ctx (rather than context.Background()) lets a scan shutdown or phase
+// deadline unblock a waiting acquire promptly, instead of stranding the
+// goroutine until acquireTimeout elapses.
+func (h *HostRateLimiter) AcquireWithTimeoutContext(ctx context.Context, host string) error {
+	acquireCtx, cancel := context.WithTimeout(ctx, h.acquireTimeout)
 	defer cancel()
-	return h.Acquire(ctx, host)
+	return h.Acquire(acquireCtx, host)
 }
 
 // Release releases a slot for the given host.

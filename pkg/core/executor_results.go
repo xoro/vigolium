@@ -33,9 +33,20 @@ func (e *Executor) processResults(ctx context.Context, results []*output.ResultE
 		// Backfill request/response from original item when the module
 		// did not populate them so the finding always carries raw data
 		// and can be linked to an http_record.
+		//
+		// When we backfill the request, result.Request IS the unchanged baseline
+		// request — pass that request to emitResult so it reuses the baseline's
+		// memoized hash for the record-link lookup instead of allocating a temp
+		// request and re-hashing the raw bytes per finding. For DB-sourced items
+		// the baseline's hash is pre-registered in requestUUIDs (at item
+		// ingestion), so the lookup hits and links to the existing record rather
+		// than saving a duplicate. A module that sets its own (mutated) request
+		// leaves baselineReq nil and takes the unchanged parse/save path.
+		var baselineReq *httpmsg.HttpRequest
 		if item != nil {
 			if result.Request == "" && item.Request() != nil {
 				result.Request = string(item.Request().Raw())
+				baselineReq = item.Request()
 			}
 			if result.Response == "" && item.HasResponse() {
 				result.Response = string(item.Response().Raw())
@@ -50,7 +61,7 @@ func (e *Executor) processResults(ctx context.Context, results []*output.ResultE
 			continue
 		}
 
-		e.emitResult(ctx, result)
+		e.emitResult(ctx, result, baselineReq)
 
 		// Cross-module finding dedup: mark (URL, param, vuln_class) as found
 		// so that lower-priority modules with the same vuln class can skip.
@@ -149,7 +160,12 @@ func (e *Executor) moduleFindingAllowed(moduleID string) bool {
 	return true
 }
 
-func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent) {
+// emitResult persists and dispatches a finding. baselineReq is an optional hint
+// set when result.Request is the unchanged baseline request: it supplies a
+// memoized request hash so the record-link cache lookup avoids allocating a temp
+// request and re-hashing the raw bytes. It is nil for findings carrying a
+// module-supplied (mutated) request.
+func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent, baselineReq *httpmsg.HttpRequest) {
 	// Run post-hooks (may modify or drop result)
 	if e.hooks != nil {
 		hooked, err := e.hooks.RunPostHooks(result)
@@ -172,9 +188,16 @@ func (e *Executor) emitResult(ctx context.Context, result *output.ResultEvent) {
 		var recordUUIDs []string
 
 		if result.Request != "" {
-			// Create a temporary HttpRequest to get the hash
-			tempReq := httpmsg.NewHttpRequest([]byte(result.Request))
-			reqHash := tempReq.ID()
+			// Resolve the request hash. Reuse the baseline request's memoized
+			// ID() when the finding is the unchanged baseline (no temp-request
+			// alloc, no re-hash); otherwise hash the raw bytes of the (mutated)
+			// finding request.
+			var reqHash string
+			if baselineReq != nil {
+				reqHash = baselineReq.ID()
+			} else {
+				reqHash = httpmsg.NewHttpRequest([]byte(result.Request)).ID()
+			}
 
 			// Look up the database record UUID
 			recordUUID, exists := e.caches.requestUUIDs.Load(reqHash)

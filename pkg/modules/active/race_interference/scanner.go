@@ -261,11 +261,9 @@ func (m *Module) buildBaseline(
 	for i := 0; i < m.options.BaselineRequestCount; i++ {
 		payload := anchor + "BASE"
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			return nil, false, "", ""
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -365,12 +363,9 @@ func (m *Module) sendProbe(
 	// Build payload: anchor + index + uniqueID
 	payload := fmt.Sprintf("%s%d%s", anchor, idx, result.UniqueID)
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		result.Err = err
-		return result
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

@@ -366,6 +366,21 @@ func (h *HttpRequestResponse) marshalToBuffer() (bytes.Buffer, error) {
 
 // ============== Factory Functions ==============
 
+// NewRequestResponseRaw wraps already-built raw request bytes and a known service
+// into an HttpRequestResponse WITHOUT re-parsing them. It is the fast-path
+// replacement for the `ParseRawRequest(string(builtBytes)).WithService(svc)`
+// idiom on the per-payload hot path: the raw produced by InsertionPoint.BuildRequest
+// / SetMethod / AddHeader / SetPath / SetBody is already well-formed, so the
+// textproto re-parse, the throwaway Service construction, and the []byte→string→
+// []byte round-trip that ParseRawRequest performs are pure overhead. The request
+// parses its fields lazily (HttpRequest.ensureParsed) only if a caller reads them.
+//
+// Use this only with TRUSTED, internally-built raw bytes. For untrusted external
+// input that must be validated, use ParseRawRequest (it returns a parse error).
+func NewRequestResponseRaw(raw []byte, service *Service) *HttpRequestResponse {
+	return NewHttpRequestResponse(NewHttpRequestWithService(service, raw), nil)
+}
+
 // ParseRawRequest parses a raw HTTP request from a string.
 // Note: Response field is optional and should be added manually if needed.
 func ParseRawRequest(raw string) (rr *HttpRequestResponse, err error) {

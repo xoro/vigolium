@@ -119,11 +119,9 @@ func (m *Module) ScanPerHost(
 			}
 			probeRaw, _ = httpmsg.SetMethod(probeRaw, "GET")
 
-			probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-			if err != nil {
-				continue
-			}
-			probeReq = probeReq.WithService(ctx.Service())
+			// probeRaw is internally built (well-formed), so wrap directly
+			// instead of re-parsing on this hot path.
+			probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 			resp, _, err := httpClient.Execute(probeReq, http.Options{NoRedirects: true})
 			if err != nil {

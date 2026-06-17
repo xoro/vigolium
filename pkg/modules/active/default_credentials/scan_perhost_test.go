@@ -73,6 +73,89 @@ func TestScanPerHost_NoFalsePositive_VolatileLoginPage(t *testing.T) {
 	require.Empty(t, res, "a volatile login page must not be reported as default credentials")
 }
 
+// TestScanPerHost_NoFalsePositive_CaptchaGateUniformRejection is the headline
+// chope.co regression: a login fronted by a captcha rejects EVERY credential
+// identically — 303 → /login, empty body, a fresh per-request session cookie
+// carrying a "Captcha is invalid" flash. Because the body is empty, the only
+// thing that differs between two attempts is the volatile Set-Cookie / request-id
+// in the headers; comparing those (the old full-response-string comparison) used
+// to manufacture a phantom success for admin/admin.
+func TestScanPerHost_NoFalsePositive_CaptchaGateUniformRejection(t *testing.T) {
+	t.Parallel()
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := atomic.AddInt64(&n, 1)
+		// Fresh session id + captcha flash on every POST, regardless of credentials.
+		w.Header().Set("Set-Cookie", fmt.Sprintf(
+			"sph_s=a%%3A2%%3A%%7Bsession_id%%3D%032x%%3Bflash%%3DCaptcha%%20is%%20invalid%%7D; path=/", i))
+		w.Header().Set("X-Request-Id", fmt.Sprintf("req-%032x", i*2654435761))
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusSeeOther) // 303, empty body
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "POST", srv.URL+"/login/do_login", "username=seed&password=seed&code=")
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Empty(t, res, "a captcha-gated login that rejects every credential identically must not be reported")
+}
+
+// TestScanPerHost_NoFalsePositive_UniformRedirectRejection covers the same
+// uniform-rejection class WITHOUT any captcha text: every credential gets the
+// identical 303 → /login with an empty body and a rotating session cookie. The
+// Location-differential guard (same redirect target as the failed baseline, and
+// the target is itself a login page) must drop it independently of captcha
+// detection.
+func TestScanPerHost_NoFalsePositive_UniformRedirectRejection(t *testing.T) {
+	t.Parallel()
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := atomic.AddInt64(&n, 1)
+		w.Header().Set("Set-Cookie", fmt.Sprintf("sess=%032x; path=/", i))
+		w.Header().Set("Location", "/login")
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "POST", srv.URL+"/login/do_login", loginFormBody)
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.Empty(t, res, "a login that redirects every credential back to /login must not be reported")
+}
+
+// TestScanPerHost_TruePositive_RedirectToDashboard confirms a genuine
+// redirect-based success is still reported: failed logins bounce to /login, but
+// admin/admin redirects to a distinct /dashboard. The body is empty in both
+// cases, so the verdict rests entirely on the Location differential.
+func TestScanPerHost_TruePositive_RedirectToDashboard(t *testing.T) {
+	t.Parallel()
+	var n int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		i := atomic.AddInt64(&n, 1)
+		_ = r.ParseForm()
+		w.Header().Set("Set-Cookie", fmt.Sprintf("sess=%032x; path=/", i))
+		if r.PostFormValue("username") == "admin" && r.PostFormValue("password") == "admin" {
+			w.Header().Set("Location", "/dashboard")
+		} else {
+			w.Header().Set("Location", "/login")
+		}
+		w.WriteHeader(http.StatusSeeOther)
+	}))
+	defer srv.Close()
+
+	client := modtest.Requester(t)
+	rr := modtest.RequestMethod(t, "POST", srv.URL+"/login/do_login", loginFormBody)
+
+	res, err := New().ScanPerHost(rr, client, &modkit.ScanContext{})
+	require.NoError(t, err)
+	require.NotEmpty(t, res, "a login that redirects admin/admin to a distinct dashboard must be reported")
+	require.Contains(t, res[0].ExtractedResults, "Username: admin")
+}
+
 // TestScanPerHost_NoFalsePositive_EdgeBlocked confirms a login fronted by a WAF/CDN
 // (403 from Cloudflare) is skipped rather than mined for a credential differential.
 func TestScanPerHost_NoFalsePositive_EdgeBlocked(t *testing.T) {

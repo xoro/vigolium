@@ -168,6 +168,18 @@ func TestQueryBuilder_LimitOffsetAndCount(t *testing.T) {
 	if len(recs) != 2 {
 		t.Fatalf("limit/offset: got %d, want 2", len(recs))
 	}
+
+	// ExecuteWithCount returns the limited page AND the unfiltered total in one call.
+	recs, total, err = qb.ExecuteWithCount(ctx)
+	if err != nil {
+		t.Fatalf("ExecuteWithCount: %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("ExecuteWithCount page: got %d, want 2", len(recs))
+	}
+	if total != 5 {
+		t.Fatalf("ExecuteWithCount total: got %d, want 5", total)
+	}
 }
 
 func TestQueryBuilder_Sorting(t *testing.T) {

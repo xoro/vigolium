@@ -212,11 +212,9 @@ func (m *Module) fetch(
 	}
 	raw, _ = httpmsg.ClearQueryString(raw)
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return probeResult{}
-	}
-	req = req.WithService(service)
+	// SetPath/ClearQueryString produce well-formed raw, so wrap directly
+	// instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: noClustering})
 	if err != nil {

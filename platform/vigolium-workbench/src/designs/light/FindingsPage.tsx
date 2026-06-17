@@ -3,7 +3,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { AgGridReact } from 'ag-grid-react';
 import type { ColDef, RowClickedEvent, SelectionChangedEvent } from 'ag-grid-community';
-import { Shield, Globe, Box, Search, RefreshCw, List, Layers, ChevronRight, ChevronDown } from 'lucide-react';
+import { Shield, Globe, Box, Search, RefreshCw, List, Layers, ChevronRight, ChevronDown, X } from 'lucide-react';
 import { useFindings, useDeleteFinding } from '@/api/hooks';
 import { withDemoKey } from '@/api/client';
 import { useToast } from '@/contexts/ToastContext';
@@ -297,6 +297,18 @@ export default function FindingsPage({ initialId }: { initialId?: number | null 
 
   const resetOffset = () => setParams((p) => ({ ...p, offset: 0 }));
 
+  const hasActiveFilters = !!(severityFilter || domainFilter || moduleFilter || moduleTypeFilter || findingSourceFilter || statusFilter || searchInput);
+  const clearFilters = () => {
+    setSeverityFilter('');
+    setDomainFilter('');
+    setModuleFilter('');
+    setModuleTypeFilter('');
+    setFindingSourceFilter('');
+    setStatusFilter('');
+    setSearchInput('');
+    resetOffset();
+  };
+
   const selectedFindingIdRef = useRef(selectedFindingId);
   selectedFindingIdRef.current = selectedFindingId;
 
@@ -364,6 +376,19 @@ export default function FindingsPage({ initialId }: { initialId?: number | null 
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs flex-wrap">
+              <button
+                onClick={clearFilters}
+                disabled={!hasActiveFilters}
+                title="Clear all filters"
+                className={`flex items-center gap-1 border text-xs px-2 py-0.5 transition-colors ${
+                  hasActiveFilters
+                    ? 'border-[#e34e1c]/50 text-[#e34e1c] bg-[#f6edda] hover:bg-[#e34e1c]/10'
+                    : 'border-[#bbc3c4] text-[#708e8e] bg-[#f6edda] opacity-40 cursor-default'
+                }`}
+              >
+                <X className="w-3 h-3" />
+                clear
+              </button>
               <Dropdown
                 value={severityFilter}
                 icon={<Shield className="w-3 h-3" />}

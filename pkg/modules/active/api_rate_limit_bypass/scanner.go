@@ -91,11 +91,9 @@ func (m *Module) ScanPerHost(
 	// Step 1: Send rapid requests to trigger rate limiting
 	rateLimited := false
 	for i := 0; i < rateLimitRequestCount; i++ {
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(ctx.Request().Raw()))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// ctx.Request().Raw() is already well-formed, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(ctx.Request().Raw(), ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 		if err != nil {
@@ -128,11 +126,9 @@ func (m *Module) ScanPerHost(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 		if err != nil {
@@ -240,11 +236,9 @@ func (m *Module) sendStatus(
 			return 0, false
 		}
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, false
-	}
-	req = req.WithService(ctx.Service())
+	// raw is already well-formed (optionally header-augmented above), so wrap
+	// directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		return 0, false

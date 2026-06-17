@@ -117,11 +117,9 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {

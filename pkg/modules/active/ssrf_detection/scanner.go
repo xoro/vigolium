@@ -162,11 +162,9 @@ func (m *Module) ScanPerInsertionPoint(
 	for _, p := range payloads {
 		fuzzedRaw := ip.BuildRequest([]byte(p.payload))
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -378,11 +376,9 @@ func (m *Module) confirmSSRFMarker(
 // When ev is non-nil, the full request/response pair is captured under label
 // before the response is closed.
 func (m *Module) fetchBody(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte, ev *modkit.EvidenceCollector, label string) (body string, blocked, ok bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", false, false
-	}
-	req = req.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{})
 	if err != nil {
 		return "", false, false

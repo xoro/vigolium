@@ -103,11 +103,8 @@ func (m *Module) ScanPerRequest(
 	}
 
 	// Send baseline request to capture normal behavior.
-	baselineReq, err := httpmsg.ParseRawRequest(string(ctx.Request().Raw()))
-	if err != nil {
-		return nil, nil
-	}
-	baselineReq = baselineReq.WithService(ctx.Service())
+	// ctx.Request().Raw() is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	baselineReq := httpmsg.NewRequestResponseRaw(ctx.Request().Raw(), ctx.Service())
 
 	baselineResp, _, err := httpClient.Execute(baselineReq, http.Options{})
 	if err != nil {
@@ -139,11 +136,8 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -377,11 +371,8 @@ func (m *Module) confirmProtoEffect(ctx *httpmsg.HttpRequestResponse, httpClient
 // header block, status code, and Location header. ok is false on a build/parse/
 // transport error or nil response.
 func fetchHeadStatusLoc(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (headers string, status int, location string, ok bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", 0, "", false
-	}
-	req = req.WithService(ctx.Service())
+	// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return "", 0, "", false
@@ -447,11 +438,8 @@ func (m *Module) confirmPortReflection(ctx *httpmsg.HttpRequestResponse, httpCli
 // reflected value is visible wherever it lands. ok is false on a build/parse/
 // transport error or a nil response.
 func doFetchFull(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (string, bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", false
-	}
-	req = req.WithService(ctx.Service())
+	// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return "", false
@@ -587,11 +575,8 @@ func fetchBodyLen(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, 
 // confirmation sample is a genuinely fresh render, and returns the body length
 // and status. ok is false only on a build/parse/transport error or nil response.
 func doFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester, raw []byte) (bodyLen, status int, ok bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, 0, false
-	}
-	req = req.WithService(ctx.Service())
+	// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return 0, 0, false

@@ -43,6 +43,89 @@ func TestSaveRecordBatchAndGetByUUIDs(t *testing.T) {
 	}
 }
 
+// TestGetScanRecordsByUUIDsProjection verifies the column-projected scan fetch
+// still carries every field recordToHttpRequestResponse needs to reconstruct a
+// request — including the has_response/raw_response gate — for records with and
+// without a stored response.
+func TestGetScanRecordsByUUIDsProjection(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewRepository(db)
+	ctx := context.Background()
+
+	withResp, err := httpmsg.ParseRawRequest("GET /with-resp HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if err != nil {
+		t.Fatalf("parse withResp: %v", err)
+	}
+	withResp = withResp.WithResponse(httpmsg.NewHttpResponse([]byte("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello")))
+
+	noResp, err := httpmsg.ParseRawRequest("GET /no-resp HTTP/1.1\r\nHost: example.com\r\n\r\n")
+	if err != nil {
+		t.Fatalf("parse noResp: %v", err)
+	}
+
+	uWith, err := repo.SaveRecord(ctx, withResp, "scan", DefaultProjectUUID)
+	if err != nil {
+		t.Fatalf("SaveRecord withResp: %v", err)
+	}
+	uNo, err := repo.SaveRecord(ctx, noResp, "scan", DefaultProjectUUID)
+	if err != nil {
+		t.Fatalf("SaveRecord noResp: %v", err)
+	}
+
+	got, err := repo.GetScanRecordsByUUIDs(ctx, []string{uWith, uNo})
+	if err != nil {
+		t.Fatalf("GetScanRecordsByUUIDs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("GetScanRecordsByUUIDs = %d records, want 2", len(got))
+	}
+
+	byUUID := make(map[string]*HTTPRecord, len(got))
+	for _, r := range got {
+		byUUID[r.UUID] = r
+	}
+
+	rWith := byUUID[uWith]
+	if rWith == nil {
+		t.Fatal("missing with-response record")
+	}
+	if rWith.UUID == "" || rWith.URL == "" || len(rWith.RawRequest) == 0 {
+		t.Errorf("projected record missing core columns: uuid=%q url=%q reqLen=%d",
+			rWith.UUID, rWith.URL, len(rWith.RawRequest))
+	}
+	if !rWith.HasResponse || len(rWith.RawResponse) == 0 {
+		t.Errorf("projection dropped response columns: has_response=%v rawRespLen=%d",
+			rWith.HasResponse, len(rWith.RawResponse))
+	}
+	rrWith, err := recordToHttpRequestResponse(rWith)
+	if err != nil {
+		t.Fatalf("recordToHttpRequestResponse(withResp): %v", err)
+	}
+	if rrWith.Response() == nil {
+		t.Error("projected with-response record lost its response after conversion")
+	}
+
+	rNo := byUUID[uNo]
+	if rNo == nil {
+		t.Fatal("missing no-response record")
+	}
+	if rNo.HasResponse {
+		t.Error("no-response record unexpectedly has_response=true")
+	}
+	rrNo, err := recordToHttpRequestResponse(rNo)
+	if err != nil {
+		t.Fatalf("recordToHttpRequestResponse(noResp): %v", err)
+	}
+	if rrNo.Response() != nil {
+		t.Error("no-response record gained a response after conversion")
+	}
+
+	// Empty input is a no-op, matching GetRecordsByUUIDs.
+	if g, err := repo.GetScanRecordsByUUIDs(ctx, nil); err != nil || g != nil {
+		t.Errorf("GetScanRecordsByUUIDs(nil) = %v, %v", g, err)
+	}
+}
+
 func TestRecordWriterSaveRecordAndBatch(t *testing.T) {
 	db := newTestDB(t)
 	repo := NewRepository(db)
@@ -172,6 +255,26 @@ func TestUpdateRecordAnnotationsAndRemarks(t *testing.T) {
 	// Empty map no-op.
 	if err := repo.AppendRemarks(ctx, nil); err != nil {
 		t.Errorf("AppendRemarks(nil): %v", err)
+	}
+
+	// Batch path: multiple records in one call, plus a missing UUID that must be
+	// skipped without failing the rest.
+	u2 := insertRecord(t, repo, "GET", "remarks.example.com", "/second", 200)
+	if err := repo.AppendRemarks(ctx, map[string][]string{
+		u:              {"new-remark", "third"}, // "new-remark" already present → dedup
+		u2:             {"only-on-second"},
+		"missing-uuid": {"ignored"},
+		"":             {"empty-key-ignored"},
+	}); err != nil {
+		t.Fatalf("AppendRemarks(batch): %v", err)
+	}
+	rec, _ = repo.GetRecordByUUID(ctx, u)
+	if len(rec.Remarks) != 3 {
+		t.Errorf("u remarks after batch = %v, want 3 unique", rec.Remarks)
+	}
+	rec2, _ := repo.GetRecordByUUID(ctx, u2)
+	if len(rec2.Remarks) != 1 || rec2.Remarks[0] != "only-on-second" {
+		t.Errorf("u2 remarks = %v, want [only-on-second]", rec2.Remarks)
 	}
 }
 

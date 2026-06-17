@@ -13,15 +13,38 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/opt"
 )
 
+// diskSetShards is the number of striped insert locks. Insertions of distinct
+// keys hash to different stripes and so run concurrently; only same-key races
+// serialize (on the same stripe), which is what preserves the exactly-once
+// semantics IsSeen guarantees. 64 keeps collisions rare across the worker pool.
+const diskSetShards = 64
+
 // DiskSet provides disk-backed deduplication using LevelDB with internal bloom filter.
 // Thread-safe for concurrent access.
 type DiskSet struct {
-	db      *leveldb.DB
-	mu      sync.RWMutex // RWMutex: read-path for already-seen keys, write-path for new keys
+	db *leveldb.DB
+	// closeMu guards db's lifecycle: IsSeen/Contains hold RLock for the whole
+	// operation; Close holds the exclusive Lock so it can't nil out db while a
+	// lookup is in flight.
+	closeMu sync.RWMutex
+	// shards stripe the new-key insert critical section by key hash so inserts of
+	// different keys don't serialize on one global lock — the contention the old
+	// single write lock created during the high-discovery early crawl.
+	shards  [diskSetShards]sync.Mutex
 	hits    atomic.Uint64
 	size    atomic.Int64
 	path    string
 	cleanup bool
+}
+
+// shardFor returns the stripe lock for key (FNV-1a over the bytes).
+func (s *DiskSet) shardFor(key string) *sync.Mutex {
+	var h uint32 = 2166136261
+	for i := 0; i < len(key); i++ {
+		h ^= uint32(key[i])
+		h *= 16777619
+	}
+	return &s.shards[h%diskSetShards]
 }
 
 // Config holds DiskSet configuration.
@@ -72,45 +95,39 @@ func NewDiskSet(cfg *Config) (*DiskSet, error) {
 	}, nil
 }
 
-// IsSeen returns true if key was seen before.
-// If not seen, marks it as seen atomically.
+// IsSeen returns true if key was seen before. If not seen, it records the key
+// and returns false. Exactly one caller observes false for a given new key, even
+// under concurrent first-sight — callers rely on that (e.g. addObservedExtension's
+// wasNew gate and the size counter).
 //
-// Uses a two-phase locking strategy:
-//  1. Read lock: fast path for already-seen keys (common case after warm-up)
-//  2. Write lock: slow path for new keys, with re-check to handle races
-//
-// This is safe because Put is idempotent — if two goroutines both determine
-// a key is unseen and both write it, the second write is a harmless no-op.
+// Locking: the whole operation holds closeMu.RLock (which only excludes Close,
+// not other IsSeen calls). The already-seen fast path needs nothing more — Has is
+// concurrency-safe. A new key takes its per-key stripe lock and re-checks Has, so
+// two racers on the same key serialize and the second sees the first's write.
+// Distinct keys hash to different stripes and never contend, so the early-crawl
+// new-key flood no longer funnels through a single global write lock.
 func (s *DiskSet) IsSeen(key string) bool {
 	keyBytes := []byte(key)
 
-	// Fast path: read lock only — serves the majority of checks
-	// after the discovery phase has warmed up.
-	s.mu.RLock()
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+
 	if s.db == nil {
-		s.mu.RUnlock()
 		return true
 	}
-	has, err := s.db.Has(keyBytes, nil)
-	s.mu.RUnlock()
 
-	if err == nil && has {
+	// Fast path: already seen — no stripe lock needed.
+	if has, err := s.db.Has(keyBytes, nil); err == nil && has {
 		s.hits.Add(1)
 		return true
 	}
 
-	// Slow path: acquire write lock for insertion.
-	// Re-check under write lock to handle the race where another goroutine
-	// inserted the same key between our read and write lock acquisition.
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Slow path: serialize per-key-hash so exactly one caller records a new key.
+	shard := s.shardFor(key)
+	shard.Lock()
+	defer shard.Unlock()
 
-	if s.db == nil {
-		return true
-	}
-
-	has, err = s.db.Has(keyBytes, nil)
-	if err == nil && has {
+	if has, err := s.db.Has(keyBytes, nil); err == nil && has {
 		s.hits.Add(1)
 		return true
 	}
@@ -122,10 +139,14 @@ func (s *DiskSet) IsSeen(key string) bool {
 
 // Contains returns true if key exists (read-only check).
 // Does not mark the key as seen if not present.
-// Thread-safe: LevelDB handles concurrency internally.
+// Thread-safe: the shared lock guards against Close, LevelDB handles the rest.
 func (s *DiskSet) Contains(key string) bool {
-	keyBytes := []byte(key)
-	has, err := s.db.Has(keyBytes, nil)
+	s.closeMu.RLock()
+	defer s.closeMu.RUnlock()
+	if s.db == nil {
+		return false
+	}
+	has, err := s.db.Has([]byte(key), nil)
 	return err == nil && has
 }
 
@@ -139,8 +160,13 @@ func (s *DiskSet) Hits() uint64 {
 	return s.hits.Load()
 }
 
-// Close releases resources and optionally removes disk files.
+// Close releases resources and optionally removes disk files. It takes the
+// exclusive lock so it can't run concurrently with an in-flight IsSeen/Contains
+// (which hold the shared lock), making the db = nil store safe.
 func (s *DiskSet) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+
 	if s.db == nil {
 		return nil
 	}

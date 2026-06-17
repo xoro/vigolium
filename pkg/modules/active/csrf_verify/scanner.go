@@ -150,11 +150,9 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(mutatedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// probe.mutate produces well-formed raw, so wrap directly instead of
+		// re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(mutatedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {

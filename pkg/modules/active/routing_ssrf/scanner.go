@@ -240,11 +240,9 @@ func (m *Module) fireTarget(
 		}
 	}
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", "", false, false, false
-	}
-	req = req.WithService(service)
+	// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 
 	resp, _, err := httpClient.Execute(req, http.Options{
 		RawRequest:       true,
@@ -269,11 +267,9 @@ func (m *Module) fireTarget(
 // comparison and evidence. Returns "" on any error (callers treat that as "no
 // baseline content", which only makes the marker-absence check stricter).
 func (m *Module) freshBaseline(httpClient *http.Requester, service *httpmsg.Service, baseRaw []byte) string {
-	req, err := httpmsg.ParseRawRequest(string(baseRaw))
-	if err != nil {
-		return ""
-	}
-	req = req.WithService(service)
+	// baseRaw is already well-formed, so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(baseRaw, service)
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 	if err != nil {
 		return ""

@@ -133,11 +133,9 @@ func (m *Module) fingerprint404(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -240,11 +238,9 @@ func (m *Module) probePath(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -337,8 +333,10 @@ func (m *Module) probePath(
 
 	// Round 2 — reproduce: re-fetch the same path with the cache bypassed; it must
 	// still return a 200 whose body is textually stable, so a one-shot or flapping
-	// response cannot forge a finding.
-	if repStatus, repBody, repOK := modkit.FetchPath(ctx, httpClient, path); !repOK || repStatus != 200 || !modkit.BodiesSimilar(body, repBody) {
+	// response cannot forge a finding. The candidate body is compared against both
+	// the reproduce and decoy bodies, so its signature is built once and reused.
+	bodySig := modkit.BodySignature(body)
+	if repStatus, repBody, repOK := modkit.FetchPath(ctx, httpClient, path); !repOK || repStatus != 200 || !modkit.BodiesSimilarSig(bodySig, repBody) {
 		return nil
 	}
 
@@ -347,7 +345,7 @@ func (m *Module) probePath(
 	// a no-extension random path and so cannot see an extension-scoped catch-all (a
 	// wildcard that hands back the same archive/dump for every *.zip / *.sql); the
 	// same-extension decoy can.
-	if decoyStatus, decoyBody, served := modkit.DecoyFileBaseline(scanCtx, ctx, httpClient, path); served && decoyStatus == status && modkit.BodiesSimilar(body, decoyBody) {
+	if decoyStatus, decoyBody, served := modkit.DecoyFileBaseline(scanCtx, ctx, httpClient, path); served && decoyStatus == status && modkit.BodiesSimilarSig(bodySig, decoyBody) {
 		return nil
 	}
 

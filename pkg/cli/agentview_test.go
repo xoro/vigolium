@@ -156,3 +156,49 @@ func TestCompactFindingViewEvidenceAndProjection(t *testing.T) {
 		t.Fatalf("finding projection wrong: %v", proj)
 	}
 }
+
+func TestDecodedResponseText(t *testing.T) {
+	// Uncompressed responses pass through byte-identical (no allocation churn).
+	plain := "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<p>hello PWN_MARKER</p>"
+	if got := decodedResponseText(plain); got != plain {
+		t.Fatalf("plain response should be unchanged, got %q", got)
+	}
+	// A response with no header/body separator is returned as-is.
+	if got := decodedResponseText("not-an-http-message"); got != "not-an-http-message" {
+		t.Fatalf("headerless input should be unchanged, got %q", got)
+	}
+	// A gzip body is decoded so the marker becomes searchable.
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte("<p>echo: PWN_MARKER here</p>"))
+	_ = zw.Close()
+	raw := "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n" + buf.String()
+	decoded := decodedResponseText(raw)
+	if !strings.Contains(decoded, "PWN_MARKER") {
+		t.Fatalf("gzip body not decoded for search: %q", decoded)
+	}
+	if !strings.Contains(decoded, "HTTP/1.1 200 OK") {
+		t.Fatalf("headers should be preserved: %q", decoded)
+	}
+}
+
+// TestCompactFindingViewGzipEvidence guards the regression where evidence in a
+// gzip-compressed response body was never surfaced because the snippet search
+// ran over the still-compressed bytes.
+func TestCompactFindingViewGzipEvidence(t *testing.T) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte("<p>leak: PWN_MARKER in body</p>" + strings.Repeat("z", 500)))
+	_ = zw.Close()
+	f := &database.Finding{
+		ID: 9, Severity: "high", Confidence: "firm", ModuleID: "xss", ModuleType: "active",
+		MatchedAt:        []string{"https://h/s?q=PWN"},
+		ExtractedResults: []string{"PWN_MARKER"},
+		Response:         "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n" + buf.String(),
+	}
+	v := compactFindingView(f, nil, agentViewOptions{})
+	snip, ok := v["response_evidence"].(string)
+	if !ok || !strings.Contains(snip, "PWN_MARKER") {
+		t.Fatalf("expected evidence from gzip body, got %v", v["response_evidence"])
+	}
+}

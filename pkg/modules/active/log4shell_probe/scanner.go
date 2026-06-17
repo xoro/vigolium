@@ -103,11 +103,9 @@ func (m *Module) ScanPerRequest(
 				continue
 			}
 
-			fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-			if err != nil {
-				continue
-			}
-			fuzzedReq = fuzzedReq.WithService(ctx.Service())
+			// modifiedRaw is internally built (well-formed), so wrap directly
+			// instead of re-parsing on this hot path.
+			fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 			resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 			if err != nil {
@@ -163,11 +161,9 @@ func (m *Module) ScanPerInsertionPoint(
 		payload := fmt.Sprintf(tmpl, oastURL)
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {

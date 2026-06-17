@@ -440,11 +440,9 @@ func fetchStatic(httpClient *http.Requester, service *httpmsg.Service, rawHTTP [
 	}
 	raw, _ = httpmsg.ClearQueryString(raw)
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", false, false
-	}
-	req = req.WithService(service)
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: noClustering})
 	if err != nil {

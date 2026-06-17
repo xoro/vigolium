@@ -108,11 +108,9 @@ func (m *Module) wpCronEmptyIsSpecific(ctx *httpmsg.HttpRequestResponse, httpCli
 	if err != nil {
 		return true
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return true
-	}
-	req = req.WithService(ctx.Service())
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return true
@@ -137,11 +135,9 @@ func (m *Module) fingerprint404(ctx *httpmsg.HttpRequestResponse, httpClient *ht
 	if err != nil {
 		return nil
 	}
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -172,11 +168,9 @@ func (m *Module) probeFile(
 	if err != nil {
 		return nil
 	}
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,7 @@ func seedRecordWithBodies(t *testing.T, db *database.DB, suffix string) {
 		RequestHash:         "rhash-" + suffix,
 		StatusCode:          200,
 		ResponseContentType: "text/html",
+		HasResponse:         true,
 		RawRequest:          []byte("GET /" + suffix + " HTTP/1.1\r\nHost: " + suffix + ".example\r\n\r\n"),
 		RawResponse:         []byte("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>RAWBODYMARKER-" + suffix + "</html>"),
 	}).Exec(ctx)
@@ -73,8 +75,11 @@ func TestStreamJSONLExportOmitResponse(t *testing.T) {
 
 // The streaming HTML generator must produce a byte-identical report to the
 // legacy materialized generator over the same data (fixed GeneratedAt removes
-// the only nondeterministic field), and must never embed the raw_request/
-// raw_response bytes — which the report viewer discards.
+// the only nondeterministic field). The report keeps the derived response_body
+// (base64) for the viewer; it only drops the redundant raw_request/raw_response
+// concatenated copies. The marker lives inside the body, so it never appears as
+// a literal in the report (base64 when kept, absent when the body is dropped) —
+// the body-presence guard is TestGenerateReportFromDBHTMLKeepsResponseBody.
 func TestGenerateHTMLReportStreamingParity(t *testing.T) {
 	ctx := context.Background()
 	db := newExportTestDB(t)
@@ -115,13 +120,53 @@ func TestGenerateHTMLReportStreamingParity(t *testing.T) {
 
 			assert.Equal(t, string(legacy), string(stream),
 				"streaming HTML report must be byte-identical to the legacy materialized report")
-			// The report viewer renders from parsed fields, not the raw copies,
-			// so the actual raw body bytes must never be embedded in the HTML
-			// (the field-name identifiers themselves appear in the viewer JS, so
-			// we assert on the body content, not the keys).
+			// The redundant raw_request/raw_response concatenated copies are
+			// dropped; the body survives only as the base64 response_body field,
+			// so the marker never appears as a literal regardless of omit.
 			assert.NotContains(t, string(stream), "RAWBODYMARKER")
 		})
 	}
+}
+
+// reportEntryByFormat returns the reportFormats entry for the given format, so
+// tests exercise the exact production wiring (generator + streaming + any
+// omit-response coupling) instead of re-deriving it.
+func reportEntryByFormat(t *testing.T, format string) reportFormatEntry {
+	t.Helper()
+	for _, rf := range reportFormats {
+		if rf.format == format {
+			return rf
+		}
+	}
+	t.Fatalf("no reportFormats entry for %q", format)
+	return reportFormatEntry{}
+}
+
+// generateReportFromDB for the html format must embed the derived response_body
+// (base64) so the report's traffic detail pane is not blank. Regression: an
+// earlier perf change (c65a022) marked the html entry forceOmitResponse, which
+// excluded the raw_request/raw_response columns from the query. The report
+// viewer renders the response body from the derived response_body field, which
+// HTTPRecord.MarshalJSON parses out of those same raw bytes — so excluding the
+// columns silently blanked every response in the report. A default
+// `vigolium scan --format html` run passes omitResponse=false and must keep it.
+func TestGenerateReportFromDBHTMLKeepsResponseBody(t *testing.T) {
+	ctx := context.Background()
+	db := newExportTestDB(t)
+	seedRecordWithBodies(t, db, "alpha")
+
+	htmlRF := reportEntryByFormat(t, "html")
+
+	dir := t.TempDir()
+	outPath := filepath.Join(dir, "report.html")
+	require.NoError(t, generateReportFromDB(ctx, db, outPath, false, "", htmlRF))
+
+	data, err := os.ReadFile(outPath)
+	require.NoError(t, err)
+
+	wantBody := base64.StdEncoding.EncodeToString([]byte("<html>RAWBODYMARKER-alpha</html>"))
+	assert.Contains(t, string(data), wantBody,
+		"HTML report must embed the response body (base64) so the traffic detail is not blank")
 }
 
 // GenerateHTMLReportStreaming stages to a temp file and renames on success, so a

@@ -62,8 +62,6 @@ var (
 	reHexLong = regexp.MustCompile(`[0-9a-fA-F]{12,}`)
 	// reDigits collapses long digit runs (timestamps, counters, epoch ms).
 	reDigits = regexp.MustCompile(`[0-9]{4,}`)
-	// reNonWord splits normalized text into alphanumeric tokens.
-	reNonWord = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
 // ResponseSignature captures key response attributes for comparison.
@@ -166,17 +164,43 @@ func NormalizedBodyHash(body string, reflects ...string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// tokenizeInto walks the maximal [a-z0-9] runs of normalized (the inverse of the
+// old reNonWord split), counting each token of length >= minLen into counts and
+// returning how many it counted. It slices tokens out of the input string rather
+// than materializing a full []string of every token — that intermediate slice was
+// pure garbage on a path run for every QuickRatio / BodiesSimilar / signature
+// build over bodies up to ratioBodyScanLimit. Shared by Tokenize (minLen 1) and
+// deltaTokenSet (minLen 2, which drops single-char noise).
+func tokenizeInto(normalized string, minLen int, counts map[string]int) int {
+	total := 0
+	start := -1
+	for i := 0; i < len(normalized); i++ {
+		c := normalized[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 {
+			if i-start >= minLen {
+				counts[normalized[start:i]]++
+				total++
+			}
+			start = -1
+		}
+	}
+	if start >= 0 && len(normalized)-start >= minLen {
+		counts[normalized[start:]]++
+		total++
+	}
+	return total
+}
+
 // Tokenize splits normalized text into a token-count multiset and total count.
 func Tokenize(normalized string) (map[string]int, int) {
 	counts := make(map[string]int)
-	total := 0
-	for _, tok := range reNonWord.Split(normalized, -1) {
-		if tok == "" {
-			continue
-		}
-		counts[tok]++
-		total++
-	}
+	total := tokenizeInto(normalized, 1, counts)
 	return counts, total
 }
 
@@ -230,6 +254,23 @@ func RatioSimilar(a, b ResponseSignature) bool {
 // gates (jwt/csrf accepted-as-baseline, forbidden/nginx/firebase stability).
 func BodiesSimilar(a, b string) bool {
 	return QuickRatio(newRatioSignature(a), newRatioSignature(b)) >= UpperRatioBound
+}
+
+// BodySignature builds the ratio signature for a single body — reflect-agnostic,
+// normalized exactly like the bodies BodiesSimilar compares. A caller that
+// compares one stable body against several candidates (reproduce + decoy probes,
+// multi-round catch-all disproofs) should build its signature once with this and
+// pass it to BodiesSimilarSig, so the stable side is tokenized once instead of
+// re-normalized + re-tokenized on every comparison.
+func BodySignature(body string) ResponseSignature {
+	return newRatioSignature(body)
+}
+
+// BodiesSimilarSig is the signature-reuse form of BodiesSimilar: it compares a
+// body whose signature was precomputed (via BodySignature) against a fresh body
+// b, tokenizing only b.
+func BodiesSimilarSig(aSig ResponseSignature, b string) bool {
+	return QuickRatio(aSig, newRatioSignature(b)) >= UpperRatioBound
 }
 
 // IsDifferent returns true if two signatures are meaningfully different by the
@@ -469,12 +510,8 @@ func deltaTokenSet(raw string) map[string]int {
 	s = volatileHeaderLine.ReplaceAllString(s, " ")
 	s = reVeryLongHexRun.ReplaceAllString(s, " ")
 	counts := make(map[string]int)
-	for _, tok := range reNonWord.Split(s, -1) {
-		if len(tok) < 2 {
-			continue
-		}
-		counts[tok]++
-	}
+	// minLen 2 drops single-char tokens to reduce noise (the old len(tok) < 2 filter).
+	tokenizeInto(s, 2, counts)
 	return counts
 }
 
@@ -874,7 +911,7 @@ func DifferentialSurfaceUnreliable(resp *httpmsg.HttpResponse) bool {
 	if resp == nil {
 		return false
 	}
-	if infra.CacheState(resp.Header).Layer {
+	if infra.CacheStateFromHeaders(resp.Headers()).Layer {
 		return true
 	}
 	if ClassifyContentType(resp.Header("Content-Type")) == ContentClassHTML &&

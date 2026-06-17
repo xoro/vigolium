@@ -44,6 +44,62 @@ var cacheLayerHeaders = []string{
 	"X-Fastly-Request-Id", "Fastly-Debug-Digest", "X-Akamai-Transformed",
 }
 
+// Lowercased lookup sets derived from the slices above, so the single-pass
+// CacheStateFromHeaders can classify a header by one map lookup instead of an
+// EqualFold sweep. Single source of truth: edit the slices, the sets follow.
+var (
+	hitHeaderSet        = lowerSet(hitHeaders)
+	cacheLayerHeaderSet = lowerSet(cacheLayerHeaders)
+)
+
+func lowerSet(names []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		m[strings.ToLower(n)] = struct{}{}
+	}
+	return m
+}
+
+// CacheStateFromHeaders is the single-pass form of CacheState for callers that
+// hold the parsed header slice (an *httpmsg.HttpResponse). It walks the headers
+// once, classifying each by a map lookup, instead of issuing ~12 case-insensitive
+// getter lookups that each rescan the whole header list — the shape CacheState
+// must use when it only has a getter. Equivalent result; Evidence is taken from
+// the first hit signal in response order.
+func CacheStateFromHeaders(headers []httpmsg.HttpHeader) CacheInfo {
+	info := CacheInfo{Age: -1}
+	for _, h := range headers {
+		name := strings.ToLower(h.Name)
+		if _, ok := hitHeaderSet[name]; ok {
+			info.Layer = true
+			if strings.Contains(strings.ToUpper(h.Value), "HIT") {
+				info.Hit = true
+				if info.Evidence == "" {
+					info.Evidence = h.Name + ": " + h.Value
+				}
+			}
+			continue
+		}
+		if name == "age" {
+			info.Layer = true
+			if n, err := strconv.Atoi(strings.TrimSpace(h.Value)); err == nil {
+				info.Age = n
+				if n > 0 {
+					info.Hit = true
+					if info.Evidence == "" {
+						info.Evidence = "Age: " + h.Value
+					}
+				}
+			}
+			continue
+		}
+		if _, ok := cacheLayerHeaderSet[name]; ok {
+			info.Layer = true
+		}
+	}
+	return info
+}
+
 // CacheState inspects response headers via a case-insensitive getter (such as
 // net/http.Header.Get or httpmsg.HttpResponse.Header) and reports cache signals.
 // It never sends traffic — it only interprets headers already in hand.
@@ -129,7 +185,7 @@ func RQPAmplification(resp *httpmsg.HttpResponse) (bool, string) {
 	// A pooling front-end (cache/CDN/reverse proxy) must be present, otherwise
 	// there is no shared connection queue to poison.
 	var evidence []string
-	if CacheState(resp.Header).Layer {
+	if CacheStateFromHeaders(resp.Headers()).Layer {
 		evidence = append(evidence, "cache/proxy headers")
 	}
 	server := strings.ToLower(resp.Header("Server"))

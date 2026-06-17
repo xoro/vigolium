@@ -106,12 +106,9 @@ func (m *ParamDiscoveryModule) scanDiscoveredParameters(
 		workingRequest = getRequest
 	}
 
-	// Create context for discovery
-	parsedReq, err := httpmsg.ParseRawRequest(string(workingRequest))
-	if err != nil {
-		return nil, err
-	}
-	parsedReq = parsedReq.WithService(ctx.Service())
+	// Create context for discovery. ToggleRequestMethod/original raw is
+	// well-formed, so wrap directly instead of re-parsing on this hot path.
+	parsedReq := httpmsg.NewRequestResponseRaw(workingRequest, ctx.Service())
 
 	// Discover parameters that echo in response
 	points, modifiedRequest, err := m.paramDiscovery.DiscoverAndCreatePoints(parsedReq, httpClient)
@@ -137,12 +134,9 @@ func (m *ParamDiscoveryModule) scanDiscoveredParameters(
 		return nil, nil
 	}
 
-	// Create new context with modified request
-	modifiedParsed, err := httpmsg.ParseRawRequest(string(modifiedRequest))
-	if err != nil {
-		return nil, err
-	}
-	modifiedParsed = modifiedParsed.WithService(ctx.Service())
+	// Create new context with modified request. DiscoverAndCreatePoints returns
+	// well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	modifiedParsed := httpmsg.NewRequestResponseRaw(modifiedRequest, ctx.Service())
 
 	// Get base response for the modified request
 	resp, _, err := httpClient.Execute(modifiedParsed, http.Options{})
@@ -387,5 +381,3 @@ func (m *ParamDiscoveryModule) detectContext(
 		return HTMLGeneric
 	}
 }
-
-

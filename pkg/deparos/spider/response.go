@@ -39,6 +39,24 @@ func NewHTTPResponse(u *url.URL, headers map[string][]string, body []byte, bodyS
 	}
 }
 
+// NewHTTPResponseWithHTML creates a response wrapper pre-seeded with an
+// already-parsed HTML DOM (and its parse error, if any). It consumes the
+// internal sync.Once so a later ParseHTML() returns the supplied node without
+// re-parsing — used by the coordinator to reuse the ResponseChain's shared parse
+// instead of building a second DOM over the same body.
+func NewHTTPResponseWithHTML(u *url.URL, headers map[string][]string, body []byte, bodyStart int, doc *html.Node, parseErr error) *HTTPResponse {
+	r := &HTTPResponse{
+		URL:       u,
+		Headers:   headers,
+		Body:      body,
+		BodyStart: bodyStart,
+		HTML:      doc,
+		htmlErr:   parseErr,
+	}
+	r.htmlOnce.Do(func() {}) // mark parse as already done
+	return r
+}
+
 // ParseHTML parses the response body as HTML and caches the result.
 //
 // This method uses sync.Once to guarantee exactly-once parsing, even when

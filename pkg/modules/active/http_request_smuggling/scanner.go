@@ -169,11 +169,8 @@ func (m *Module) ScanPerHost(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		start := time.Now()
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
@@ -255,11 +252,8 @@ func (m *Module) confirmTimingDesync(
 	ev := desyncEvidence{probeReq: string(modifiedRaw)}
 
 	// 1. Reconfirm the anomaly with a fresh send of the same probe.
-	probeReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return ev, false
-	}
-	probeReq = probeReq.WithService(ctx.Service())
+	// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	probeReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	reStart := time.Now()
 	reResp, _, reErr := httpClient.Execute(probeReq, http.Options{})
@@ -284,11 +278,8 @@ func (m *Module) confirmTimingDesync(
 	if !ok {
 		return ev, true
 	}
-	controlReq, err := httpmsg.ParseRawRequest(string(controlRaw))
-	if err != nil {
-		return ev, true
-	}
-	controlReq = controlReq.WithService(ctx.Service())
+	// controlRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	controlReq := httpmsg.NewRequestResponseRaw(controlRaw, ctx.Service())
 
 	ctrlStart := time.Now()
 	ctrlResp, _, ctrlErr := httpClient.Execute(controlReq, http.Options{})

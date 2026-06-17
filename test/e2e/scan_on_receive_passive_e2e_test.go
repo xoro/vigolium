@@ -156,7 +156,7 @@ func TestScanOnReceive_RunsPassiveModules(t *testing.T) {
 // DBInputSource will consume the finding row, the scan cursor will advance
 // past it, and the ProcessedCount/CursorUUID assertions will fail.
 func TestScanOnReceive_DoesNotFanOutOnFindingArtefacts(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	mux := http.NewServeMux()
@@ -220,7 +220,17 @@ func TestScanOnReceive_DoesNotFanOutOnFindingArtefacts(t *testing.T) {
 
 	r, err := runner.NewWithInputSource(opts, queue.NewQueueInputSource(q))
 	require.NoError(t, err)
-	r.SetSettings(config.DefaultSettings())
+	// Disable OAST: this test only asserts which records the scan-on-receive
+	// poller consumes (the fan-out invariant), which is independent of OAST.
+	// An OAST callback can never fire against a localhost httptest target, so
+	// the default service would only register payloads with the public
+	// interactsh server (oast.pro) and then sleep for the 10s grace period at
+	// scan end — pure dead time that, under load, pushes this full-module scan
+	// past its deadline, plus a hidden external dependency in an otherwise
+	// hermetic test.
+	settings := config.DefaultSettings()
+	settings.OAST.Enabled = false
+	r.SetSettings(settings)
 	r.SetRepository(repo)
 
 	runDone := make(chan error, 1)

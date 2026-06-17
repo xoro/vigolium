@@ -187,18 +187,15 @@ func (m *Module) checkOrigin(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-
 	useHTTPS := parsed.Scheme == "https"
 	port := 443
 	if !useHTTPS {
 		port = 80
 	}
 	originService := httpmsg.NewServiceSecure(parsed.Host, port, useHTTPS)
-	fuzzedReq = fuzzedReq.WithService(originService)
+	// SetMethod/SetPath/AddOrReplaceHeader produce well-formed raw, so wrap
+	// directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, originService)
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

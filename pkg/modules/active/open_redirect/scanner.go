@@ -260,12 +260,9 @@ func bulkCheck(rawRequest []byte, urlx *urlutil.URL, httpService *httpmsg.Servic
 			}
 		}
 
-		// Parse the modified raw request
-		req, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		req.WithService(httpService)
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(modifiedRaw, httpService)
 
 		resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 		if err != nil {
@@ -357,11 +354,9 @@ func confirmAttackerControlledRedirect(ip httpmsg.InsertionPoint, httpService *h
 		re := getDomainRedirectRegex(redirectDomain)
 		for _, payload := range payloads {
 			fuzzedRaw := ip.BuildRequest([]byte(payload))
-			req, perr := httpmsg.ParseRawRequest(string(fuzzedRaw))
-			if perr != nil {
-				continue
-			}
-			req.WithService(httpService)
+			// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+			// of re-parsing on this hot path.
+			req := httpmsg.NewRequestResponseRaw(fuzzedRaw, httpService)
 
 			resp, _, rerr := httpClient.Execute(req, http.Options{NoRedirects: true})
 			if rerr != nil {
@@ -409,12 +404,9 @@ scan:
 		// Build request with payload injected
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-		// Parse the fuzzed raw request
-		req, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		req.WithService(httpService)
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(fuzzedRaw, httpService)
 
 		resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 		if err != nil {
@@ -462,12 +454,9 @@ scan:
 		// Build request with payload injected
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-		// Parse the fuzzed raw request
-		req, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		req.WithService(httpService)
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(fuzzedRaw, httpService)
 
 		resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 		if err != nil {
@@ -535,12 +524,9 @@ func checkRedirectBasedOnParamValue(rawRequest []byte, ip httpmsg.InsertionPoint
 		// Build request with payload injected
 		fuzzedRaw := ip.BuildRequest([]byte(finalURL))
 
-		// Parse the fuzzed raw request
-		req, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		req.WithService(httpService)
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(fuzzedRaw, httpService)
 
 		resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, RawRequest: true}) // raw request
 		if err != nil {

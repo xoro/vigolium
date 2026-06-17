@@ -121,6 +121,34 @@ func maybeGunzip(body []byte) []byte {
 	return out
 }
 
+// decodedResponseText returns a raw HTTP response with its body gzip-decoded so
+// text searches (evidence snippets) match even when the body is stored
+// compressed on the wire — the scanner sends its own Accept-Encoding, so Go's
+// transport leaves gzip bodies undecoded and findings persist them as-is.
+// Headers are preserved so header-located evidence still matches. The common
+// (uncompressed) case returns the original string without allocating a copy.
+func decodedResponseText(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	// Locate the header/body boundary on the string directly to avoid copying
+	// the whole response just to peek at the body's first two bytes.
+	sep := 4
+	i := strings.Index(raw, "\r\n\r\n")
+	if i < 0 {
+		sep = 2
+		i = strings.Index(raw, "\n\n")
+	}
+	if i < 0 {
+		return raw // no body
+	}
+	body := raw[i+sep:]
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		return raw // not gzip — search the stored bytes as-is
+	}
+	return raw[:i+sep] + string(maybeGunzip([]byte(body)))
+}
+
 // looksBinaryBytes reports whether b appears to be binary (contains NULs or a
 // high ratio of non-printable bytes) and should not be inlined as text.
 func looksBinaryBytes(b []byte) bool {
@@ -358,7 +386,9 @@ func compactFindingView(f *database.Finding, records []*database.HTTPRecord, opt
 
 	if !opts.noBodies {
 		needles := append(append([]string{}, f.ExtractedResults...), f.MatchedAt...)
-		if snip := evidenceSnippet(f.Response, needles, agentEvidenceWindow); snip != "" {
+		// Decode the body before searching so evidence in gzip-compressed
+		// responses is still found (the needle was matched against decoded text).
+		if snip := evidenceSnippet(decodedResponseText(f.Response), needles, agentEvidenceWindow); snip != "" {
 			m["response_evidence"] = snip
 		} else if f.Response != "" && opts.fullBody {
 			m["response"] = f.Response
@@ -398,11 +428,7 @@ func findingViews(ctx context.Context, db *database.DB, findings []*database.Fin
 	for _, f := range findings {
 		var recs []*database.HTTPRecord
 		if withRecords {
-			for _, u := range f.HTTPRecordUUIDs {
-				if r := byUUID[u]; r != nil {
-					recs = append(recs, r)
-				}
-			}
+			recs = recordsForFinding(byUUID, f)
 		}
 		views = append(views, compactFindingView(f, recs, opts))
 	}

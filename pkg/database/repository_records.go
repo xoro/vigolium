@@ -212,20 +212,45 @@ func (r *Repository) GetUnprobedRecordsBySource(ctx context.Context, projectUUID
 	return records, nil
 }
 
-// GetRecordsByUUIDs retrieves HTTP records matching the given UUIDs.
-func (r *Repository) GetRecordsByUUIDs(ctx context.Context, uuids []string) ([]*HTTPRecord, error) {
+// scanRecordColumns is the minimal column projection the dynamic-assessment scan
+// feed needs to reconstruct an HttpRequestResponse (via
+// recordToHttpRequestResponse): the UUID, the cursor key (created_at), the
+// stored URL, the raw request/response bytes, and the has_response gate that
+// ParsedResponse() checks. Shared by GetScanRecordsByUUIDs and
+// DBInputSource.fetchNextBatch so the two scan-feed fetches can't drift.
+var scanRecordColumns = []string{"uuid", "created_at", "url", "raw_request", "raw_response", "has_response"}
+
+// getRecordsByUUIDs fetches HTTP records matching uuids. With no columns it loads
+// the full model; passing columns projects the SELECT to just those.
+func (r *Repository) getRecordsByUUIDs(ctx context.Context, uuids []string, columns ...string) ([]*HTTPRecord, error) {
 	if len(uuids) == 0 {
 		return nil, nil
 	}
 	var records []*HTTPRecord
-	err := r.db.NewSelect().
-		Model(&records).
-		Where("uuid IN (?)", bun.List(uuids)).
-		Scan(ctx)
-	if err != nil {
+	q := r.db.NewSelect().Model(&records).Where("uuid IN (?)", bun.List(uuids))
+	if len(columns) > 0 {
+		q = q.Column(columns...)
+	}
+	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("failed to get records by UUIDs: %w", err)
 	}
 	return records, nil
+}
+
+// GetRecordsByUUIDs retrieves HTTP records matching the given UUIDs.
+func (r *Repository) GetRecordsByUUIDs(ctx context.Context, uuids []string) ([]*HTTPRecord, error) {
+	return r.getRecordsByUUIDs(ctx, uuids)
+}
+
+// GetScanRecordsByUUIDs retrieves HTTP records matching the given UUIDs,
+// projecting only scanRecordColumns — what the dynamic-assessment scan feed
+// consumes. This avoids loading (and JSON-deserializing) the
+// parameters/technology/remarks jsonb columns plus ~25 unused scalar columns per
+// record. Modules receive the reconstructed HttpRequestResponse (via
+// recordToHttpRequestResponse), never the HTTPRecord, so no downstream consumer
+// reads the dropped fields.
+func (r *Repository) GetScanRecordsByUUIDs(ctx context.Context, uuids []string) ([]*HTTPRecord, error) {
+	return r.getRecordsByUUIDs(ctx, uuids, scanRecordColumns...)
 }
 
 // GetRelatedRecords finds HTTP records with the same hostname and a path
@@ -449,53 +474,66 @@ func (r *Repository) AppendRemarks(ctx context.Context, annotations map[string][
 		return nil
 	}
 
+	// Batch-load the current remarks for every target UUID in one query rather
+	// than issuing one SELECT per record (the old N+1). The updates still carry
+	// per-record merged values, so they run individually — but inside a single
+	// transaction to collapse N commits into one.
+	uuids := make([]string, 0, len(annotations))
+	for uuid, newRemarks := range annotations {
+		if len(newRemarks) > 0 {
+			uuids = append(uuids, uuid)
+		}
+	}
+	if len(uuids) == 0 {
+		return nil
+	}
+
+	var existing []HTTPRecord
+	if err := r.db.NewSelect().
+		Model(&existing).
+		Column("uuid", "remarks").
+		Where("uuid IN (?)", bun.List(uuids)).
+		Scan(ctx); err != nil {
+		return fmt.Errorf("failed to load existing remarks: %w", err)
+	}
+	existingByUUID := make(map[string][]string, len(existing))
+	for i := range existing {
+		existingByUUID[existing[i].UUID] = existing[i].Remarks
+	}
+
 	// Track the first update failure so a systemic problem surfaces to the
 	// caller (every caller logs the returned error) while a single bad record
 	// doesn't abort annotation of the rest.
 	var firstErr error
-	for uuid, newRemarks := range annotations {
-		if len(newRemarks) == 0 {
-			continue
-		}
+	err := r.db.RunInTx(ctx, &sql.TxOptions{}, func(ctx context.Context, tx bun.Tx) error {
+		for _, uuid := range uuids {
+			current, ok := existingByUUID[uuid]
+			if !ok {
+				continue // record not found — skip
+			}
+			// Merge existing + new remarks, preserving order and dropping dups.
+			merged := mergeUniqueStrings(current, annotations[uuid])
 
-		// Fetch current remarks
-		record := &HTTPRecord{}
-		err := r.db.NewSelect().Model(record).Column("remarks").Where("uuid = ?", uuid).Scan(ctx)
-		if err != nil {
-			continue // skip missing records
-		}
+			remarksJSON, err := json.Marshal(merged)
+			if err != nil {
+				continue
+			}
 
-		// Merge and deduplicate
-		seen := make(map[string]struct{}, len(record.Remarks)+len(newRemarks))
-		merged := make([]string, 0, len(record.Remarks)+len(newRemarks))
-		for _, r := range record.Remarks {
-			if _, ok := seen[r]; !ok {
-				seen[r] = struct{}{}
-				merged = append(merged, r)
+			if _, err := tx.NewUpdate().
+				Model((*HTTPRecord)(nil)).
+				Set("remarks = ?", string(remarksJSON)).
+				Where("uuid = ?", uuid).
+				Exec(ctx); err != nil {
+				zap.L().Warn("failed to append remarks to record", zap.String("uuid", uuid), zap.Error(err))
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
-		for _, r := range newRemarks {
-			if _, ok := seen[r]; !ok {
-				seen[r] = struct{}{}
-				merged = append(merged, r)
-			}
-		}
-
-		remarksJSON, err := json.Marshal(merged)
-		if err != nil {
-			continue
-		}
-
-		if _, err := r.db.NewUpdate().
-			Model((*HTTPRecord)(nil)).
-			Set("remarks = ?", string(remarksJSON)).
-			Where("uuid = ?", uuid).
-			Exec(ctx); err != nil {
-			zap.L().Warn("failed to append remarks to record", zap.String("uuid", uuid), zap.Error(err))
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	return firstErr

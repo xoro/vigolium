@@ -266,15 +266,13 @@ func (s *DBInputSource) fetchNextBatch(ctx context.Context) ([]*HTTPRecord, erro
 	// Format cursor as plain string to match SQLite's CURRENT_TIMESTAMP format —
 	// bun serializes time.Time with timezone suffix that breaks text comparison.
 	var records []*HTTPRecord
-	// Project only the columns the scan feed consumes: the cursor keys, the URL,
-	// the raw request/response bytes, and the has_response gate that
-	// ParsedResponse() checks. This avoids loading (and JSON-deserializing) the
-	// parameters/technology/remarks jsonb columns and ~25 unused scalar columns
-	// per record. The hostname/source WHERE filters below don't require selecting
-	// those columns. Modules receive the reconstructed HttpRequestResponse, never
-	// the HTTPRecord, so no downstream consumer reads the dropped fields.
+	// Project only scanRecordColumns — the columns the scan feed consumes —
+	// avoiding the parameters/technology/remarks jsonb columns and ~25 unused
+	// scalar columns per record. The hostname/source WHERE filters below don't
+	// require selecting those columns. Modules receive the reconstructed
+	// HttpRequestResponse, never the HTTPRecord, so no consumer reads the rest.
 	q := s.db.NewSelect().Model(&records).
-		Column("uuid", "created_at", "url", "raw_request", "raw_response", "has_response")
+		Column(scanRecordColumns...)
 
 	if !s.readCursorAt.IsZero() {
 		cursorAt := s.readCursorAt.UTC().Format("2006-01-02 15:04:05")
@@ -562,7 +560,7 @@ func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem
 		// concurrently.
 		s.mu.Unlock()
 
-		records, err := s.repo.GetRecordsByUUIDs(ctx, chunk)
+		records, err := s.repo.GetScanRecordsByUUIDs(ctx, chunk)
 		s.mu.Lock()
 		if err != nil {
 			// Whole-chunk fetch failed: skip it (index already advanced) and try
@@ -571,7 +569,7 @@ func (s *RiskPrioritizedDBInputSource) Next(ctx context.Context) (*work.WorkItem
 				zap.Error(err), zap.Int("chunk_size", len(chunk)))
 			continue
 		}
-		// GetRecordsByUUIDs returns records in arbitrary order and omits any UUIDs
+		// GetScanRecordsByUUIDs returns records in arbitrary order and omits any UUIDs
 		// that no longer exist. Re-order into the risk-prioritized chunk order so
 		// the highest-risk records are still scanned first; missing UUIDs are
 		// simply skipped (matching the prior per-UUID skip-on-error behavior).

@@ -162,14 +162,10 @@ ipScan:
 			// Build fuzzed request with payload
 			fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-			// Parse the fuzzed raw request
-			fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-			if err != nil {
-				continue
-			}
-
-			// Copy HttpService from original request
-			fuzzedReq = fuzzedReq.WithService(ctx.Service())
+			// BuildRequest produces well-formed raw, so wrap directly
+			// (with the original service) instead of re-parsing on this
+			// hot path.
+			fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 			// Probe 1: fuzzed must be slow.
 			isSlow, sendErr := sendTimedRequest(fuzzedReq, httpClient)
@@ -225,11 +221,9 @@ ipScan:
 // check rather than fail the whole scan).
 func buildBaselineRequest(ctx *httpmsg.HttpRequestResponse, ip httpmsg.InsertionPoint) (*httpmsg.HttpRequestResponse, bool) {
 	raw := ip.BuildRequest([]byte(ip.BaseValue()))
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return nil, false
-	}
-	return req.WithService(ctx.Service()), true
+	// BuildRequest produces well-formed raw, so wrap directly (with the
+	// original service) instead of re-parsing on this hot path.
+	return httpmsg.NewRequestResponseRaw(raw, ctx.Service()), true
 }
 
 // isResponseSlow sends req and reports whether the response took at least

@@ -992,12 +992,13 @@ func generateReportFromDB(ctx context.Context, db *database.DB, outputPath strin
 	}
 	// Prefer the streaming generator when the format has one: it renders the
 	// report by pulling rows one at a time instead of loading the whole result
-	// set into memory. forceOmitResponse drops the raw request/response bytes
-	// this renderer discards anyway, so they never enter memory.
+	// set into memory. The HTML renderer derives the displayed request/response
+	// bodies from the raw bytes (HTTPRecord.MarshalJSON) and only then drops the
+	// redundant raw_request/raw_response copies, so those columns MUST be loaded;
+	// honor only an explicit --omit-response, never force it on here.
 	if rf.streamGenerate != nil {
-		omit := omitResponse || rf.forceOmitResponse
 		produce := func(emit func(any) error) error {
-			return streamExportData(ctx, db, omit, projectUUID, emit)
+			return streamExportData(ctx, db, omitResponse, projectUUID, emit)
 		}
 		return rf.streamGenerate(produce, outputPath, meta)
 	}
@@ -1078,14 +1079,11 @@ type reportFormatEntry struct {
 	// streamGenerate, when set, renders the report by pulling items one at a
 	// time from a producer, so the result set never lives in memory at once.
 	streamGenerate func(output.ReportItemProducer, string, output.HTMLReportMeta) error
-	// forceOmitResponse marks formats whose renderer discards the raw
-	// request/response bytes, so they are never loaded from the DB.
-	forceOmitResponse bool
-	beforeMsg         string // optional stderr message before generation
+	beforeMsg string // optional stderr message before generation
 }
 
 var reportFormats = []reportFormatEntry{
-	{format: "html", label: "HTML report", generate: output.GenerateHTMLReport, streamGenerate: output.GenerateHTMLReportStreaming, forceOmitResponse: true},
+	{format: "html", label: "HTML report", generate: output.GenerateHTMLReport, streamGenerate: output.GenerateHTMLReportStreaming},
 	{format: "report", label: "Document report", generate: output.GenerateDocumentReport},
 	{format: "pdf", label: "PDF report", generate: output.GeneratePDFReport, beforeMsg: "Generating PDF report (headless Chrome)..."},
 }

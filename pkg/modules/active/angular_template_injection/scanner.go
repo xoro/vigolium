@@ -132,11 +132,9 @@ func (m *Module) tryProbeTemplate(
 		expectedResult := left + computed + right
 
 		fuzzedRaw := ip.BuildRequest([]byte(probe))
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			return nil
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {

@@ -376,11 +376,9 @@ func (m *Module) fetch(client *http.Requester, rawHTTP []byte, svc *httpmsg.Serv
 	if err != nil {
 		return nil
 	}
-	req, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	req = req.WithService(svc)
+	// SetPath produces well-formed raw, so wrap directly instead of re-parsing
+	// on this hot path.
+	req := httpmsg.NewRequestResponseRaw(modifiedRaw, svc)
 
 	resp, _, err := client.Execute(req, http.Options{NoClustering: noCluster})
 	if err != nil {

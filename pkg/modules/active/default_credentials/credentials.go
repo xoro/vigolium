@@ -69,3 +69,12 @@ var captchaIndicators = []string{
 	"captcha", "recaptcha", "hcaptcha", "g-recaptcha",
 	"cf-turnstile", "challenge",
 }
+
+// loginErrorRedirectMarkers are path substrings in a redirect Location that mark
+// a bounce back to a login or error page — i.e. a rejected login, not a success.
+// "auth" is deliberately excluded (too broad: matches legitimate post-login SSO
+// targets like /oauth/authorize).
+var loginErrorRedirectMarkers = []string{
+	"login", "signin", "sign-in", "error", "captcha",
+	"denied", "invalid", "fail", "unauthorized", "forbidden",
+}

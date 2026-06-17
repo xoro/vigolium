@@ -86,11 +86,9 @@ func (m *Module) ScanPerRequest(
 		return nil, nil
 	}
 
-	baselineReq, err := httpmsg.ParseRawRequest(string(baselineRaw))
-	if err != nil {
-		return nil, nil
-	}
-	baselineReq = baselineReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	baselineReq := httpmsg.NewRequestResponseRaw(baselineRaw, ctx.Service())
 
 	baselineResp, _, err := httpClient.Execute(baselineReq, http.Options{})
 	if err != nil {
@@ -155,11 +153,9 @@ func (m *Module) testForwardedHost(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -237,11 +233,9 @@ func (m *Module) testForwardedProto(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -334,11 +328,9 @@ func (m *Module) testForwardedFor(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -436,11 +428,9 @@ func (m *Module) confirmForwardedHostReflection(ctx *httpmsg.HttpRequestResponse
 		if err != nil {
 			return false, err
 		}
-		req, err := httpmsg.ParseRawRequest(string(raw))
-		if err != nil {
-			return false, err
-		}
-		req = req.WithService(ctx.Service())
+		// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 		resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 		if err != nil {
 			return false, err
@@ -509,11 +499,9 @@ func (m *Module) captureFetch(ctx *httpmsg.HttpRequestResponse, httpClient *http
 	if !ok {
 		return "", "", 0, false
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", "", 0, false
-	}
-	req = req.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return "", "", 0, false

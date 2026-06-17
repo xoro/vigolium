@@ -15,6 +15,34 @@ import (
 	"golang.org/x/net/html"
 )
 
+// inlineRequestSignals are the request-making API tokens jsscan's AST extractor
+// keys off (fetch / XHR / axios / jQuery / $http / WebSocket / method calls).
+// jsscan can only emit an HTTP request when one of these is present in the
+// source, so an inline script carrying none of them yields nothing from jsscan.
+var inlineRequestSignals = [][]byte{
+	[]byte("fetch"), []byte("axios"), []byte("ajax"),
+	[]byte("XMLHttpRequest"), []byte("XHR"), []byte(".open("),
+	[]byte("$http"), []byte("sendBeacon"), []byte("WebSocket"),
+	[]byte("EventSource"), []byte("Request("),
+	[]byte(".get("), []byte(".post("), []byte(".put("),
+	[]byte(".patch("), []byte(".delete("),
+}
+
+// inlineScriptHasRequestSignal reports whether an inline script contains any
+// token jsscan could extract a request from. Scripts with none — JSON-LD and
+// other data islands, analytics/config blobs, feature flags — skip the per-script
+// jsscan subprocess (a fork/exec + temp-file write) and rely on linkfinder, which
+// still runs over them. Because jsscan needs such a call to extract anything, this
+// never drops a request jsscan would have found.
+func inlineScriptHasRequestSignal(content []byte) bool {
+	for _, sig := range inlineRequestSignals {
+		if bytes.Contains(content, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // hashBodyContent computes FNV-1a 64-bit hash of response body for deduplication.
 func hashBodyContent(body []byte) string {
 	h := fnv.New64a()
@@ -62,8 +90,14 @@ func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url
 		return
 	}
 
-	// Extract script tags from HTML
-	scripts := extractScriptTags(body)
+	// Extract script tags from HTML. Reuse the ResponseChain's cached HTML parse
+	// (sync.Once) — the spider coordinator parses the same body right after this
+	// in extractLinks, so sharing one parse halves the per-page DOM-build cost.
+	doc, err := rc.ParseHTML()
+	if err != nil || doc == nil {
+		return
+	}
+	scripts := extractScriptTags(doc)
 	if len(scripts) == 0 {
 		return
 	}
@@ -90,6 +124,17 @@ func (e *Engine) processScriptTagsWithJSScan(ctx context.Context, sourceURL *url
 				zap.String("url", sourceURL.String()),
 				zap.Int("script_index", i),
 				zap.Int("size", len(scriptContent)))
+			continue
+		}
+
+		// Skip the jsscan subprocess for scripts with no request-making API token
+		// (JSON-LD / data islands / config blobs): jsscan would extract nothing,
+		// so the fork/exec + temp-file write is pure overhead. linkfinder still
+		// runs below to harvest any paths.
+		if !inlineScriptHasRequestSignal(scriptContent) {
+			namesAdded, pathsAdded := e.extractPathsFromScript(scriptContent)
+			totalNamesAdded += namesAdded
+			totalPathsAdded += pathsAdded
 			continue
 		}
 
@@ -189,11 +234,12 @@ func (e *Engine) extractPathsFromScript(content []byte) (namesAdded, pathsAdded 
 	return namesAdded, pathsAdded
 }
 
-// extractScriptTags extracts content from all inline <script> tags in HTML.
-// Skips external scripts (those with src attribute) as they're handled by JSFetchTask.
-func extractScriptTags(body []byte) [][]byte {
-	doc, err := html.Parse(bytes.NewReader(body))
-	if err != nil {
+// extractScriptTags extracts content from all inline <script> tags in a parsed
+// HTML DOM. Skips external scripts (those with src attribute) as they're handled
+// by JSFetchTask. The caller passes the shared ResponseChain.ParseHTML() node so
+// the page is parsed once per extractLinks pass.
+func extractScriptTags(doc *html.Node) [][]byte {
+	if doc == nil {
 		return nil
 	}
 

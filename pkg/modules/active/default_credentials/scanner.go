@@ -16,9 +16,20 @@ import (
 )
 
 // credentialResponse holds extracted values from a login attempt response.
+//
+// body is the response BODY only (not the full response string). Every
+// similarity/length comparison in this module runs against body — never the
+// headers — because a login endpoint typically issues a fresh session cookie,
+// a per-request request-id, and a clock-driven Date on every POST (including
+// failed ones). Comparing full response strings lets those volatile headers
+// manufacture a phantom "difference" between two identical-meaning rejections.
+// raw keeps the full response string (headers+body) for evidence and edge-block
+// detection only.
 type credentialResponse struct {
 	statusCode   int
 	body         string
+	raw          string
+	location     string
 	hasSetCookie bool
 	blocked      bool // WAF/CDN block or challenge — carries no auth signal
 }
@@ -114,6 +125,15 @@ func (m *Module) ScanPerHost(
 	if baseline.blocked {
 		return nil, nil // WAF/CDN fronting the login — no reliable auth signal
 	}
+	// A captcha gate fronting the login makes credential testing meaningless: the
+	// app rejects every attempt on the captcha *before* it ever checks the
+	// credentials, returning the same response for admin/admin and random junk
+	// alike. The gate often only surfaces in the POST response (a flash error in a
+	// Set-Cookie, an error body), not the originally-observed page — so inspect the
+	// full failed-login probe, not just ctx's response.
+	if probeShowsCaptchaGate(baseline) {
+		return nil, nil
+	}
 
 	time.Sleep(500 * time.Millisecond)
 	baseline2, err := m.sendCredentials(ctx, httpClient, endpoint,
@@ -121,8 +141,11 @@ func (m *Module) ScanPerHost(
 	if err != nil {
 		return nil, err
 	}
-	if baseline2.blocked || !invalidResponsesStable(baseline, baseline2) {
-		return nil, nil // login surface too volatile (or blocked) to trust a differential
+	// The two failed-login probes must be equivalent (same status, redirect target,
+	// and body): if they disagree the login surface is too dynamic to trust a later
+	// "success" differential.
+	if baseline2.blocked || probeShowsCaptchaGate(baseline2) || !responsesEquivalent(baseline, baseline2) {
+		return nil, nil // login surface too volatile (or blocked/captcha-gated) to trust a differential
 	}
 
 	// Test credential pairs
@@ -149,7 +172,7 @@ func (m *Module) ScanPerHost(
 			return results, nil // Stop testing
 		}
 
-		if !isLoginSuccess(cr.statusCode, cr.body, baseline.statusCode, baseline.body, cr.hasSetCookie) {
+		if !isLoginSuccess(cr, baseline) {
 			continue
 		}
 
@@ -166,7 +189,7 @@ func (m *Module) ScanPerHost(
 		results = append(results, &output.ResultEvent{
 			URL:              ctx.Target(),
 			Request:          string(rawReq),
-			Response:         cr.body,
+			Response:         cr.raw,
 			FuzzingParameter: endpoint.usernameField,
 			ExtractedResults: []string{
 				fmt.Sprintf("Username: %s", cred.username),
@@ -180,17 +203,6 @@ func (m *Module) ScanPerHost(
 	}
 
 	return results, nil
-}
-
-// invalidResponsesStable reports whether two independent failed-login responses
-// agree closely enough to trust a credential differential: same status and
-// textually similar bodies. If they disagree the login surface is too dynamic
-// (or non-deterministic) for a single "success" differential to mean anything.
-func invalidResponsesStable(a, b credentialResponse) bool {
-	if a.statusCode != b.statusCode {
-		return false
-	}
-	return modkit.BodiesSimilar(a.body, b.body)
 }
 
 // confirmCredentialSuccess re-verifies a candidate "success" before it is
@@ -210,7 +222,7 @@ func (m *Module) confirmCredentialSuccess(
 	if err != nil || repeat.blocked {
 		return false
 	}
-	if !isLoginSuccess(repeat.statusCode, repeat.body, baseline.statusCode, baseline.body, repeat.hasSetCookie) {
+	if !isLoginSuccess(repeat, baseline) {
 		return false
 	}
 
@@ -219,12 +231,31 @@ func (m *Module) confirmCredentialSuccess(
 	if err != nil || control.blocked {
 		return false
 	}
-	// If the "successful" response is indistinguishable from a generic failed
-	// login (same status and similar body), it is page variance, not auth.
-	if candidate.statusCode == control.statusCode && modkit.BodiesSimilar(candidate.body, control.body) {
+	// The decisive check against the "same response for any credentials" class of
+	// false positive (a captcha/error gate that rejects everything identically):
+	// if the "successful" response is indistinguishable from a fresh
+	// random-credential control — same status, same redirect target, similar body
+	// — it is not authentication, it is the endpoint's uniform rejection.
+	if responsesEquivalent(candidate, control) {
 		return false
 	}
 	return true
+}
+
+// responsesEquivalent reports whether two login responses are effectively the
+// same outcome: same status, same redirect target, and textually similar body.
+// Comparison is body-only (see credentialResponse) plus the Location header,
+// never the volatile full response string. Two uses: detecting an endpoint that
+// returns the identical response regardless of the credentials supplied, and
+// gating the failed-login baseline as stable (two invalid probes must agree).
+func responsesEquivalent(a, b credentialResponse) bool {
+	if a.statusCode != b.statusCode {
+		return false
+	}
+	if !sameLocation(a.location, b.location) {
+		return false
+	}
+	return modkit.BodiesSimilar(a.body, b.body)
 }
 
 // sendCredentials sends a login request with the given credentials and extracts response data.
@@ -236,11 +267,8 @@ func (m *Module) sendCredentials(
 ) (credentialResponse, error) {
 	rawReq := m.buildCredentialRequest(ctx, endpoint, username, password)
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(rawReq))
-	if err != nil {
-		return credentialResponse{}, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// rawReq is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(rawReq, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -252,15 +280,17 @@ func (m *Module) sendCredentials(
 	if resp.Response() != nil {
 		cr.statusCode = resp.Response().StatusCode
 		cr.hasSetCookie = resp.Response().Header.Get("Set-Cookie") != ""
+		cr.location = resp.Response().Header.Get("Location")
 	}
-	cr.body = resp.FullResponseString()
+	cr.body = resp.BodyString()
+	cr.raw = resp.FullResponseString()
 
 	// Flag only vendor-identified WAF/CDN edge blocks/challenges (Cloudflare,
 	// Akamai, CloudFront, Incapsula — including 200-status challenge bodies), NOT a
 	// plain application 401: a 401 is the *expected* failed-login baseline this
 	// module is built around, so infra.IsBlockedResponse (which treats 401/403 as
 	// blocked) is deliberately not used here.
-	cr.blocked = modkit.IsEdgeBlockedResponse(httpmsg.NewHttpResponse([]byte(cr.body)))
+	cr.blocked = modkit.IsEdgeBlockedResponse(httpmsg.NewHttpResponse([]byte(cr.raw)))
 
 	return cr, nil
 }

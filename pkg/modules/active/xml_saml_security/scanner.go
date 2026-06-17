@@ -155,11 +155,9 @@ func (m *Module) sendPayload(
 	httpClient *http.Requester,
 	payload string,
 ) error {
-	modifiedReq, err := httpmsg.ParseRawRequest(string(ip.BuildRequest([]byte(payload))))
-	if err != nil {
-		return err
-	}
-	modifiedReq = modifiedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	modifiedReq := httpmsg.NewRequestResponseRaw(ip.BuildRequest([]byte(payload)), ctx.Service())
 
 	resp, _, err := httpClient.Execute(modifiedReq, http.Options{})
 	if err != nil {

@@ -228,11 +228,9 @@ func (m *Module) confirm(
 // and avoids the raw client's separate transport). ok is false on any
 // parse/HTTP/empty-response error; fatal is true only when the host is unresponsive.
 func (m *Module) fetch(httpClient *http.Requester, service *httpmsg.Service, raw []byte) (status int, body string, ok bool, fatal bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", false, false
-	}
-	req = req.WithService(service)
+	// SetMethod/SetPath produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 	if err != nil {

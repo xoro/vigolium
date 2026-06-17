@@ -110,11 +110,9 @@ func (m *Module) attemptLogin(
 		}
 	}
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return nil
-	}
-	req = req.WithService(svc)
+	// SetMethod/SetPath/SetBodyString produce well-formed raw, so wrap directly
+	// instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, svc)
 
 	resp, _, err := client.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {

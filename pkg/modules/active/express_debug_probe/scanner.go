@@ -136,11 +136,8 @@ func probeRandomEndpoint(
 	}
 	probeRaw, _ = httpmsg.SetMethod(probeRaw, "GET")
 
-	probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-	if err != nil {
-		return nil
-	}
-	probeReq = probeReq.WithService(ctx.Service())
+	// probeRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(probeReq, http.Options{})
 	if err != nil {
@@ -181,11 +178,8 @@ func probeMalformedJSON(
 	probeRaw, _ = httpmsg.SetBody(probeRaw, []byte("{"))
 	probeRaw, _ = httpmsg.AddOrReplaceHeader(probeRaw, "Content-Type", "application/json")
 
-	probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-	if err != nil {
-		return nil
-	}
-	probeReq = probeReq.WithService(ctx.Service())
+	// probeRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(probeReq, http.Options{})
 	if err != nil {
@@ -244,11 +238,8 @@ func probeTypeMismatch(
 	}
 	probeRaw, _ = httpmsg.SetMethod(probeRaw, "GET")
 
-	probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-	if err != nil {
-		return nil
-	}
-	probeReq = probeReq.WithService(ctx.Service())
+	// probeRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(probeReq, http.Options{})
 	if err != nil {
@@ -323,11 +314,8 @@ func get404Hash(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) st
 	}
 	raw, _ = httpmsg.SetMethod(raw, "GET")
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return ""
-	}
-	req = req.WithService(ctx.Service())
+	// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{})
 	if err != nil {

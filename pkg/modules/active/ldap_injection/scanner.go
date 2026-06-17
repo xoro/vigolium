@@ -137,11 +137,9 @@ func (m *Module) ScanPerInsertionPoint(
 	for _, payload := range ldapPayloads {
 		fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -305,11 +303,9 @@ func (m *Module) probeSignature(
 	httpClient *http.Requester,
 	rawReq []byte,
 ) (responseSignature, string, bool) {
-	req, err := httpmsg.ParseRawRequest(string(rawReq))
-	if err != nil {
-		return responseSignature{}, "", false
-	}
-	req = req.WithService(ctx.Service())
+	// rawReq is internally built (well-formed), so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(rawReq, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{})
 	if err != nil {

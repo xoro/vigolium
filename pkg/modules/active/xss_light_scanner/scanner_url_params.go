@@ -143,12 +143,9 @@ func (m *URLParamsModule) scanConvertedRequest(
 		return nil, nil
 	}
 
-	// Get base response for the converted request
-	parsedReq, err := httpmsg.ParseRawRequest(string(getRequest))
-	if err != nil {
-		return nil, err
-	}
-	parsedReq = parsedReq.WithService(ctx.Service())
+	// Get base response for the converted request. getRequest is well-formed
+	// raw, so wrap directly instead of re-parsing on this hot path.
+	parsedReq := httpmsg.NewRequestResponseRaw(getRequest, ctx.Service())
 
 	resp, _, err := httpClient.Execute(parsedReq, http.Options{})
 	if err != nil {
@@ -464,4 +461,3 @@ func (m *URLParamsModule) detectContext(
 		return HTMLGeneric
 	}
 }
-

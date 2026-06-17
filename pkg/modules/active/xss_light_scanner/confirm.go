@@ -316,11 +316,9 @@ func sendExec(
 
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
 	out.request = string(fuzzedRaw)
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return out
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 	out.fuzzedReq = fuzzedReq
 
 	// NoClustering: the executable payload differs from the canary, but a fresh

@@ -178,11 +178,8 @@ func (m *Module) endpointAcceptsAnyMethod(
 	if err != nil {
 		return false
 	}
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return false
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -218,11 +215,8 @@ func (m *Module) testDangerousMethods(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 		if err != nil {
@@ -300,11 +294,8 @@ func (m *Module) testMethodOverrideHeaders(
 				continue
 			}
 
-			fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-			if err != nil {
-				continue
-			}
-			fuzzedReq = fuzzedReq.WithService(ctx.Service())
+			// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+			fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 			resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 			if err != nil {
@@ -379,11 +370,8 @@ func (m *Module) fetchPostControl(
 	if err != nil {
 		return postControl{}, false
 	}
-	req, err := httpmsg.ParseRawRequest(string(controlRaw))
-	if err != nil {
-		return postControl{}, false
-	}
-	req = req.WithService(ctx.Service())
+	// controlRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(controlRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {

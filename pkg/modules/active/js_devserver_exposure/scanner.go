@@ -84,11 +84,9 @@ func (m *Module) ScanPerRequest(
 		}
 		probeRaw, _ = httpmsg.SetMethod(probeRaw, "GET")
 
-		probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-		if err != nil {
-			continue
-		}
-		probeReq = probeReq.WithService(ctx.Service())
+		// probeRaw is internally built (well-formed), so wrap directly instead
+		// of re-parsing on this hot path.
+		probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(probeReq, http.Options{})
 		if err != nil {
@@ -199,11 +197,9 @@ func fingerprint404(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester
 	}
 	raw, _ = httpmsg.SetMethod(raw, "GET")
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return "", 0
-	}
-	req = req.WithService(ctx.Service())
+	// raw is internally built (well-formed), so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{})
 	if err != nil {

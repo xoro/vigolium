@@ -1,7 +1,6 @@
 package infra
 
 import (
-	"bytes"
 	"fmt"
 	"strings"
 	"sync"
@@ -19,7 +18,7 @@ var (
 	ErrChallengePage     = fmt.Errorf("interactive WAF/CDN challenge page")
 )
 
-// challengeBodyMarkers are byte needles that appear only on interstitial
+// ChallengeBodyMarkers are byte needles that appear only on interstitial
 // WAF/CDN challenge ("checking your browser") pages, never in a genuine
 // application response. They let the detector catch a challenge the edge serves
 // with an ordinary 200/202 status — Cloudflare managed and JS challenges
@@ -29,13 +28,22 @@ var (
 // error-based SQLi). Each marker is specific enough that a real app body cannot
 // plausibly contain it: a login page that merely embeds a Turnstile widget
 // carries "challenges.cloudflare.com" but none of these, so it is not flagged.
-var challengeBodyMarkers = [][]byte{
+//
+// Exported because modkit's edge-block detector (IsEdgeBlockedResponse) reuses
+// the same set plus CloudFront error-page markers — keeping one source of truth
+// so a new challenge string is added in one place, not two.
+var ChallengeBodyMarkers = [][]byte{
 	[]byte("_cf_chl_opt"),                               // Cloudflare challenge opt object (window._cf_chl_opt)
 	[]byte("/cdn-cgi/challenge-platform/"),              // Cloudflare challenge orchestration script
 	[]byte("Enable JavaScript and cookies to continue"), // Cloudflare managed/JS-challenge noscript text
 	[]byte("_Incapsula_Resource"),                       // Imperva Incapsula interstitial
 	[]byte("Request unsuccessful. Incapsula incident"),  // Imperva Incapsula block page
 }
+
+// challengeBodyMatcher is the single-pass form of ChallengeBodyMarkers, built
+// once so bodyHasChallengeMarker scans the (capped) body a single time instead of
+// once per marker.
+var challengeBodyMatcher = NewByteSetMatcher(ChallengeBodyMarkers)
 
 // challengeBodyScanLimit caps how many leading bytes of the body are scanned for
 // challenge markers. Interstitial pages carry their markers in the first few KB;
@@ -176,10 +184,5 @@ func bodyHasChallengeMarker(resp *httputil.ResponseChain) bool {
 	if len(b) > challengeBodyScanLimit {
 		b = b[:challengeBodyScanLimit]
 	}
-	for _, marker := range challengeBodyMarkers {
-		if bytes.Contains(b, marker) {
-			return true
-		}
-	}
-	return false
+	return challengeBodyMatcher.MatchAny(b)
 }

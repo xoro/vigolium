@@ -313,11 +313,9 @@ func (m *Module) sendTimedPayload(
 ) (timedResult, error) {
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return timedResult{}, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly (with the
+	// original service) instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	start := time.Now()
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true, NoClustering: true})

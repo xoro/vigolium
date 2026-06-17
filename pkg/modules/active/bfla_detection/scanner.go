@@ -210,11 +210,9 @@ func (m *Module) testNoAuth(
 		return nil, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// RemoveHeader produces well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -229,7 +227,13 @@ func (m *Module) testNoAuth(
 	respStatus := resp.Response().StatusCode
 	respBodyBytes := append([]byte(nil), resp.Body().Bytes()...)
 	respBody := resp.FullResponseString()
-	respBodyLen := len(respBody)
+	// Body-only length: it is compared against origBodyLen (also body-only) and
+	// reported as the body length. Using the full response string here would
+	// contaminate the length differential with the header block — volatile
+	// per-request headers (Set-Cookie session blobs, Date, request-ids) — which
+	// systematically inflates the magnitude and skews the similarity band.
+	// respBody (the full string) stays for the Response: evidence field only.
+	respBodyLen := len(respBodyBytes)
 
 	// Reject responses that match the wildcard shell — those are the same
 	// page the host returns for every URL, not a real bypass.
@@ -311,11 +315,9 @@ func (m *Module) testDowngradedAuth(
 		return nil, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -330,7 +332,7 @@ func (m *Module) testDowngradedAuth(
 	respStatus := resp.Response().StatusCode
 	respBodyBytes := append([]byte(nil), resp.Body().Bytes()...)
 	respBody := resp.FullResponseString()
-	respBodyLen := len(respBody)
+	respBodyLen := len(respBodyBytes) // body-only length (see testNoAuth); respBody is evidence only
 
 	if wildcard.MatchesBody(respStatus, respBodyBytes) {
 		return nil, nil
@@ -406,11 +408,9 @@ func (m *Module) testMethodSwitching(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// SetMethod/RemoveHeader produce well-formed raw, so wrap directly
+		// instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 		if err != nil {
@@ -504,11 +504,9 @@ func probeMethodBaseline(
 		return 0, nil, false
 	}
 
-	probeReq, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, nil, false
-	}
-	probeReq = probeReq.WithService(ctx.Service())
+	// SetMethod/SetPath/RemoveHeader produce well-formed raw, so wrap
+	// directly instead of re-parsing on this hot path.
+	probeReq := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(probeReq, http.Options{NoRedirects: true})
 	if err != nil || resp == nil {
@@ -555,11 +553,9 @@ func confirmPrivilegedReproduces(
 	origBody []byte,
 ) bool {
 	for i := 0; i < bflaConfirmSamples; i++ {
-		req, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			return false
-		}
-		req = req.WithService(ctx.Service())
+		// modifiedRaw is already well-formed, so wrap directly instead of
+		// re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		// NoClustering is essential: the requester caches identical requests for a
 		// short TTL, so without it every re-sample would return the first probe's

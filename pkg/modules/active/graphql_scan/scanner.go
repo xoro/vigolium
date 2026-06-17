@@ -326,11 +326,8 @@ func (m *Module) sendGraphQLQueryEx(
 		return "", false, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modified))
-	if err != nil {
-		return "", false, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modified is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -375,11 +372,8 @@ func (m *Module) sendGraphQLGET(
 		return "", err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modified))
-	if err != nil {
-		return "", err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modified is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

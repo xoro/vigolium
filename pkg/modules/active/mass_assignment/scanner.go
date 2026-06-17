@@ -244,11 +244,9 @@ func (m *Module) sendInjected(
 		return nil, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modifiedRaw is internally built (well-formed), so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {

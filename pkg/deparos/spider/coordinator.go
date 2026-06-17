@@ -82,8 +82,19 @@ func (ec *ExtractionCoordinator) Extract(ctx context.Context, baseURL *url.URL, 
 	resp := rc.Response()
 	body := rc.BodyBytes()
 
-	// Create internal response with HTML caching
-	response := NewHTTPResponse(baseURL, resp.Header, body, 0)
+	// Reuse the ResponseChain's cached HTML parse (sync.Once) so the page is
+	// parsed once per extractLinks pass — the script-tag scanner already parsed
+	// it via the same rc.ParseHTML(). Only for bodies in the size band the
+	// coordinator would itself parse; oversize bodies fall back to NewHTTPResponse
+	// so the coordinator's own MaxBodySize DoS guard still applies, and tiny
+	// bodies skip parsing entirely (extractInternal returns early below 10 bytes).
+	var response *HTTPResponse
+	if len(body) >= 10 && len(body) <= MaxBodySize {
+		doc, parseErr := rc.ParseHTML()
+		response = NewHTTPResponseWithHTML(baseURL, resp.Header, body, 0, doc, parseErr)
+	} else {
+		response = NewHTTPResponse(baseURL, resp.Header, body, 0)
+	}
 	return ec.extractInternal(ctx, baseURL, response)
 }
 

@@ -2,6 +2,7 @@ package output
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -188,6 +189,33 @@ func TestStandardWriterWriteToFile(t *testing.T) {
 		require.NoError(t, json.Unmarshal([]byte(line), &decoded))
 		assert.Equal(t, "xss-reflected", decoded["template-id"])
 	}
+}
+
+func TestStandardWriterConsoleOnlyWritesScreenNotJSON(t *testing.T) {
+	// Console-only path: no JSON stdout, no output file. Write must render screen
+	// text via formatScreen and must NOT emit JSON (the JSON marshal is skipped
+	// entirely on this path).
+	r, pipeW, err := os.Pipe()
+	require.NoError(t, err)
+	orig := os.Stdout
+	os.Stdout = pipeW
+
+	w := &StandardWriter{} // JSONOutput=false, DisableStdout=false, outputFile=nil
+	writeErr := w.Write(sampleEvent())
+
+	require.NoError(t, pipeW.Close())
+	out, readErr := io.ReadAll(r)
+	os.Stdout = orig
+	require.NoError(t, writeErr)
+	require.NoError(t, readErr)
+
+	text := terminal.StripANSI(string(out))
+	require.NotEmpty(t, text, "console-only Write must emit screen output")
+	assert.Contains(t, text, "[xss-reflected]", "screen output uses the bracketed module layout")
+	assert.NotContains(t, text, "template-id", "console path must not emit JSON keys")
+
+	var decoded map[string]any
+	assert.Error(t, json.Unmarshal(out, &decoded), "console output is screen text, not JSON")
 }
 
 func TestStandardWriterWriteFileOnly(t *testing.T) {

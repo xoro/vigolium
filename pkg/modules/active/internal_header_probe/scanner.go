@@ -197,11 +197,9 @@ type probeResp struct {
 // replays actually re-hit the origin instead of returning a cached body (which
 // would collapse the measured variance to zero and defeat the differential).
 func (m *Module) fetch(httpClient *http.Requester, service *httpmsg.Service, raw []byte) (probeResp, bool) {
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return probeResp{}, false
-	}
-	req = req.WithService(service)
+	// raw is internally built (well-formed), so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		return probeResp{}, false
@@ -385,11 +383,9 @@ func (m *Module) plantOAST(
 		if err != nil {
 			continue
 		}
-		req, err := httpmsg.ParseRawRequest(string(raw))
-		if err != nil {
-			continue
-		}
-		req = req.WithService(service)
+		// raw is internally built (well-formed), so wrap directly instead of
+		// re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(raw, service)
 		resp, _, err := httpClient.Execute(req, http.Options{})
 		if err != nil {
 			if errors.Is(err, hosterrors.ErrUnresponsiveHost) {

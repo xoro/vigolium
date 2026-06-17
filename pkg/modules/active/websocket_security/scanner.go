@@ -168,11 +168,9 @@ func (m *Module) sendUpgrade(
 		return false, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modified))
-	if err != nil {
-		return false, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -219,11 +217,9 @@ func (m *Module) sendUpgradeNoOrigin(
 		_ = err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modified))
-	if err != nil {
-		return false, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// RemoveHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {

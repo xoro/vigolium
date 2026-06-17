@@ -177,11 +177,9 @@ func (m *Module) testRedirectURIManipulation(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modifiedRaw is internally built (well-formed), so wrap directly
+		// instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 		if err != nil {
@@ -304,11 +302,9 @@ func (m *Module) testResponseTypeDowngrade(
 		return nil, err
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modifiedRaw is internally built (well-formed), so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -379,11 +375,9 @@ func (m *Module) confirmRedirectReflection(
 		if e != nil {
 			return false, e
 		}
-		req, e := httpmsg.ParseRawRequest(string(raw))
-		if e != nil {
-			return false, e
-		}
-		req = req.WithService(ctx.Service())
+		// raw is internally built (well-formed), so wrap directly instead of
+		// re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 		resp, _, e := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 		if e != nil {
 			return false, e
@@ -418,11 +412,9 @@ func (m *Module) responseTypeRejectsInvalid(
 	if err != nil {
 		return true
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return true
-	}
-	req = req.WithService(ctx.Service())
+	// raw is internally built (well-formed), so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true, NoClustering: true})
 	if err != nil {
 		return true

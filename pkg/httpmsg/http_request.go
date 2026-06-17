@@ -575,36 +575,47 @@ func (b *requestBuilder) build(original *HttpRequest) *HttpRequest {
 		}
 	}
 
-	// Apply body change using direct replacement with cached bodyOffset
+	// Apply body change. Fast path: when the request has a clean header block with
+	// exactly one Content-Length whose value precedes the body, splice the new body
+	// and patch Content-Length in a single allocation — no header re-parse, no
+	// full message rebuild. This is the common shape for body fuzzers / method-CT
+	// swaps, which previously paid ExtractAllHeaders twice plus a BuildHttpMessage
+	// rebuild per call.
 	if b.bodySet {
-		original.ensureParsed()
-		original.mu.RLock()
-		bodyOffset := original.bodyOffset
-		original.mu.RUnlock()
-
-		// Find current body offset in potentially modified raw
-		_, _, currentBodyOffset, _ := ExtractAllHeaders(raw)
-
-		if currentBodyOffset > 0 && currentBodyOffset <= len(raw) {
-			// Allocate exact size needed and replace body directly
-			newSize := currentBodyOffset + len(b.body)
-			newRaw := make([]byte, newSize)
-			copy(newRaw, raw[:currentBodyOffset])
-			copy(newRaw[currentBodyOffset:], b.body)
+		if newRaw, ok := replaceBodyWithCL(raw, b.body); ok {
 			raw = newRaw
-		} else if bodyOffset > 0 {
-			// Fallback: use original body offset if current parse failed
-			newSize := bodyOffset + len(b.body)
-			newRaw := make([]byte, newSize)
-			copy(newRaw, raw[:bodyOffset])
-			copy(newRaw[bodyOffset:], b.body)
-			raw = newRaw
-		}
+		} else {
+			// Slow path: locate the body offset, splice, then rebuild Content-Length
+			// (covers absent/duplicate Content-Length and unparseable headers).
+			original.ensureParsed()
+			original.mu.RLock()
+			bodyOffset := original.bodyOffset
+			original.mu.RUnlock()
 
-		// Update Content-Length header
-		raw, err = UpdateContentLength(raw)
-		if err != nil {
-			zap.L().Debug("Apply: failed to update content-length", zap.Error(err))
+			// Find current body offset in potentially modified raw
+			_, _, currentBodyOffset, _ := ExtractAllHeaders(raw)
+
+			if currentBodyOffset > 0 && currentBodyOffset <= len(raw) {
+				// Allocate exact size needed and replace body directly
+				newSize := currentBodyOffset + len(b.body)
+				newRaw := make([]byte, newSize)
+				copy(newRaw, raw[:currentBodyOffset])
+				copy(newRaw[currentBodyOffset:], b.body)
+				raw = newRaw
+			} else if bodyOffset > 0 {
+				// Fallback: use original body offset if current parse failed
+				newSize := bodyOffset + len(b.body)
+				newRaw := make([]byte, newSize)
+				copy(newRaw, raw[:bodyOffset])
+				copy(newRaw[bodyOffset:], b.body)
+				raw = newRaw
+			}
+
+			// Update Content-Length header
+			raw, err = UpdateContentLength(raw)
+			if err != nil {
+				zap.L().Debug("Apply: failed to update content-length", zap.Error(err))
+			}
 		}
 	}
 
@@ -618,6 +629,32 @@ func (b *requestBuilder) build(original *HttpRequest) *HttpRequest {
 		raw:     raw,
 		service: service,
 	}
+}
+
+// replaceBodyWithCL replaces the request body with newBody and rewrites the
+// Content-Length value in place, in a single allocation and with no header
+// re-parse or message rebuild. It mirrors ParameterInsertionPoint.buildWithContentLength.
+//
+// It succeeds (ok==true) only when raw has a parseable header block with exactly
+// one Content-Length header whose value lies before the body — the common case.
+// Otherwise it returns ok==false so the caller can fall back to the
+// splice + UpdateContentLength slow path (absent/duplicate Content-Length, or
+// headers that don't parse). The eligibility check is shared with the
+// insertion-point fast path via computeCLRewriteRaw.
+func replaceBodyWithCL(raw, newBody []byte) ([]byte, bool) {
+	cl := computeCLRewriteRaw(raw)
+	if !cl.fast {
+		return nil, false
+	}
+
+	clStr := intToString(len(newBody))
+	resultSize := cl.valueStart + len(clStr) + (cl.bodyOffset - cl.valueEnd) + len(newBody)
+	result := make([]byte, resultSize)
+	n := copy(result, raw[:cl.valueStart])                // headers up to old Content-Length value
+	n += copy(result[n:], clStr)                          // new Content-Length value
+	n += copy(result[n:], raw[cl.valueEnd:cl.bodyOffset]) // rest of headers + blank line
+	copy(result[n:], newBody)                             // new body
+	return result, true
 }
 
 // Sentinel error

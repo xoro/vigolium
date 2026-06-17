@@ -361,18 +361,27 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 	// body columns. Most findings are singletons (no duplicate), so loading their
 	// bodies here would be pure waste, repeated every feedback round. We fetch only
 	// id, rn, group_key, and the (small) additional_evidence jsonb.
+	//
+	// The matched URL is extracted once in a CTE rather than evaluating
+	// json_extract(matched_at, '$[0]') twice (PARTITION BY + group_key) per row —
+	// SQLite does not common-subexpression-eliminate across a query.
 	groupQuery := `
+		WITH base AS (
+			SELECT id, additional_evidence, module_id, severity, created_at,
+			       json_extract(matched_at, '$[0]') AS matched_url
+			FROM findings
+			WHERE project_uuid = ?` + hostFilter + `
+			  AND matched_at IS NOT NULL
+			  AND matched_at != '[]'
+			  AND matched_at != ''
+		)
 		SELECT id, additional_evidence, ROW_NUMBER() OVER (
-			PARTITION BY module_id, severity, json_extract(matched_at, '$[0]')
+			PARTITION BY module_id, severity, matched_url
 			ORDER BY created_at ASC
 		) AS rn,
 		-- Stable group key for matching survivors to duplicates
-		module_id || '|' || severity || '|' || COALESCE(json_extract(matched_at, '$[0]'), '') AS group_key
-		FROM findings
-		WHERE project_uuid = ?` + hostFilter + `
-		  AND matched_at IS NOT NULL
-		  AND matched_at != '[]'
-		  AND matched_at != ''`
+		module_id || '|' || severity || '|' || COALESCE(matched_url, '') AS group_key
+		FROM base`
 
 	type findingRow struct {
 		ID                 int64    `bun:"id"`
@@ -399,7 +408,8 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 		newEvidence      []string
 		dups             []dupRow
 	}
-	groups := make(map[string]*groupData)
+	// Group count is bounded by row count; sizing up front avoids rehashing.
+	groups := make(map[string]*groupData, len(rows))
 	for _, row := range rows {
 		g, ok := groups[row.GroupKey]
 		if !ok {
@@ -447,6 +457,13 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 		sb := bodyByID[g.survivorID]
 		g.survivorRequest = sb.Request
 		g.survivorResponse = sb.Response
+		// Pre-size: each dup contributes at most its own buildEvidence string
+		// plus any evidence it already carried.
+		evCap := 0
+		for _, d := range g.dups {
+			evCap += 1 + len(d.evidence)
+		}
+		g.newEvidence = make([]string, 0, evCap)
 		for _, d := range g.dups {
 			db := bodyByID[d.id]
 			if ev := buildEvidence(db.Request, db.Response); ev != "" {

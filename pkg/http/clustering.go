@@ -2,11 +2,10 @@ package http
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -253,19 +252,35 @@ func (rc *RequestClusterer) Execute(
 	return result.cached.ToResponseChain(), result.cached.Duration, nil
 }
 
-// computeClusterKey returns a SHA-256 hash of the raw request bytes and option flags.
+// computeClusterKey returns the request's cached content hash combined with the
+// option flags that affect HTTP behavior.
 func computeClusterKey(input *httpmsg.HttpRequestResponse, opts Options) string {
-	h := sha256.New()
+	var prefix string
 	if req := input.Request(); req != nil {
-		h.Write(req.Raw())
+		// Reuse the request's cached SHA-256 (HttpRequest.ID) instead of hashing
+		// req.Raw() a second time. ID() is already computed and cached for the
+		// host-error tracker and the insertion-point cache, so this avoids a full
+		// second SHA-256 pass over the (possibly large) request body on every
+		// clustered Execute.
+		prefix = req.ID()
 	}
-	// Encode option flags that affect HTTP behavior. RawRequestTarget must be
+	// Append the option flags verbatim — no hashing needed, the 64-char hex
+	// prefix already disambiguates the request bytes. RawRequestTarget must be
 	// part of the key: two probes can share identical raw bytes and differ only by
 	// the literal request-line target (routing-based SSRF), and collapsing them
 	// would serve the first probe's response for every target.
-	_, _ = fmt.Fprintf(h, "\x00noRedir=%t\x00raw=%t\x00ignTimeout=%t\x00rawTarget=%s",
-		opts.NoRedirects, opts.RawRequest, opts.IgnoreTimeoutTracking, opts.RawRequestTarget)
-	return hex.EncodeToString(h.Sum(nil))
+	var b strings.Builder
+	b.Grow(len(prefix) + len(opts.RawRequestTarget) + 48)
+	b.WriteString(prefix)
+	b.WriteString("\x00noRedir=")
+	b.WriteString(strconv.FormatBool(opts.NoRedirects))
+	b.WriteString("\x00raw=")
+	b.WriteString(strconv.FormatBool(opts.RawRequest))
+	b.WriteString("\x00ignTimeout=")
+	b.WriteString(strconv.FormatBool(opts.IgnoreTimeoutTracking))
+	b.WriteString("\x00rawTarget=")
+	b.WriteString(opts.RawRequestTarget)
+	return b.String()
 }
 
 // normalizeHTTPVersion returns the canonical Proto string and matching

@@ -334,11 +334,9 @@ func (m *Module) sendPayload(
 ) (string, responseSignature, bool, error) {
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return "", responseSignature{}, false, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoRedirects: true})
 	if err != nil {
@@ -353,7 +351,13 @@ func (m *Module) sendPayload(
 		return "", responseSignature{}, blocked, nil
 	}
 
-	body := resp.FullResponseString()
-	sig := newResponseSignature(resp.Response().StatusCode, body, payload)
-	return body, sig, blocked, nil
+	// The boolean differential (TRUE vs FALSE vs baseline ratio) must be computed
+	// over the response BODY only. Building the signature from the full response
+	// string would fold the header block — volatile per-request headers (Set-Cookie
+	// session blobs, Date, request-ids) — into the token multiset and body-length,
+	// adding noise that can mask a real content difference or manufacture a phantom
+	// one. The full response string is kept solely as the reported evidence.
+	fullResp := resp.FullResponseString()
+	sig := newResponseSignature(resp.Response().StatusCode, resp.Body().String(), payload)
+	return fullResp, sig, blocked, nil
 }

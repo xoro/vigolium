@@ -418,8 +418,10 @@ func exportExcludeSet() map[string]bool {
 // fatal and propagated immediately.
 //
 // When omitResponse is true the bulky raw_request/raw_response columns are not
-// selected for http_records — used by the HTML report path, which discards them
-// anyway, so they never enter memory.
+// selected for http_records (honoring an explicit --omit-response). Report
+// renderers must NOT force this on: they derive the displayed request/response
+// bodies from the raw bytes via HTTPRecord.MarshalJSON before trimming the
+// redundant raw copies, so excluding the columns blanks the report body.
 func streamExportData(ctx context.Context, db *database.DB, omitResponse bool, projectUUID string, emit func(any) error) error {
 	excluded := exportExcludeSet()
 	emitItem := func(typ string, data any) error {

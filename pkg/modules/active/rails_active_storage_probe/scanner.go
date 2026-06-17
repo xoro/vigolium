@@ -116,11 +116,9 @@ func (m *Module) detectBlanketOptions(
 		return false
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return false
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -160,11 +158,9 @@ func (m *Module) fingerprint404(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -196,11 +192,9 @@ func (m *Module) probeEndpoint(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -517,11 +511,9 @@ func (m *Module) siblingOptionsMatches(
 		return false
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return false
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

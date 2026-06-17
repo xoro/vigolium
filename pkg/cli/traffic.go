@@ -200,14 +200,9 @@ func runTraffic(cmd *cobra.Command, args []string) error {
 
 		ctx := context.Background()
 		qb := database.NewQueryBuilder(db, filters)
-		records, err := qb.Execute(ctx)
+		records, total, err := qb.ExecuteWithCount(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to query database: %w", err)
-		}
-
-		total, err := qb.Count(ctx)
-		if err != nil {
-			return fmt.Errorf("failed to count records: %w", err)
 		}
 
 		if active, tuiErr := tui.Active(trafficTUI, trafficNoTUI, globalJSON); tuiErr != nil {

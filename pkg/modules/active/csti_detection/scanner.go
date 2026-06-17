@@ -94,11 +94,9 @@ func (m *Module) ScanPerInsertionPoint(
 		probe, markers := buildCSTIProbe()
 
 		fuzzedRaw := ip.BuildRequest([]byte(probe))
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			return nil, nil
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead of
+		// re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {

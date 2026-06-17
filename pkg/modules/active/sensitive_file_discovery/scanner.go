@@ -152,11 +152,9 @@ func (m *Module) fingerprint404(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetPath produces well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -236,11 +234,9 @@ func (m *Module) probeFile(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetPath produces well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -295,9 +291,12 @@ func (m *Module) probeFile(
 
 	// Round 2 — reproduce: re-fetch the same path with the response cache bypassed.
 	// The body must stay a confirmed match AND remain textually stable, so a
-	// random / load-balanced / one-shot 200 cannot forge a finding.
+	// random / load-balanced / one-shot 200 cannot forge a finding. The candidate
+	// body is compared against both the reproduce and decoy bodies below, so its
+	// signature is built once here and reused.
+	bodySig := modkit.BodySignature(body)
 	repStatus, repBody, repOK := modkit.FetchPath(ctx, httpClient, probePath)
-	if !repOK || repStatus != 200 || !modkit.BodiesSimilar(body, repBody) {
+	if !repOK || repStatus != 200 || !modkit.BodiesSimilarSig(bodySig, repBody) {
 		return nil
 	}
 	if _, ok := sf.confirms(repBody); !ok {
@@ -311,7 +310,7 @@ func (m *Module) probeFile(
 	// content for every <dir>/*.<ext> — the "/orders/run.log equals
 	// /orders/<random>.log" false positive.
 	if decoyStatus, decoyBody, served := modkit.DecoyFileBaseline(scanCtx, ctx, httpClient, probePath); served && decoyStatus == status {
-		if modkit.BodiesSimilar(body, decoyBody) {
+		if modkit.BodiesSimilarSig(bodySig, decoyBody) {
 			return nil
 		}
 		if _, ok := sf.confirms(decoyBody); ok {
@@ -358,11 +357,9 @@ func (m *Module) probeGenericFile(
 		return nil
 	}
 
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// SetPath produces well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

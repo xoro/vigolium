@@ -40,27 +40,38 @@ func preprocessBody(body string) string {
 		return body
 	}
 
-	// Remove import/require/export statements (single combined pattern)
-	body = jsImportExportPattern.ReplaceAllString(body, `"PLACEHOLDER"`)
-
-	// Remove bundled language dictionaries
-	body = bundledLanguagePattern.ReplaceAllString(body, "")
-
-	// Remove file comments
-	lines := strings.Split(body, "\n")
-	var filtered []string
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "//[file:") {
-			continue
-		}
-		if strings.Contains(trimmed, "For license information please see") {
-			continue
-		}
-		filtered = append(filtered, line)
+	// Remove import/require/export statements (single combined pattern). The
+	// regex can only match when one of these keywords is literally present, so a
+	// cheap substring check avoids a full-body regex scan on bodies that have none.
+	if strings.Contains(body, "import") || strings.Contains(body, "require") || strings.Contains(body, "export") {
+		body = jsImportExportPattern.ReplaceAllString(body, `"PLACEHOLDER"`)
 	}
 
-	return strings.Join(filtered, "\n")
+	// Remove bundled language dictionaries — the pattern always begins with "./".
+	if strings.Contains(body, `"./`) {
+		body = bundledLanguagePattern.ReplaceAllString(body, "")
+	}
+
+	// Remove file comments. Only pay the full-body Split + Join (a copy plus a
+	// per-line slice) when a marker line is actually present — the overwhelming
+	// majority of bodies carry neither marker.
+	if strings.Contains(body, "//[file:") || strings.Contains(body, "For license information please see") {
+		lines := strings.Split(body, "\n")
+		filtered := lines[:0]
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//[file:") {
+				continue
+			}
+			if strings.Contains(trimmed, "For license information please see") {
+				continue
+			}
+			filtered = append(filtered, line)
+		}
+		body = strings.Join(filtered, "\n")
+	}
+
+	return body
 }
 
 // unescapeBody performs multiple unescaping operations.
@@ -72,23 +83,32 @@ func unescapeBody(body string) string {
 		}
 	}
 
-	// HTML unescape
+	// HTML unescape (html.UnescapeString self-short-circuits, returning body
+	// unchanged with no copy when there is no '&').
 	body = html.UnescapeString(body)
 
-	// JSON unescape
-	body = strings.ReplaceAll(body, `\"`, `"`)
-	body = strings.ReplaceAll(body, `\\`, `\`)
-	body = strings.ReplaceAll(body, `\/`, `/`)
-
-	// Escape char replacement
-	body = strings.ReplaceAll(body, `\.`, `.`)
-	body = strings.ReplaceAll(body, `\:`, `:`)
-	body = strings.ReplaceAll(body, `\;`, `;`)
-	body = strings.ReplaceAll(body, "`", "")
-	body = strings.ReplaceAll(body, "%5cn", "")
-	body = strings.ReplaceAll(body, "%5Cn", "")
-	body = strings.ReplaceAll(body, "%5cr", "")
-	body = strings.ReplaceAll(body, "%5Cr", "")
+	// JSON / escape-char replacement. Every remaining target contains a
+	// backslash, a backtick, or a percent sign, so one presence check per group
+	// skips the whole group — including its Count scans — when that escape char
+	// is absent, which is the common case for already-clean bodies. Order within
+	// each group is preserved (e.g. \" before \\).
+	if strings.IndexByte(body, '\\') >= 0 {
+		body = strings.ReplaceAll(body, `\"`, `"`)
+		body = strings.ReplaceAll(body, `\\`, `\`)
+		body = strings.ReplaceAll(body, `\/`, `/`)
+		body = strings.ReplaceAll(body, `\.`, `.`)
+		body = strings.ReplaceAll(body, `\:`, `:`)
+		body = strings.ReplaceAll(body, `\;`, `;`)
+	}
+	if strings.IndexByte(body, '`') >= 0 {
+		body = strings.ReplaceAll(body, "`", "")
+	}
+	if strings.Contains(body, "%5") {
+		body = strings.ReplaceAll(body, "%5cn", "")
+		body = strings.ReplaceAll(body, "%5Cn", "")
+		body = strings.ReplaceAll(body, "%5cr", "")
+		body = strings.ReplaceAll(body, "%5Cr", "")
+	}
 
 	return body
 }

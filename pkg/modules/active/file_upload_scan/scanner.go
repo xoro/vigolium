@@ -79,11 +79,8 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modified))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modified is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -203,11 +200,8 @@ func (m *Module) fetchPath(
 		return "", err
 	}
 
-	getReq, err := httpmsg.ParseRawRequest(string(modified))
-	if err != nil {
-		return "", err
-	}
-	getReq = getReq.WithService(ctx.Service())
+	// modified is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	getReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, err := httpClient.Execute(getReq, http.Options{})
 	if err != nil {

@@ -113,6 +113,19 @@ func (qb *QueryBuilder) Execute(ctx context.Context) ([]*HTTPRecord, error) {
 	return records, nil
 }
 
+// ExecuteWithCount runs the filtered query and returns the matching page of
+// records alongside the total unfiltered count in a single round-trip via
+// Bun's ScanAndCount. Use this for paginated views instead of Execute + Count,
+// which issues two separate queries.
+func (qb *QueryBuilder) ExecuteWithCount(ctx context.Context) ([]*HTTPRecord, int64, error) {
+	records := make([]*HTTPRecord, 0)
+	count, err := qb.BuildRecordsQuery().ScanAndCount(ctx, &records)
+	if err != nil {
+		return nil, 0, err
+	}
+	return records, int64(count), nil
+}
+
 // applyFilters applies all filter conditions to the query
 func (qb *QueryBuilder) applyFilters(query *bun.SelectQuery) {
 	// Project scoping (always applied when set)
@@ -202,12 +215,16 @@ func (qb *QueryBuilder) applyFilters(query *bun.SelectQuery) {
 	// Fuzzy search (broad, across metadata + full request/response content)
 	if qb.filters.FuzzyTerm != "" {
 		if qb.db.HasFTS() && qb.db.Driver() != "postgres" {
-			// FTS5 MATCH is orders of magnitude faster than CAST LIKE.
-			// Also check metadata columns that aren't in the FTS index.
+			// FTS5 MATCH (url/path/hostname tokens) is orders of magnitude faster
+			// than CAST LIKE for metadata hits. The raw_request/raw_response
+			// corpus is no longer in the FTS index (it was dropped to halve ingest
+			// write cost — see db.go), so body matches fall back to a CAST LIKE
+			// scan here, plus the metadata columns that were never in the index.
 			p := "%" + qb.filters.FuzzyTerm + "%"
 			query.Where(`(r.rowid IN (SELECT rowid FROM http_records_fts WHERE http_records_fts MATCH ?)
-				OR r.method LIKE ? OR r.request_content_type LIKE ? OR r.response_content_type LIKE ? OR r.source LIKE ?)`,
-				qb.filters.FuzzyTerm+"*", p, p, p, p)
+				OR r.method LIKE ? OR r.request_content_type LIKE ? OR r.response_content_type LIKE ? OR r.source LIKE ?
+				OR CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?)`,
+				qb.filters.FuzzyTerm+"*", p, p, p, p, p, p)
 		} else if qb.db.HasFTS() && qb.db.Driver() == "postgres" {
 			p := "%" + qb.filters.FuzzyTerm + "%"
 			query.Where(`(r.search_vector @@ plainto_tsquery('english', ?)
@@ -228,23 +245,24 @@ func (qb *QueryBuilder) applyFilters(query *bun.SelectQuery) {
 	}
 
 	// Header and body searches scan raw_request/raw_response — these contain
-	// both headers and body, so HeaderSearch and BodySearch hit the same corpus.
-	if qb.filters.HeaderSearch != "" {
-		searchPattern := "%" + qb.filters.HeaderSearch + "%"
-		query.Where("(CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?)",
-			searchPattern, searchPattern)
-	}
+	// both headers and body, so HeaderSearch and BodySearch hit the same corpus
+	// via the same strategy (FTS5 when available, CAST LIKE fallback).
+	qb.applyRawCorpusSearch(query, qb.filters.HeaderSearch)
+	qb.applyRawCorpusSearch(query, qb.filters.BodySearch)
+}
 
-	if qb.filters.BodySearch != "" {
-		if qb.db.HasFTS() && qb.db.Driver() != "postgres" {
-			query.Where(`r.rowid IN (SELECT rowid FROM http_records_fts WHERE http_records_fts MATCH ?)`,
-				qb.filters.BodySearch+"*")
-		} else {
-			searchPattern := "%" + qb.filters.BodySearch + "%"
-			query.Where(`(CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?)`,
-				searchPattern, searchPattern)
-		}
+// applyRawCorpusSearch adds a substring filter over the raw_request/raw_response
+// corpus via a CAST(...) LIKE scan. The SQLite FTS index intentionally no longer
+// holds the raw blobs (they were dropped to halve ingest write cost, see db.go),
+// so body and header searches scan the bodies directly on both drivers. A blank
+// term is a no-op.
+func (qb *QueryBuilder) applyRawCorpusSearch(query *bun.SelectQuery, term string) {
+	if term == "" {
+		return
 	}
+	searchPattern := "%" + term + "%"
+	query.Where("(CAST(r.raw_request AS TEXT) LIKE ? OR CAST(r.raw_response AS TEXT) LIKE ?)",
+		searchPattern, searchPattern)
 }
 
 // applySorting applies sorting to the query

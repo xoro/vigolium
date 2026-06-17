@@ -104,7 +104,7 @@ func (m *Module) ScanPerRequest(
 	// there is nothing in front to poison — skip without sending any traffic. When
 	// no response was captured, fall through to the active pre-flight below.
 	if orig := ctx.Response(); orig != nil {
-		if !infra.CacheState(orig.Header).Layer {
+		if !infra.CacheStateFromHeaders(orig.Headers()).Layer {
 			return nil, nil
 		}
 	}
@@ -288,11 +288,9 @@ func (m *Module) send(
 		}
 	}
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return probeResult{}, nil
-	}
-	req = req.WithService(ctx.Service())
+	// SetPath/apply produce well-formed raw, so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	// NoClustering: the requester normally de-duplicates identical requests and
 	// replays a cached response — that would hide the cache HIT this module must

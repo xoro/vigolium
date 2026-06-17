@@ -5,9 +5,11 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Prism from 'prismjs';
 import 'prismjs/components/prism-markdown';
-import { Eye, Code, Copy, Check, Link } from 'lucide-react';
+import { Eye, Code, Copy, Check, Link, Terminal } from 'lucide-react';
 import { useFinding, useUpdateFindingStatus } from '@/api/hooks';
 import { formatDate } from '@/lib/formatters';
+import { rawRequestToCurl } from '@/lib/curl';
+import Dropdown from './Dropdown';
 import { SEVERITY_COLORS, CONFIDENCE_COLORS } from './theme';
 import { FINDING_STATUSES } from '@/api/types';
 import { useToast } from '@/contexts/ToastContext';
@@ -67,11 +69,12 @@ export default function FindingDetailPanel({ findingId, onClose }: Props) {
   const { data: finding, isLoading, isError } = useFinding(findingId);
   const updateStatus = useUpdateFindingStatus();
   const { toast } = useToast();
-  const [descTab, setDescTab] = useState<'rendered' | 'raw'>('rendered');
+  const [descTab, setDescTab] = useState<'rendered' | 'raw'>('raw');
   const [copied, setCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [copiedExtracted, setCopiedExtracted] = useState(false);
   const [copiedRequest, setCopiedRequest] = useState(false);
+  const [copiedCurl, setCopiedCurl] = useState(false);
   const [copiedResponse, setCopiedResponse] = useState(false);
   const [evidenceTab, setEvidenceTab] = useState(0);
   const [copiedEvidence, setCopiedEvidence] = useState(false);
@@ -126,11 +129,11 @@ export default function FindingDetailPanel({ findingId, onClose }: Props) {
             )}
             <div className="flex items-center gap-1">
               <span className="text-[#708e8e]">status: </span>
-              <select
+              <Dropdown
                 value={finding.status || 'draft'}
-                disabled={updateStatus.isPending}
-                onChange={(e) => {
-                  const next = e.target.value;
+                options={FINDING_STATUSES.map((s) => ({ value: s, label: s }))}
+                onChange={(next) => {
+                  if (next === (finding.status || 'draft')) return;
                   updateStatus.mutate(
                     { id: finding.id, status: next },
                     {
@@ -139,12 +142,7 @@ export default function FindingDetailPanel({ findingId, onClose }: Props) {
                     }
                   );
                 }}
-                className="bg-transparent border border-[#bbc3c4] text-[#005661] text-xs px-1 py-px focus:outline-none focus:border-[#0078c8] disabled:opacity-50"
-              >
-                {FINDING_STATUSES.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
+              />
             </div>
             {finding.cvss_score != null && finding.cvss_score > 0 && (
               <div><span className="text-[#708e8e]">cvss: </span><span className="text-[#005661] font-semibold">{finding.cvss_score}</span></div>
@@ -295,6 +293,12 @@ export default function FindingDetailPanel({ findingId, onClose }: Props) {
                   className="px-1.5 py-0.5 text-[10px] border border-[#bbc3c4] text-[#708e8e] hover:text-[#005661]"
                 >
                   {copiedRequest ? <><Check size={10} className="inline-block mr-0.5 -mt-px" />copied!</> : <><Copy size={10} className="inline-block mr-0.5 -mt-px" />copy</>}
+                </button>
+                <button
+                  onClick={() => { navigator.clipboard.writeText(rawRequestToCurl(finding.request!, finding.matched_at)); setCopiedCurl(true); setTimeout(() => setCopiedCurl(false), 1500); }}
+                  className="px-1.5 py-0.5 text-[10px] border border-[#bbc3c4] text-[#708e8e] hover:text-[#005661]"
+                >
+                  {copiedCurl ? <><Check size={10} className="inline-block mr-0.5 -mt-px" />copied!</> : <><Terminal size={10} className="inline-block mr-0.5 -mt-px" />curl</>}
                 </button>
               </div>
               <pre className="bg-[#ede4d1] border border-[#bbc3c4] p-2 overflow-x-auto text-[#005661] whitespace-pre-wrap break-all max-h-64 overflow-y-auto">

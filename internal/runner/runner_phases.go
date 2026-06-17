@@ -404,6 +404,13 @@ func (r *Runner) cleanupDeparosRecords(ctx context.Context) {
 		r.scanLogger.Info("discovery", fmt.Sprintf("%s %d records", label, n))
 	}
 
+	// Refresh query-planner statistics before the dedup window queries run:
+	// discovery just bulk-inserted thousands of records, and without fresh stats
+	// SQLite plans the PARTITION-BY dedup scans against default row guesses.
+	if r.repository != nil && r.repository.DB() != nil {
+		r.repository.DB().Optimize(ctx)
+	}
+
 	if r.settings != nil && r.settings.Discovery.DeparosDedup.IsEnabled() {
 		dedupCfg := &r.settings.Discovery.DeparosDedup
 		if dedupCfg.DropClientErrorsEnabled() {

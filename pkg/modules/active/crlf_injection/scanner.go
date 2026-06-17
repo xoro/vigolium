@@ -97,14 +97,9 @@ func (m *Module) ScanPerInsertionPoint(
 		// Build fuzzed request with payload
 		fuzzedRaw := ip.BuildRequest([]byte(fullPayload))
 
-		// Parse the fuzzed raw request to HttpRequestResponse
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if err != nil {
-			continue
-		}
-
-		// Copy HttpService from original request
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead of
+		// re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 		if err != nil {
@@ -167,11 +162,9 @@ func (m *Module) confirmCRLF(
 		payload := buildCRLFPayloads(cookieVal)[techniqueIdx]
 		fuzzedRaw := ip.BuildRequest([]byte(ip.BaseValue() + payload))
 
-		fuzzedReq, perr := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if perr != nil {
-			return false, nil // skip this technique on parse failure, not fatal
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead of
+		// re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, rerr := httpClient.Execute(fuzzedReq, http.Options{})
 		if rerr != nil {

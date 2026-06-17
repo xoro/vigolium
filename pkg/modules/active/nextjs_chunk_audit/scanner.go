@@ -183,11 +183,9 @@ func (m *Module) fetchBytes(
 	}
 	raw, _ = httpmsg.SetMethod(raw, "GET")
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return nil, false
-	}
-	req = req.WithService(ctx.Service())
+	// raw is internally built (well-formed), so wrap directly instead of
+	// re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 	if err != nil {

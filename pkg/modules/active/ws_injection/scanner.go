@@ -196,11 +196,9 @@ func (m *Module) ScanPerInsertionPoint(
 
 	for _, test := range injectionTests {
 		fuzzedRaw := ip.BuildRequest([]byte(test.payload))
-		fuzzedReq, parseErr := httpmsg.ParseRawRequest(string(fuzzedRaw))
-		if parseErr != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// BuildRequest produces well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 		resp, _, execErr := httpClient.Execute(fuzzedReq, http.Options{})
 		if execErr != nil {

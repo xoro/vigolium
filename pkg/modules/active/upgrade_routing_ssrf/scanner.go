@@ -183,11 +183,9 @@ func (m *Module) fire(
 			return 0, "", "", false, false, false
 		}
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", "", false, false, false
-	}
-	req = req.WithService(service)
+	// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, service)
 
 	resp, _, err := httpClient.Execute(req, http.Options{
 		RawRequest:       true,

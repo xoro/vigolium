@@ -115,11 +115,9 @@ func (m *Module) ScanPerRequest(
 		}
 		probeRaw, _ = httpmsg.SetMethod(probeRaw, "GET")
 
-		probeReq, err := httpmsg.ParseRawRequest(string(probeRaw))
-		if err != nil {
-			continue
-		}
-		probeReq = probeReq.WithService(ctx.Service())
+		// SetPath/SetMethod produce well-formed raw, so wrap directly instead
+		// of re-parsing on this hot path.
+		probeReq := httpmsg.NewRequestResponseRaw(probeRaw, ctx.Service())
 
 		resp, _, err := httpClient.Execute(probeReq, http.Options{})
 		if err != nil {
@@ -202,11 +200,9 @@ func get404Hash(ctx *httpmsg.HttpRequestResponse, httpClient *http.Requester) st
 	}
 	raw, _ = httpmsg.SetMethod(raw, "GET")
 
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return ""
-	}
-	req = req.WithService(ctx.Service())
+	// SetPath/SetMethod produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{})
 	if err != nil {

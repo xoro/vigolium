@@ -202,16 +202,24 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 	// Ensure MatcherStatus is true for findings
 	event.MatcherStatus = true
 
-	var data []byte
-	var err error
+	// Only marshal JSON when it is actually consumed: JSON stdout or a live
+	// output file. Console-only runs — the common CLI path — render via
+	// formatScreen, and would otherwise pay per-event JSON marshaling cost for
+	// bytes that are immediately discarded.
+	needsJSON := w.JSONOutput || w.outputFile != nil
 
-	data, err = w.formatJSON(event)
-	if err != nil {
-		return errors.Wrap(err, "could not format output")
+	var data []byte
+	if needsJSON {
+		var err error
+		data, err = w.formatJSON(event)
+		if err != nil {
+			return errors.Wrap(err, "could not format output")
+		}
+		if len(data) == 0 {
+			return nil
+		}
 	}
-	if len(data) == 0 {
-		return nil
-	}
+
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
@@ -229,7 +237,7 @@ func (w *StandardWriter) Write(event *ResultEvent) error {
 
 	if w.outputFile != nil {
 		if _, writeErr := w.outputFile.Write(data); writeErr != nil {
-			return errors.Wrap(err, "could not write to output")
+			return errors.Wrap(writeErr, "could not write to output")
 		}
 	}
 	return nil

@@ -229,11 +229,9 @@ func (m *Module) sendAndMatch(
 	httpClient *http.Requester,
 ) (matched bool, request string, headers string, fatal bool) {
 	fuzzedRaw := ip.BuildRequest([]byte(payload))
-	req, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return false, "", "", false
-	}
-	req = req.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoRedirects: true})
 	if err != nil {

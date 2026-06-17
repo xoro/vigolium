@@ -401,11 +401,9 @@ func (m *Module) probePath(
 	}
 	modifiedRaw, _ = httpmsg.ClearQueryString(modifiedRaw)
 
-	req, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return pathProbe{}
-	}
-	req.WithService(httpService)
+	// BuildRequest/SetMethod/... produce well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(modifiedRaw, httpService)
 
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: noClustering})
 	if err != nil {

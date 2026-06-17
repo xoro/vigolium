@@ -165,11 +165,9 @@ func (m *Module) tryUpgrade(
 		modified, _ = httpmsg.AddOrReplaceHeader(modified, "Origin", origin)
 	}
 
-	fuzzedReq, parseErr := httpmsg.ParseRawRequest(string(modified))
-	if parseErr != nil {
-		return false
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// AddOrReplaceHeader/RemoveHeader produce well-formed raw, so wrap directly
+	// instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modified, ctx.Service())
 
 	resp, _, execErr := httpClient.Execute(fuzzedReq, vighttp.Options{NoRedirects: true})
 	if execErr != nil {

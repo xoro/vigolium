@@ -303,6 +303,15 @@ func (e *Executor) staticStorageCandidate(rr *httpmsg.HttpRequestResponse) bool 
 // server run.
 const perHostClaimCacheSize = 16384
 
+// hostClaimKey identifies a (module, host) per-host claim. Using a struct key
+// instead of a "moduleID:host" string avoids allocating a fresh string on every
+// request for every per-host module (the claim is checked per request but only
+// won once per pair) — the struct is hashed/compared in place by the LRU's map.
+type hostClaimKey struct {
+	moduleID string
+	host     string
+}
+
 // scanCaches groups the Executor's per-scan lookup and dedup state. Every field
 // is safe for concurrent use (bounded LRU / sharded map / sync.Map).
 type scanCaches struct {
@@ -320,14 +329,15 @@ type scanCaches struct {
 
 	// perHostActiveClaimed / perHostPassiveClaimed ensure per-host modules run
 	// exactly once per (module, host) pair even with concurrent workers.
-	// Key: "moduleID:host" → struct{}. Bounded LRUs rather than unbounded
-	// sync.Maps: in a long-lived scan-on-receive executor the (module, host)
-	// key space grows with every distinct host ingested, so an unbounded map
-	// leaks for the process lifetime. The LRU caps that growth and, by evicting
-	// the least-recently-claimed pairs, lets per-host modules re-fire for a host
-	// whose claim has aged out — restoring coverage on hosts seen long ago.
-	perHostActiveClaimed  *lru.Cache[string, struct{}]
-	perHostPassiveClaimed *lru.Cache[string, struct{}]
+	// Key: hostClaimKey{moduleID, host} → struct{}. Bounded LRUs rather than
+	// unbounded sync.Maps: in a long-lived scan-on-receive executor the (module,
+	// host) key space grows with every distinct host ingested, so an unbounded
+	// map leaks for the process lifetime. The LRU caps that growth and, by
+	// evicting the least-recently-claimed pairs, lets per-host modules re-fire
+	// for a host whose claim has aged out — restoring coverage on hosts seen long
+	// ago.
+	perHostActiveClaimed  *lru.Cache[hostClaimKey, struct{}]
+	perHostPassiveClaimed *lru.Cache[hostClaimKey, struct{}]
 
 	// moduleTechReq is a per-module required-tech cache. Populated lazily by
 	// passesTechFilter since module tags are immutable for the scan's lifetime.
@@ -411,8 +421,8 @@ func NewExecutor(
 	// Bounded LRUs for the per-host run-once claims (size <= 0 is the only error
 	// lru.New returns, and perHostClaimCacheSize is a positive constant, so the
 	// ignored error is provably nil).
-	perHostActiveClaimed, _ := lru.New[string, struct{}](perHostClaimCacheSize)
-	perHostPassiveClaimed, _ := lru.New[string, struct{}](perHostClaimCacheSize)
+	perHostActiveClaimed, _ := lru.New[hostClaimKey, struct{}](perHostClaimCacheSize)
+	perHostPassiveClaimed, _ := lru.New[hostClaimKey, struct{}](perHostClaimCacheSize)
 	storageHosts, _ := lru.New[string, struct{}](perHostClaimCacheSize)
 
 	e := &Executor{
@@ -805,7 +815,9 @@ drainLoop:
 					}
 					r.ModuleType = database.ModuleTypePassive
 					r.FindingSource = database.FindingSourceDynamicAssessment
-					e.emitResult(ctx, r)
+					// Deferred batch findings carry their own request; no baseline
+					// item is in scope here, so take the standard parse/save path.
+					e.emitResult(ctx, r, nil)
 				}
 			}
 		}

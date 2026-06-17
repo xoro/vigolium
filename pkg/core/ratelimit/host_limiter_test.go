@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"container/heap"
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -66,6 +67,62 @@ func TestHostRateLimiter_AcquireRelease(t *testing.T) {
 	h.Release(host)
 	if err := h.Acquire(context.Background(), host); err != nil {
 		t.Fatalf("Acquire after Release: %v", err)
+	}
+}
+
+func TestHostRateLimiter_AcquireWithTimeoutContext_Cancellation(t *testing.T) {
+	// A long acquire timeout means a slow unblock would clearly exceed the
+	// test's tolerance — proving the caller context, not the limiter's own
+	// acquireTimeout, is what releases the waiter.
+	h := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost:     1,
+		EvictInterval:  time.Hour,
+		AcquireTimeout: 10 * time.Second,
+	})
+	defer func() { _ = h.Close() }()
+
+	const host = "example.com"
+
+	// Occupy the only slot so the next acquire must wait.
+	if err := h.Acquire(context.Background(), host); err != nil {
+		t.Fatalf("initial Acquire: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- h.AcquireWithTimeoutContext(ctx, host)
+	}()
+
+	cancel() // caller-side shutdown
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AcquireWithTimeoutContext did not unblock on caller-context cancellation " +
+			"(it waited on the limiter's own timeout instead of ctx)")
+	}
+}
+
+func TestHostRateLimiter_AcquireWithTimeoutContext_Timeout(t *testing.T) {
+	// With no caller deadline, the limiter's own acquireTimeout must still fire.
+	h := NewHostRateLimiter(HostRateLimiterConfig{
+		MaxPerHost:     1,
+		EvictInterval:  time.Hour,
+		AcquireTimeout: 30 * time.Millisecond,
+	})
+	defer func() { _ = h.Close() }()
+
+	const host = "example.com"
+	if err := h.Acquire(context.Background(), host); err != nil {
+		t.Fatalf("initial Acquire: %v", err)
+	}
+
+	if err := h.AcquireWithTimeoutContext(context.Background(), host); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}
 }
 

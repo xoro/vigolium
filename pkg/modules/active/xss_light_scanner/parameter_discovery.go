@@ -103,12 +103,9 @@ func (pd *ParameterDiscovery) DiscoverEchoParams(
 		return nil, err
 	}
 
-	// Send request
-	parsedReq, err := httpmsg.ParseRawRequest(string(modifiedRequest))
-	if err != nil {
-		return nil, err
-	}
-	parsedReq = parsedReq.WithService(ctx.Service())
+	// Send request. SetQueryString produces well-formed raw, so wrap directly
+	// instead of re-parsing on this hot path.
+	parsedReq := httpmsg.NewRequestResponseRaw(modifiedRequest, ctx.Service())
 
 	resp, _, err := httpClient.Execute(parsedReq, http.Options{})
 	if err != nil {

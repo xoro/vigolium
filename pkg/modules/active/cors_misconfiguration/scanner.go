@@ -213,11 +213,9 @@ func corsHeaders(
 	if err != nil {
 		return 0, "", "", nil, false
 	}
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", "", raw, false
-	}
-	req = req.WithService(ctx.Service())
+	// AddOrReplaceHeader produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return 0, "", "", raw, false

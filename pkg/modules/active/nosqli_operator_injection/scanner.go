@@ -155,11 +155,9 @@ func (m *Module) testPayload(
 	}
 
 	fuzzedRaw := ip.BuildRequest([]byte(fuzzedValue))
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return nil, nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -294,11 +292,9 @@ func (m *Module) freshStatus(
 	httpClient *http.Requester,
 	value string,
 ) (int, error) {
-	req, err := httpmsg.ParseRawRequest(string(ip.BuildRequest([]byte(value))))
-	if err != nil {
-		return 0, err
-	}
-	req = req.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(ip.BuildRequest([]byte(value)), ctx.Service())
 	resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true})
 	if err != nil {
 		return 0, err
@@ -463,11 +459,9 @@ func (m *Module) measureDuration(
 	value string,
 ) (time.Duration, string, bool, error) {
 	raw := ip.BuildRequest([]byte(value))
-	req, err := httpmsg.ParseRawRequest(string(raw))
-	if err != nil {
-		return 0, "", false, err
-	}
-	req = req.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 
 	start := time.Now()
 	resp, _, err := httpClient.Execute(req, http.Options{})
@@ -753,11 +747,9 @@ func (m *Module) probeBoolean(
 	payloadValue string,
 ) (boolSample, error) {
 	fuzzedValue := ip.BaseValue() + payloadValue
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(ip.BuildRequest([]byte(fuzzedValue))))
-	if err != nil {
-		return boolSample{binary: true}, nil // unparseable — treat as non-analyzable
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(ip.BuildRequest([]byte(fuzzedValue)), ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{NoClustering: true})
 	if err != nil {

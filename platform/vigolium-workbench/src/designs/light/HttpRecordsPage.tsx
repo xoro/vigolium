@@ -7,6 +7,7 @@ import { Activity, Globe, Server, Search, RefreshCw, List, Layers, ChevronRight,
 import { useHttpRecords, useScanRecords, useDeleteHttpRecord } from '@/api/hooks';
 import { withDemoKey } from '@/api/client';
 import { useToast } from '@/contexts/ToastContext';
+import { useProjectContext } from '@/contexts/ProjectContext';
 import type { HTTPRecord, HttpRecordsQueryParams } from '@/api/types';
 
 import { registerAgGrid } from '@/lib/ag-grid-register';
@@ -237,6 +238,33 @@ export default function HttpRecordsPage({ initialId }: { initialId?: string | nu
 
   const { data, isLoading, refetch, isFetching } = useHttpRecords(queryParams);
 
+  // Accumulate the distinct `source` values seen across loaded record pages so
+  // the dropdown only offers sources that actually exist in the data. Records
+  // are paginated and server-filtered by source, so we union new values in over
+  // time rather than reading a single page; reset when the project changes.
+  const { projectUUID } = useProjectContext();
+  const [seenSources, setSeenSources] = useState<string[]>([]);
+  useEffect(() => { setSeenSources([]); }, [projectUUID]);
+  useEffect(() => {
+    if (!data?.data?.length) return;
+    setSeenSources((prev) => {
+      const set = new Set(prev);
+      let changed = false;
+      for (const r of data.data) {
+        if (r.source && !set.has(r.source)) { set.add(r.source); changed = true; }
+      }
+      return changed ? Array.from(set).sort() : prev;
+    });
+  }, [data?.data]);
+
+  const sourceOptions = useMemo(
+    () => [
+      { value: '', label: 'source:all' },
+      ...seenSources.map((s) => ({ value: s, label: s })),
+    ],
+    [seenSources]
+  );
+
   const columnDefs = useMemo<ColDef<HTTPRecord>[]>(
     () => [
       { width: 40, sortable: false, filter: false, resizable: false },
@@ -298,6 +326,14 @@ export default function HttpRecordsPage({ initialId }: { initialId?: string | nu
   }, []);
 
   const resetOffset = () => setParams((p) => ({ ...p, offset: 0 }));
+
+  const hasActiveFilters = !!(methodFilter || hostnameFilter || sourceFilter || statusFilter || searchInput || filterWithTitle || filterWithRemarks || filterHideStatic);
+  const clearFilters = () => {
+    setMethodFilter(''); setHostnameFilter(''); setSourceFilter('');
+    setStatusFilter(''); setSearchInput('');
+    setFilterWithTitle(false); setFilterWithRemarks(false); setFilterHideStatic(false);
+    resetOffset();
+  };
 
   const isExternalFilterPresent = useCallback(
     () => statusFilter !== '' || hostnameFilter !== '' || sourceFilter !== '' || filterWithTitle || filterWithRemarks || filterHideStatic,
@@ -413,21 +449,19 @@ export default function HttpRecordsPage({ initialId }: { initialId?: string | nu
               </div>
             </div>
             <div className="flex items-center gap-2 text-xs flex-wrap">
-              {(methodFilter || hostnameFilter || sourceFilter || statusFilter || searchInput || filterWithTitle || filterWithRemarks || filterHideStatic) && (
-                <button
-                  onClick={() => {
-                    setMethodFilter(''); setHostnameFilter(''); setSourceFilter('');
-                    setStatusFilter(''); setSearchInput('');
-                    setFilterWithTitle(false); setFilterWithRemarks(false); setFilterHideStatic(false);
-                    resetOffset();
-                  }}
-                  className="flex items-center gap-0.5 px-1.5 py-0.5 border border-[#e34e1c]/40 text-[#e34e1c] hover:bg-[#e34e1c]/10 transition-colors"
-                  title="Clear all filters"
-                >
-                  <X className="w-3 h-3" />
-                  clear
-                </button>
-              )}
+              <button
+                onClick={clearFilters}
+                disabled={!hasActiveFilters}
+                title="Clear all filters"
+                className={`flex items-center gap-1 border text-xs px-2 py-0.5 transition-colors ${
+                  hasActiveFilters
+                    ? 'border-[#e34e1c]/50 text-[#e34e1c] bg-[#f6edda] hover:bg-[#e34e1c]/10'
+                    : 'border-[#bbc3c4] text-[#708e8e] bg-[#f6edda] opacity-40 cursor-default'
+                }`}
+              >
+                <X className="w-3 h-3" />
+                clear
+              </button>
               <Dropdown
                 value={methodFilter}
                 icon={<Activity className="w-3 h-3" />}
@@ -441,10 +475,12 @@ export default function HttpRecordsPage({ initialId }: { initialId?: string | nu
                 <Globe className="w-3 h-3 text-[#708e8e] ml-1.5 shrink-0" />
                 <input type="text" value={hostnameFilter} onChange={(e) => { setHostnameFilter(e.target.value); resetOffset(); }} placeholder="host..." className="bg-transparent text-[#005661] text-xs px-1.5 py-0.5 w-28 focus:outline-none" />
               </div>
-              <div className="flex items-center border border-[#bbc3c4] bg-[#f6edda] focus-within:border-[#0078c8]/50">
-                <Server className="w-3 h-3 text-[#708e8e] ml-1.5 shrink-0" />
-                <input type="text" value={sourceFilter} onChange={(e) => { setSourceFilter(e.target.value); resetOffset(); }} placeholder="source..." className="bg-transparent text-[#005661] text-xs px-1.5 py-0.5 w-20 focus:outline-none" />
-              </div>
+              <Dropdown
+                value={sourceFilter}
+                icon={<Server className="w-3 h-3" />}
+                options={sourceOptions}
+                onChange={(v) => { setSourceFilter(v); resetOffset(); }}
+              />
               <div className="flex items-center gap-0.5">
                 {[
                   { value: '', label: 'ALL' },

@@ -193,11 +193,9 @@ func (m *Module) probePayload(
 		return "", "", "", "", false, nil
 	}
 
-	fuzzedReq, perr := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if perr != nil {
-		return "", "", "", "", false, nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	resp, _, rerr := httpClient.Execute(fuzzedReq, http.Options{})
 	if rerr != nil {

@@ -179,11 +179,9 @@ func (m *Module) attempt(
 	hashPayload string,
 ) (*output.ResultEvent, *capturedResp) {
 	fuzzedRaw := ip.BuildRequest([]byte(bodyPayload))
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return nil, nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// BuildRequest produces well-formed raw, so wrap directly instead
+	// of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	plain, err := sendAndCapture(httpClient, fuzzedReq)
 	if err != nil || plain == nil {

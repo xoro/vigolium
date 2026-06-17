@@ -197,11 +197,8 @@ func (m *Module) probeUserPath(ctx *httpmsg.HttpRequestResponse, httpClient *htt
 	if err != nil {
 		return ""
 	}
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return ""
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {
@@ -262,11 +259,8 @@ func (m *Module) probeJsonAPI(ctx *httpmsg.HttpRequestResponse, httpClient *http
 	if err != nil {
 		return nil
 	}
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-	if err != nil {
-		return nil
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 	resp, _, err := httpClient.Execute(fuzzedReq, http.Options{})
 	if err != nil {

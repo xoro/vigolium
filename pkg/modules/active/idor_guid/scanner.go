@@ -154,11 +154,8 @@ func (m *Module) tryPredictedID(
 	technique string,
 ) (*output.ResultEvent, error) {
 	fuzzedRaw := ip.BuildRequest([]byte(predictedID))
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// fuzzedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	// Public-navigation gate: a predicted neighbor the baseline page already links
 	// to (pagination Next/Prev, sibling hrefs, catalog entries) is intended public

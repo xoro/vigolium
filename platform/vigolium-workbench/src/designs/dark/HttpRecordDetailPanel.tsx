@@ -2,6 +2,7 @@
 
 import { useHttpRecord } from '@/api/hooks';
 import { formatDate, formatBytes } from '@/lib/formatters';
+import { rawRequestToCurl } from '@/lib/curl';
 import { METHOD_COLORS, STATUS_COLORS } from './theme';
 import { Copy, Check, Filter } from 'lucide-react';
 import { useState, useCallback } from 'react';
@@ -38,6 +39,49 @@ function CopyButton({ text, label }: { text: string; label: string }) {
       {copied ? 'copied' : label}
     </button>
   );
+}
+
+// HighlightedResponse renders a raw HTTP response with the status line and
+// header names colorized; the body is left untouched.
+function HighlightedResponse({ text }: { text: string }) {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const sep = normalized.indexOf('\n\n');
+  const head = sep === -1 ? normalized : normalized.slice(0, sep);
+  const body = sep === -1 ? '' : normalized.slice(sep + 2);
+  const lines = head.split('\n');
+
+  const out: React.ReactNode[] = [];
+  lines.forEach((line, i) => {
+    if (i > 0) out.push('\n');
+    if (i === 0) {
+      const m = line.match(/^(\S+)\s+(\d{3})(.*)$/);
+      if (m) {
+        const code = parseInt(m[2], 10);
+        const color = STATUS_COLORS[`${Math.floor(code / 100)}xx`] || '#918175';
+        out.push(
+          <span key={`l${i}`}>
+            <span className="text-[#918175]">{m[1]} </span>
+            <span className="font-bold" style={{ color }}>{m[2]}{m[3]}</span>
+          </span>
+        );
+        return;
+      }
+    }
+    const idx = line.indexOf(':');
+    if (i > 0 && idx > 0) {
+      out.push(
+        <span key={`l${i}`}>
+          <span className="text-[#68a8e4]">{line.slice(0, idx)}</span>
+          {line.slice(idx)}
+        </span>
+      );
+    } else {
+      out.push(<span key={`l${i}`}>{line}</span>);
+    }
+  });
+  if (sep !== -1) out.push(<span key="body">{'\n\n' + body}</span>);
+
+  return <>{out}</>;
 }
 
 export default function HttpRecordDetailPanel({ uuid, onClose, onFilterHostname }: Props) {
@@ -140,6 +184,7 @@ export default function HttpRecordDetailPanel({ uuid, onClose, onFilterHostname 
               <div className="flex items-center gap-1.5 mb-0.5">
                 <span className="text-[#918175]">raw_request:</span>
                 <CopyButton text={safeAtob(record.raw_request)} label="request" />
+                <CopyButton text={rawRequestToCurl(safeAtob(record.raw_request), [record.url])} label="curl" />
               </div>
               <pre className="bg-[#141310] border border-[#2e2b26] p-2 overflow-x-auto text-[#fce8c3] whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
                 {safeAtob(record.raw_request)}
@@ -154,8 +199,8 @@ export default function HttpRecordDetailPanel({ uuid, onClose, onFilterHostname 
                 <span className="text-[#918175]">raw_response:</span>
                 <CopyButton text={safeAtob(record.raw_response)} label="response" />
               </div>
-              <pre className="bg-[#141310] border border-[#2e2b26] p-2 overflow-x-auto text-[#fce8c3] whitespace-pre-wrap break-all">
-                {safeAtob(record.raw_response)}
+              <pre className="bg-[#141310] border border-[#2e2b26] p-2 overflow-x-auto text-[#fce8c3] whitespace-pre-wrap break-all max-h-96 overflow-y-auto">
+                <HighlightedResponse text={safeAtob(record.raw_response)} />
               </pre>
             </div>
           )}

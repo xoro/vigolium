@@ -321,18 +321,24 @@ func (r *Requester) executeDirectly(ctx context.Context, input *httpmsg.HttpRequ
 		host = input.Service().Host()
 	}
 
+	// Quarantined-host short-circuit BEFORE acquiring a limiter slot, so a
+	// request already known to be unresponsive doesn't consume scarce per-host
+	// concurrency only to be rejected immediately after.
+	if r.services.HostErrors != nil && r.services.HostErrors.Check(input.ID()) {
+		return nil, 0, hosterrors.ErrUnresponsiveHost
+	}
+
 	// Per-host rate limiting (concurrency control)
 	if r.services.HostLimiter != nil && host != "" {
-		if err := r.services.HostLimiter.AcquireWithTimeout(host); err != nil {
-			// Acquire timeout is our own saturation, not host distress — don't
-			// feed it back to the adaptive controller.
+		// Context-aware acquire: a scan shutdown or phase deadline unblocks a
+		// waiting acquire promptly instead of stranding the goroutine until the
+		// limiter's own acquire timeout elapses.
+		if err := r.services.HostLimiter.AcquireWithTimeoutContext(ctx, host); err != nil {
+			// Acquire timeout/cancellation is our own saturation or shutdown, not
+			// host distress — don't feed it back to the adaptive controller.
 			return nil, 0, err
 		}
 		defer r.services.HostLimiter.Release(host)
-	}
-
-	if r.services.HostErrors != nil && r.services.HostErrors.Check(input.ID()) {
-		return nil, 0, hosterrors.ErrUnresponsiveHost
 	}
 
 	start := time.Now()
@@ -377,6 +383,25 @@ func responseChainStatus(resp *httpUtils.ResponseChain) int {
 	return 0
 }
 
+// defaultHeaderTemplate is the canonical-keyed form of DefaultBrowserHeaders,
+// precomputed once at package init. doRequest merges it into each outgoing
+// request via direct map access, avoiding the per-entry strings.EqualFold checks
+// and the CanonicalHeaderKey work that http.Header.Get/Set would otherwise pay
+// on every request. User-Agent is excluded because its authoritative value is
+// resolved per request via DefaultUserAgent() (preset/random/literal override).
+// Each value is a single-element slice (cap 1) so any later Header.Add
+// reallocates rather than mutating the shared template.
+var defaultHeaderTemplate = func() http.Header {
+	h := make(http.Header, len(httpmsg.DefaultBrowserHeaders))
+	for name, value := range httpmsg.DefaultBrowserHeaders {
+		if strings.EqualFold(name, "User-Agent") {
+			continue
+		}
+		h[http.CanonicalHeaderKey(name)] = []string{value}
+	}
+	return h
+}()
+
 func (r *Requester) doRequest(ctx context.Context, input *httpmsg.HttpRequestResponse, opts Options) (*httpUtils.ResponseChain, error) {
 	start := time.Now()
 
@@ -385,19 +410,21 @@ func (r *Requester) doRequest(ctx context.Context, input *httpmsg.HttpRequestRes
 		return nil, errors.Wrap(err, "failed to build request")
 	}
 
-	// Apply default browser headers (only if not already set in request).
-	// User-Agent is resolved via DefaultUserAgent() so a configured global
-	// override (http.user_agent) wins over the built-in Chrome string.
-	for name, value := range httpmsg.DefaultBrowserHeaders {
-		if opts.DisableCompression && strings.EqualFold(name, "Accept-Encoding") {
+	// Apply default browser headers (only those not already set on the request).
+	// Template keys are canonical, so direct map access skips the per-entry
+	// canonicalization + EqualFold the old loop ran on every request.
+	for canonKey, vals := range defaultHeaderTemplate {
+		if opts.DisableCompression && canonKey == "Accept-Encoding" {
 			continue
 		}
-		if strings.EqualFold(name, "User-Agent") {
-			value = httpmsg.DefaultUserAgent()
+		if existing := req.Header[canonKey]; len(existing) == 0 || existing[0] == "" {
+			req.Header[canonKey] = vals
 		}
-		if req.Header.Get(name) == "" {
-			req.Header.Set(name, value)
-		}
+	}
+	// User-Agent is resolved via DefaultUserAgent() so a configured global
+	// override (http.user_agent) wins over the built-in Chrome string.
+	if existing := req.Header["User-Agent"]; len(existing) == 0 || existing[0] == "" {
+		req.Header.Set("User-Agent", httpmsg.DefaultUserAgent())
 	}
 
 	// Normalize host header (remove port)

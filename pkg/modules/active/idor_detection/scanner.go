@@ -212,11 +212,8 @@ func (m *Module) probeNeighbor(
 ) (*output.ResultEvent, error) {
 	// Build the probe request
 	fuzzedRaw := ip.BuildRequest([]byte(neighborID))
-	fuzzedReq, err := httpmsg.ParseRawRequest(string(fuzzedRaw))
-	if err != nil {
-		return nil, err
-	}
-	fuzzedReq = fuzzedReq.WithService(ctx.Service())
+	// fuzzedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+	fuzzedReq := httpmsg.NewRequestResponseRaw(fuzzedRaw, ctx.Service())
 
 	// Public-navigation gate: if the baseline page already links to the neighbor
 	// target (pagination "Next"/"Prev", sibling hrefs, catalog entries) the
@@ -344,9 +341,9 @@ func (m *Module) probeNeighbor(
 	}
 
 	return &output.ResultEvent{
-		ModuleID:         ModuleID,
-		Host:             host,
-		URL:              urlStr,
+		ModuleID:           ModuleID,
+		Host:               host,
+		URL:                urlStr,
 		Matched:            urlStr,
 		Request:            probeRequest,
 		Response:           probeResponse,

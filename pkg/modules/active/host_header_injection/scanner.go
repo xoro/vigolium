@@ -131,11 +131,8 @@ func (m *Module) ScanPerRequest(
 			continue
 		}
 
-		fuzzedReq, err := httpmsg.ParseRawRequest(string(modifiedRaw))
-		if err != nil {
-			continue
-		}
-		fuzzedReq = fuzzedReq.WithService(ctx.Service())
+		// modifiedRaw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		fuzzedReq := httpmsg.NewRequestResponseRaw(modifiedRaw, ctx.Service())
 
 		// NoRedirects: the host-injection sink we care about is the IMMEDIATE
 		// response (a reflected Location header is the password-reset/cache-poisoning
@@ -243,11 +240,8 @@ func (m *Module) confirmHostReflection(
 		if err != nil {
 			return false, err
 		}
-		req, err := httpmsg.ParseRawRequest(string(raw))
-		if err != nil {
-			return false, err
-		}
-		req = req.WithService(ctx.Service())
+		// raw is well-formed raw, so wrap directly instead of re-parsing on this hot path.
+		req := httpmsg.NewRequestResponseRaw(raw, ctx.Service())
 		resp, _, err := httpClient.Execute(req, http.Options{NoClustering: true, NoRedirects: true})
 		if err != nil {
 			return false, err
