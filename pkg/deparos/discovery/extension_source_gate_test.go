@@ -179,34 +179,36 @@ func TestCollectValidatedLinks_NoEagerConfirmUnderConfirmRequired(t *testing.T) 
 // = true) confirms its extension, while an out-of-scope served file is
 // scope-dropped and never confirms.
 func TestOnFileDiscovered_ConfirmsServedExtensionInScope(t *testing.T) {
-	cfg := confirmTestConfig("http://example.test/", false)
-	cfg.Target.ScopeMode = "exact" // so other.test is genuinely out of scope
-	engine, err := testEngineWithConfig(cfg)
-	require.NoError(t, err)
-	defer engine.Stop()
-	// Keep the test focused on the confirmation decision — no derivation fan-out.
-	engine.config.Target.Recursion.Enabled = false
-
-	got := map[string]bool{}
-	engine.SetExtensionConfirmCallback(func(ev ExtensionConfirmEvent) { got[ev.Extension] = true })
-
 	// In-scope served files → confirmed (this is what a real served route reaches
 	// once the analyzer classifies it as a genuine, non-soft-404 resource). The
-	// served confirmation is uniform across the candidate set, not just cfm/php.
+	// served confirmation is uniform across the candidate set, not just cfm/php — a
+	// fresh engine per case because a single host serves exactly one server-side
+	// stack (the one-stack catch-all guard, see TestConfirmExtension_OneServerStack...).
 	for _, tc := range []struct{ url, ext string }{
 		{"http://example.test/legacy/run.cfm", "cfm"},
 		{"http://example.test/app/home.jsp", "jsp"},
 		{"http://example.test/struts/save.action", "action"},
 		{"http://example.test/svc/handler.ashx", "ashx"},
 	} {
+		cfg := confirmTestConfig("http://example.test/", false)
+		cfg.Target.ScopeMode = "exact" // so other.test is genuinely out of scope
+		engine, err := testEngineWithConfig(cfg)
+		require.NoError(t, err)
+		// Keep the test focused on the confirmation decision — no derivation fan-out.
+		engine.config.Target.Recursion.Enabled = false
+
+		got := map[string]bool{}
+		engine.SetExtensionConfirmCallback(func(ev ExtensionConfirmEvent) { got[ev.Extension] = true })
+
 		require.NoError(t, engine.OnFileDiscovered(tc.url, 0, true))
 		assert.True(t, engine.isExtensionConfirmed(tc.ext), "%s should confirm once a same-host file is served", tc.ext)
 		assert.True(t, got[tc.ext], "%s callback should fire", tc.ext)
-	}
 
-	// Out-of-scope served file → scope-dropped before metadata extraction.
-	require.NoError(t, engine.OnFileDiscovered("http://other.test/x.php", 0, true))
-	assert.False(t, engine.isExtensionConfirmed("php"), "a cross-host file must not confirm")
+		// Out-of-scope served file → scope-dropped before metadata extraction.
+		require.NoError(t, engine.OnFileDiscovered("http://other.test/x.php", 0, true))
+		assert.False(t, engine.isExtensionConfirmed("php"), "a cross-host file must not confirm")
+		engine.Stop()
+	}
 }
 
 // TestOnFileDiscovered_BruteForcedHitDoesNotConfirm is the partnergears.grab.com

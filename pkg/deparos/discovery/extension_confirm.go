@@ -186,8 +186,22 @@ func (e *Engine) confirmExtension(ext, source, detail string, depth uint16) bool
 		return false
 	}
 
-	if !e.markExtensionConfirmed(ne) {
-		return false // already confirmed by an earlier source
+	confirmed, conflict := e.reserveExtension(ne)
+	if !confirmed {
+		if conflict != "" {
+			// A single application serves exactly one server-side stack, so a
+			// second, incompatible one confirming means this host is answering
+			// for extensions it does not run — a catch-all/SPA gateway echoing
+			// every guessed path. Refuse rather than wordlist-fuzz a phantom
+			// stack. The first family confirmed still fuzzes.
+			logger.Info("Skipping extension confirmation — different server stack already confirmed (catch-all signal)",
+				zap.String("extension", ne),
+				zap.String("family", serverStackFamily(ne)),
+				zap.String("confirmed_family", conflict),
+				zap.String("source", source),
+				zap.String("detail", detail))
+		}
+		return false // already confirmed, or refused by the catch-all guard
 	}
 
 	// Surface the extension to the factory's observed-extension task paths. The
@@ -209,16 +223,54 @@ func (e *Engine) confirmExtension(ext, source, detail string, depth uint16) bool
 	return true
 }
 
-// markExtensionConfirmed records ext as confirmed and returns true if it was not
-// already confirmed (i.e. this is the first confirmation).
-func (e *Engine) markExtensionConfirmed(ext string) bool {
+// reserveExtension atomically decides whether ext may be confirmed and, if so,
+// records it. It returns:
+//
+//	confirmed=true             → first confirmation; the caller should proceed.
+//	confirmed=false, conflict="" → already confirmed (a no-op repeat).
+//	confirmed=false, conflict≠"" → refused: a different server-side stack family
+//	                               (conflict) is already confirmed, so this host
+//	                               is behaving as a catch-all (see confirmExtension).
+//
+// The family check and the mark happen under one lock so concurrent confirmations
+// of two incompatible stacks can't both slip through.
+func (e *Engine) reserveExtension(ext string) (confirmed bool, conflict string) {
 	e.confirmedExtMu.Lock()
 	defer e.confirmedExtMu.Unlock()
 	if _, ok := e.confirmedExtensions[ext]; ok {
-		return false
+		return false, ""
+	}
+	if fam := serverStackFamily(ext); fam != "" {
+		for confExt := range e.confirmedExtensions {
+			if other := serverStackFamily(confExt); other != "" && other != fam {
+				return false, other
+			}
+		}
 	}
 	e.confirmedExtensions[ext] = struct{}{}
-	return true
+	return true, ""
+}
+
+// serverStackFamily maps a server-side route extension to its mutually-exclusive
+// stack family — a given application serves exactly one of these (PHP xor classic/
+// modern ASP.NET xor Java/JSP/Struts xor ColdFusion xor CGI). Returns "" for any
+// extension that is not a server-side stack (so it is never subject to the
+// one-stack-per-app catch-all guard).
+func serverStackFamily(ext string) string {
+	switch ext {
+	case "php", "php3", "php4", "php5", "phtml", "phtm":
+		return "php"
+	case "asp", "aspx", "ashx", "asmx":
+		return "aspnet"
+	case "jsp", "jspx", "jspa", "do", "action":
+		return "java"
+	case "cfm", "cfml":
+		return "coldfusion"
+	case "cgi", "pl":
+		return "cgi"
+	default:
+		return ""
+	}
 }
 
 // isExtensionConfirmed reports whether ext has already been confirmed.

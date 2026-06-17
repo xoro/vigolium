@@ -104,6 +104,72 @@ func TestConfirmExtension_DedupCallbackAndCandidateGate(t *testing.T) {
 	assert.Equal(t, "test", events[0].Source)
 }
 
+// TestConfirmExtension_OneServerStackCatchAllGuard proves the catch-all guard:
+// once one server-side stack family is confirmed, a confirmation for a *different*
+// family is refused (a single app serves exactly one stack — confirming several at
+// once is the catch-all/SPA-gateway signature from scim-bridge2.foundation.azure).
+// Same-family extensions and non-stack candidates are unaffected.
+func TestConfirmExtension_OneServerStackCatchAllGuard(t *testing.T) {
+	cfg := confirmTestConfig("http://example.test/", false)
+	cfg.Extensions.Candidates = []string{
+		"php", "php5", "aspx", "ashx", "jsp", "do", "action", "cgi", "cfm",
+	}
+	engine, err := testEngineWithConfig(cfg)
+	require.NoError(t, err)
+	defer engine.Stop()
+
+	// First stack family confirms.
+	assert.True(t, engine.confirmExtension("php", "observed", "/a.php", 0))
+	assert.True(t, engine.isExtensionConfirmed("php"))
+
+	// Same family (php5) still confirms — not mutually exclusive.
+	assert.True(t, engine.confirmExtension("php5", "observed", "/a.php5", 0))
+	assert.True(t, engine.isExtensionConfirmed("php5"))
+
+	// Every other server-side stack is refused once php is confirmed.
+	for _, ext := range []string{"aspx", "ashx", "jsp", "do", "action", "cgi", "cfm"} {
+		assert.False(t, engine.confirmExtension(ext, "observed", "/x."+ext, 0),
+			"%s must be refused after php confirmed (catch-all guard)", ext)
+		assert.False(t, engine.isExtensionConfirmed(ext),
+			"%s must NOT be marked confirmed", ext)
+	}
+}
+
+func TestServerStackFamily(t *testing.T) {
+	cases := map[string]string{
+		"php": "php", "php5": "php", "phtml": "php",
+		"asp": "aspnet", "aspx": "aspnet", "ashx": "aspnet", "asmx": "aspnet",
+		"jsp": "java", "jspx": "java", "jspa": "java", "do": "java", "action": "java",
+		"cfm": "coldfusion", "cfml": "coldfusion",
+		"cgi": "cgi", "pl": "cgi",
+		// Non-stack extensions are exempt from the one-stack guard.
+		"js": "", "json": "", "html": "", "txt": "", "": "",
+	}
+	for ext, want := range cases {
+		assert.Equal(t, want, serverStackFamily(ext), "serverStackFamily(%q)", ext)
+	}
+}
+
+func TestRedirectPreservesPath(t *testing.T) {
+	cases := []struct {
+		name           string
+		original, dest string
+		want           bool
+	}{
+		{"scheme upgrade same path", "http://h/PDC/ajaxreq.php", "https://h/PDC/ajaxreq.php", true},
+		{"identical", "https://h/debug.cgi", "https://h/debug.cgi", true},
+		{"same path added query", "https://h/x.do", "https://h/x.do?sso=1", true},
+		{"trailing slash tolerated", "https://h/admin.jsp", "https://h/admin.jsp/", true},
+		{"different path is a real reference", "https://h/foo.php", "https://h/login.jsp", false},
+		{"different dir same file", "https://h/a/x.php", "https://h/b/x.php", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, redirectPreservesPath(tc.original, tc.dest))
+		})
+	}
+}
+
 func TestConfirmExtensionsFromHeaders_Fingerprint(t *testing.T) {
 	tests := []struct {
 		name     string

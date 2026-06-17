@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.35-beta] - 2026-06-17
+
+A performance and false-positive-hardening release. The native-scan hot path and ingest write path shed redundant allocations and DB work, and the discovery engine's server-side extension-confirmation gate gains two catch-all guards so an SPA/catch-all gateway that bounces or echoes every guessed path can no longer confirm (and then wordlist-fuzz) a phantom stack. The workbench HTTP-records page gains a source filter and a curl export.
+
+### Added
+
+- **Workbench: source filter + curl export on the HTTP records page** — a source dropdown filter and an always-visible clear-filters button let you scope the records list by ingestion source, and a new curl export helper copies any record as a ready-to-run `curl` command. Detail-panel updates and regenerated static UI assets ship alongside.
+
+### Performance
+
+- **Fewer allocations and less DB work across the scan pipeline** — the executor now uses struct-keyed per-host claim LRUs and reuses the baseline-request hash for finding↔record links, the request builder gains a single-allocation body + `Content-Length` fast path, `modkit` reconfirm gets an allocation-free tokenizer, host rate-limit acquisition is context-aware, and many active scanners wrap the raw request directly instead of re-parsing it. On the database side, ingest writes are slimmed (metadata-only FTS index, a covering dedup index, projected scan-record column reads, batched remarks updates) and a new `DB.Optimize` refreshes query-planner stats on checkpoint/close.
+
+### Fixed
+
+- **Extension confirmation no longer trusts a path-preserving redirect** — a redirect that merely bounces a request back to the same path it asked for (`/x.php` → `/x.php` for an HTTP→HTTPS upgrade, an auth/cookie round-trip, or host/trailing-slash normalization) fires at the gateway before any handler runs, so it is no proof the server executes that extension. Because each such `Location` is per-path-distinct it also slips past the wildcard soft-404 filter, which on a catch-all/SPA gateway would otherwise let every guessed stack extension confirm — and get wordlist-fuzzed — at once. The new `redirectPreservesPath` guard withholds the extension confirmation in that case; names and paths are still harvested.
+- **Extension confirmation refuses a second, incompatible server stack** — a single application serves exactly one server-side stack family (PHP xor classic/modern ASP.NET xor Java/JSP/Struts xor ColdFusion xor CGI). The confirmation gate (`reserveExtension` + `serverStackFamily`) now checks the family under one lock: once one family is confirmed, a second incompatible one is a signal the host is answering for extensions it does not run — a catch-all/SPA gateway echoing every guessed path — so it is refused rather than fuzzed. The first family confirmed still fuzzes normally.
+
 ## [v0.1.34-beta] - 2026-06-16
 
 A false-positive-hardening release for the differential and behavioral injection detectors. A new shared surface gate keeps the boolean-oracle modules off cache/CDN-fronted and large dynamic-HTML pages, every boolean-blind SQLi probe is now WAF/CDN-block aware, and curated payloads are re-confirmed with randomized operands to defeat the classic WAF `1=1`-tautology false positive. NoSQLi and default-credentials gain control/reproduction gates of their own. Also adds a repeatable `-T/--target-file` flag and a `finding --confidence` filter.

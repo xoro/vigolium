@@ -932,9 +932,20 @@ func (c *PayloadCoordinator) handleRedirect(
 
 		if redirectInfo.ExtractedFilename != "" && cb.OnFileDiscovered != nil {
 			fileURL := normalizeRedirectForDiscovery(urlStr, redirectInfo.ResolvedLocation)
-			// A redirect target is a server-emitted reference (already soft-404
-			// filtered above), so its extension is trusted to confirm.
-			_ = cb.OnFileDiscovered(fileURL, depth, foundByConfirmsExtension("redirect"))
+			// A redirect only *confirms* a server-side extension when the server
+			// points us at a genuinely different resource. A path-preserving
+			// bounce — the host 3xx'ing /x.php back to /x.php (scheme upgrade,
+			// auth/cookie round-trip, host/trailing-slash normalization) — fires
+			// at the gateway before any handler runs, so it is no proof the server
+			// executes that extension. The per-path-distinct Location also slips
+			// past the wildcard soft-404 filter above, so on a catch-all/SPA
+			// gateway that bounces every path to itself this would otherwise
+			// confirm (and wordlist-fuzz) every guessed stack extension at once.
+			// Names/paths are still harvested; only the extension confirmation is
+			// withheld.
+			confirmExt := foundByConfirmsExtension("redirect") &&
+				!redirectPreservesPath(urlStr, fileURL)
+			_ = cb.OnFileDiscovered(fileURL, depth, confirmExt)
 		}
 
 		// Create Result for non-trailing-slash redirect
@@ -1016,6 +1027,29 @@ func normalizeRedirectForDiscovery(originalURL, redirectURL string) string {
 	}
 
 	return redirectURL
+}
+
+// redirectPreservesPath reports whether a redirect merely sends the request back
+// to the same path it asked for (ignoring scheme, host and query, tolerating a
+// trailing slash). Such a self-bounce — an HTTP→HTTPS upgrade, an auth/cookie
+// round-trip, host or trailing-slash normalization — is not a discovery of a new
+// resource, so its extension must not be trusted to confirm a server-side stack.
+func redirectPreservesPath(originalURL, redirectTargetURL string) bool {
+	o, err := url.Parse(originalURL)
+	if err != nil {
+		return false
+	}
+	r, err := url.Parse(redirectTargetURL)
+	if err != nil {
+		return false
+	}
+	trim := func(p string) string {
+		if len(p) > 1 {
+			return strings.TrimRight(p, "/")
+		}
+		return p
+	}
+	return trim(o.Path) == trim(r.Path)
 }
 
 // IsIdle returns true if no work is pending and no items are being processed.
