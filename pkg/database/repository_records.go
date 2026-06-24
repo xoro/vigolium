@@ -37,6 +37,7 @@ func (r *Repository) SaveRecord(ctx context.Context, httpRR *httpmsg.HttpRequest
 		return "", fmt.Errorf("failed to insert record: %w", err)
 	}
 
+	r.emitRecordSaved(record)
 	return record.UUID, nil
 }
 
@@ -109,6 +110,7 @@ func (r *Repository) SaveRecordsBatch(ctx context.Context, records []*HTTPRecord
 	uuids := make([]string, len(records))
 	for i, rec := range records {
 		uuids[i] = rec.UUID
+		r.emitRecordSaved(rec)
 	}
 	return uuids, nil
 }

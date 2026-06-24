@@ -269,11 +269,14 @@ func (m *Module) buildFinding(
 		"/"+tok, urlx.Path, provider, len(keys),
 	)
 
+	matchedURL := urlx.Scheme + "://" + urlx.Host + probePath
 	return &output.ResultEvent{
-		ModuleID:         m.ID(),
-		URL:              urlx.Scheme + "://" + urlx.Host + probePath,
-		Host:             urlx.Host,
-		Matched:          probePath,
+		ModuleID: m.ID(),
+		URL:      matchedURL,
+		Host:     urlx.Host,
+		// Full absolute URL so the console/grouping (MatchedURL prefers Matched)
+		// shows the target host like every other active module, not a bare path.
+		Matched:          matchedURL,
 		Request:          string(rawReq),
 		Response:         truncate(body, maxResponseStore),
 		FuzzingParameter: "url-path",

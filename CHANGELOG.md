@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.39-beta] - 2026-06-24
+
+Adds a no-database `fs` export format and a live filesystem mirror for the ingestion server, so a coding agent can investigate a scan or watch ingested traffic with `ls`/`grep`/`jq`. Also tightens the spider's `max-duration` so it can no longer run past its deadline.
+
+### Added
+
+- **`--format fs` — a flat, browsable filesystem export** — writes `<base>-traffic/` + `<base>-findings/` trees (per-host raw `.req`/`.resp.*` files, finding `.md` files cross-linked to their request, and a jq-friendly `index.json`) so a scan can be triaged with no DB. Available on `export`, `db export`, and the `scan`/`scan-url`/`scan-request`/`run` family; honors `--omit-response`.
+- **`vigolium server --mirror-fs <dir>`** (config `server.mirror_fs_path`) — mirrors every saved HTTP record and finding to a live `<dir>/traffic` + `<dir>/findings` filesystem tree as they are persisted, in addition to the database, so an external agent can read ingested Burp/proxy traffic as files in real time. Wired through new optional `Repository.OnRecordSaved`/`OnFindingSaved` callbacks that never block the DB save path; per-host id numbering resumes across restarts.
+
+### Fixed
+
+- **The spider now honors `max-duration` during in-flight browser operations** — the crawl deadline is bound onto rod's per-operation CDP timeouts (navigation, `WaitStable`, clicks, element lookups, form fills) rather than only being polled between actions, so an individual blocking browser op can no longer push the crawl far past its budget. Browser-level teardown is also bounded so a wedged browser can't hang shutdown.
+- **Spidering gains an overall phase budget ceiling** — each target still gets its full `max-duration`, but the whole phase is capped at `max-duration × min(targets, 8)`, so a large merged target list (CLI targets plus many in-scope DB hosts) can no longer stretch spidering out to `len(targets) × max-duration`.
+- **Further false-positive hardening** in the `path-normalization` traversal detector and the `cdn-object-traversal-listing`, `auth-headers-detect`, and `server-action-auth` modules.
+
 ## [v0.1.38-beta] - 2026-06-22
 
 A false-positive-hardening release for the host-injection, blind-OAST, file-read, and header-leak detectors, plus a scan-resume convenience. Detectors that fired on a substring match now require structural proof, and a DNS-only command-injection callback on a forwarding header is no longer reported as a confirmed shell.

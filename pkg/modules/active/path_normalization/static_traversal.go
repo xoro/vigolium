@@ -400,11 +400,15 @@ func (m *Module) buildStaticFinding(
 		shellName, path, tgt.label, markerCount,
 	)
 
+	matchedURL := urlx.Scheme + "://" + urlx.Host + path
 	return &output.ResultEvent{
-		ModuleID:         m.ID(),
-		URL:              urlx.Scheme + "://" + urlx.Host + path,
-		Host:             urlx.Host,
-		Matched:          path,
+		ModuleID: m.ID(),
+		URL:      matchedURL,
+		Host:     urlx.Host,
+		// Full absolute URL so the console/grouping (MatchedURL prefers Matched)
+		// shows the target host like every other active module; the bare path is
+		// still surfaced via ExtractedResults for the trailing annotation.
+		Matched:          matchedURL,
 		Request:          string(rawReq),
 		Response:         truncateBody(body),
 		FuzzingParameter: segment,
