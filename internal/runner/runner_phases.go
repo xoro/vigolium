@@ -842,6 +842,12 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 
 	var cursor string
 	var totalFindings int
+	// Collapse the same secret re-observed on the same URL across records (the
+	// same page can survive record-dedup under different paths/sources): emit one
+	// finding per (host, url, rule, snippet) so near-identical request/response
+	// copies don't pile up as redundant Additional Evidence. Run-scoped across
+	// batches; bounded by the number of distinct secrets, which is small.
+	seenSecret := make(map[string]struct{})
 	for {
 		// Break promptly when the phase/scan budget elapses. A single batch holds up
 		// to kingfisherBatchSize records, so without an inner-loop check below the
@@ -899,24 +905,53 @@ func (r *Runner) runKingfisherBatch(ctx context.Context, infra *phaseInfra, onRe
 					continue
 				}
 
-				// Downgrade matches that ride on a redirect or are only
-				// reflected into a response header (e.g. an OAuth identifier in
-				// a Location URL bouncing to an SSO login) — usually low-value
+				// A match clipped out of a JS unicode escape (e.g. Angular's
+				// "ɵ" exports, emitted as ɵ... in minified bundles) is
+				// source code, not a credential — drop it.
+				if secret_detect.IsJSEscapeArtifactMatch(body, f.Snippet()) {
+					continue
+				}
+
+				// Skip the same secret already reported on this URL by an earlier
+				// record (marked seen only after a match survives the guards, so a
+				// body-dependent blob/JS-escape drop never suppresses a genuine
+				// match of the same value elsewhere).
+				dedupKey := secret_detect.SecretDedupKey(record.Hostname, record.URL, f.RuleID(), f.Snippet())
+				if _, dup := seenSecret[dedupKey]; dup {
+					continue
+				}
+
+				// Downgrade matches that ride on a redirect, are only reflected
+				// into a response header (e.g. an OAuth identifier in a Location
+				// URL bouncing to an SSO login), or are echoed straight back out
+				// of the request URL/bytes (e.g. a Cloudflare Access app id in a
+				// /cdn-cgi/access/verify-code SSO URL) — usually low-value
 				// reflections rather than secrets leaked in page content. JWTs
 				// that don't decode into a usable credential (SSO pre-auth "meta"
-				// tokens) drop to Medium/Tentative. reCAPTCHA site keys (public by
-				// design) drop to Info; Google AIza… API keys drop to Medium.
+				// tokens) drop to Medium/Tentative. reCAPTCHA site keys and OAuth
+				// client IDs (public by design) drop to Info; Google AIza… API
+				// keys drop to Medium.
 				sev, conf := secret_detect.SecretFindingSeverity(
 					f.IsValidated(),
 					redirect,
 					secret_detect.SnippetInHeaderValues(f.Snippet(), headerValues),
+					secret_detect.SnippetReflectedFromRequest(f.Snippet(), record.URL, string(record.RawRequest)),
 					secret_detect.LowValueJWT(f.Snippet()),
 					secret_detect.IsReCaptchaSiteKey(f.RuleName()),
 					secret_detect.IsGoogleAPIKey(f.RuleName(), f.Snippet()),
+					secret_detect.IsGoogleOAuthClientID(f.Snippet()),
 				)
+
+				seenSecret[dedupKey] = struct{}{}
 
 				response := secret_detect.BuildEvidenceResponse(respHead, body, f.Snippet(), f.Finding.Line)
 				event := secret_detect.NewSecretFinding(f, sev, conf, record.Hostname, record.URL, string(record.RawRequest), response)
+				// Tag with the secret-detect module ID (same as the passive path) so
+				// the URL-keyed finding dedup excludes these too — distinct secrets on
+				// one URL are not duplicates. Without it KIS findings carry an empty
+				// module_id and would merge with each other (and other empty-id
+				// findings) by URL+severity.
+				event.ModuleID = secret_detect.ModuleID
 				event.Info.Tags = append(event.Info.Tags, "known-issue-scan")
 				event.ModuleType = database.ModuleTypeSecretScan
 				event.FindingSource = database.FindingSourceKnownIssueScan

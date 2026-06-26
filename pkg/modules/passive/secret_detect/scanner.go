@@ -205,6 +205,13 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 	// read only once.
 	bodyByFile := make(map[string][]byte)
 
+	// Collapse the same secret re-detected on the same URL across scan passes:
+	// the page is buffered once per pass (discovery, spidering, re-spider, DA
+	// baseline), so Kingfisher reports the identical (url, rule, snippet) leak
+	// several times. Emitting it once keeps near-identical request/response copies
+	// from accumulating as redundant Additional Evidence downstream.
+	seen := make(map[string]struct{}, len(result.Findings))
+
 	var results []*output.ResultEvent
 	for i := range result.Findings {
 		f := &result.Findings[i]
@@ -213,6 +220,11 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 		basename := filepath.Base(f.Finding.Path)
 		entry, ok := entryByFile[basename]
 		if !ok {
+			continue
+		}
+
+		dedupKey := SecretDedupKey(entry.host, entry.url, f.RuleID(), f.Snippet())
+		if _, dup := seen[dedupKey]; dup {
 			continue
 		}
 
@@ -233,13 +245,22 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 			continue
 		}
 
+		// A match clipped out of a JS unicode escape (e.g. Angular's "ɵ" exports,
+		// emitted as ɵ... in minified bundles) is source code, not a
+		// credential — drop it.
+		if IsJSEscapeArtifactMatch(body, f.Snippet()) {
+			continue
+		}
+
 		sev, conf := SecretFindingSeverity(
 			f.IsValidated(),
 			IsRedirectStatus(entry.statusCode),
 			SnippetInHeaderValues(f.Snippet(), entry.headerValues),
+			SnippetReflectedFromRequest(f.Snippet(), entry.url, entry.request),
 			LowValueJWT(f.Snippet()),
 			IsReCaptchaSiteKey(f.RuleName()),
 			IsGoogleAPIKey(f.RuleName(), f.Snippet()),
+			IsGoogleOAuthClientID(f.Snippet()),
 		)
 
 		// Reconstruct the matched response (head + full-or-windowed body) so the
@@ -249,6 +270,11 @@ func (m *Module) FlushFindings(_ *modkit.ScanContext) ([]*output.ResultEvent, er
 		event := NewSecretFinding(f, sev, conf, entry.host, entry.url, entry.request, response)
 		event.ModuleID = ModuleID
 		results = append(results, event)
+		// Mark seen only after the match survives the guards above: a value
+		// dropped here as a blob/JS-escape artifact in one body may be a genuine
+		// leak in another (the guards are body-dependent), so an early mark could
+		// suppress the real one.
+		seen[dedupKey] = struct{}{}
 	}
 
 	zap.L().Info("Kingfisher batch scan completed",

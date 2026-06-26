@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v0.1.40-beta] - 2026-06-26
+
+A false-positive-hardening release. Several detectors that fired on a name or substring match now require structural proof, and the secret detector gains per-URL deduplication, two new reflection/source-code guards, and an inline matched value in the finding body.
+
+### Fixed
+
+- **`secret-detect` no longer reports public OAuth client IDs as leaked secrets** — a Google OAuth client ID (`NNNN-xxxx.apps.googleusercontent.com`) is the public half of an OAuth client, embedded in every sign-in button by design, so it now drops to **Info/Tentative**. The paired client *secret* is a separate match and keeps full severity.
+- **`secret-detect` drops JavaScript source artifacts matched out of unicode escapes** — a new structural `IsJSEscapeArtifactMatch` guard recognises when a fixed-length / high-entropy token rule clipped its match out of a `\uXXXX` / `\xXX` escape in a minified bundle (e.g. Angular's `ɵ`-prefixed exports), which is source code, not a credential. The check is body-located and conservative, so a genuine secret in the same bundle is still reported.
+- **`secret-detect` downgrades values reflected from the request** — a matched value that appears verbatim in the request URL or raw bytes (the dominant case: a Cloudflare Access application id in a `/cdn-cgi/access/verify-code/<app-id>` SSO URL echoed into the login page) is client-supplied input the server merely echoed, not a newly leaked server-held secret, so it drops to **Low/Tentative**.
+- **`secret-detect` collapses the same secret re-observed on one URL** — the same `(host, url, rule, snippet)` leak is now emitted once across the discovery / spidering / re-spider / dynamic-assessment passes (and across records in the known-issue-scan batch), so near-identical request/response copies no longer pile up as redundant Additional Evidence. Distinct secrets on a single URL (e.g. a `client_id`, `client_secret`, and `access_token` in one response) are no longer merged by the URL-keyed finding dedup — secret-detect is excluded from that pass and deduped by value instead. Every secret finding's description now ends with the matched value inline.
+- **`csrf-verify` only fires on a cross-site-forgeable request** — token enforcement is now checked only when the request is actually CSRF-able: a simple/form content type, no header-based auth (`Authorization`), and an ambient `Cookie`. A `*token*`-named field in a JSON/XML body (a CORS non-simple request that can't be auto-submitted cross-origin) is application data, not an anti-CSRF token — closing the false positive on a Cloudflare RUM beacon's JSON `siteToken`. The token-name pattern is also anchored (`\btoken\b`) so camelCase app fields like `accessToken`/`deviceToken` no longer match.
+- **`wp-user-enum` requires a per-author leak, not a generic redirect** — adds a baseline control (an author id far beyond any real account), an edge-block guard (`IsBlockedResponse` for WAF/SSO/maintenance pages), a uniformity guard (multiple `?author=N` ids collapsing to one slug is a catch-all, not enumeration), and rejection of author-id echoes (`/author/1` → `/author/1.html`), WordPress' own routes, and error/status-shaped slugs.
+- **`drupal-user-enum` rejects self-canonicalised UID echoes** — a redirect whose captured segment is just the requested id echoed back, bare or with an appended extension/selectors (e.g. AEM canonicalising `/user/1` → `/user/1.html`), is no longer mined as a leaked username.
+- **`cors-headers-detect` only flags credentialed CORS on true cross-origin reflection** — credentials enabled alongside a specific origin is now reported only when the response echoes the request's `Origin` *and* that origin is cross-origin to the target host. A fixed allow-list entry or a site reflecting its own origin (e.g. a Cloudflare RUM telemetry beacon) is the normal, safe pattern and is no longer flagged.
+
 ## [v0.1.39-beta] - 2026-06-24
 
 Adds a no-database `fs` export format and a live filesystem mirror for the ingestion server, so a coding agent can investigate a scan or watch ingested traffic with `ls`/`grep`/`jq`. Also tightens the spider's `max-duration` so it can no longer run past its deadline.

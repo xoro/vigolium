@@ -12,6 +12,20 @@ import (
 	"go.uber.org/zap"
 )
 
+// secretDetectModuleID mirrors secret_detect.ModuleID. The URL-keyed finding
+// dedup (DeduplicateFindings) collapses findings that share (module, severity,
+// URL) — correct for a module like input-behavior-probe that fires many times on
+// one endpoint with incidental per-payload values, but WRONG for the secret
+// detector, whose extracted value IS the finding's identity: a client_id,
+// client_secret, and access_token leaked in the same response are three distinct
+// secrets on one URL, not duplicates. URL-merging them keeps only one value and
+// buries the rest as redundant Additional Evidence. So secret-detect is excluded
+// from the URL pass and deduped instead by the value-keyed pass
+// (GroupFindingsByValue), which collapses identical secrets across URLs.
+// Hardcoded (not imported) to avoid a modules→database import cycle, mirroring
+// the existing 'deparos' source literals in this file.
+const secretDetectModuleID = "secret-detect"
+
 // DeduplicateRecordsBySource removes duplicate HTTP records for a given source that share
 // identical (hostname, method, status_code, response_content_length, response_hash).
 // Within each group, the record with the shortest path is kept.
@@ -374,6 +388,7 @@ func (r *Repository) DeduplicateFindings(ctx context.Context, projectUUID string
 			  AND matched_at IS NOT NULL
 			  AND matched_at != '[]'
 			  AND matched_at != ''
+			  AND module_id != '` + secretDetectModuleID + `'
 		)
 		SELECT id, additional_evidence, ROW_NUMBER() OVER (
 			PARTITION BY module_id, severity, matched_url
