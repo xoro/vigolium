@@ -259,7 +259,57 @@ func runAgentQuery(cmd *cobra.Command, args []string) error {
 		defer func() { _ = closer.Close() }()
 	}
 
+	// Track this run as an AgenticScan row so `vigolium export`'s report
+	// metadata (Target/Duration) and `vigolium agent sessions` can find it --
+	// previously `agent query` was the only agent mode that never persisted
+	// a run record, leaving exported reports showing "Unknown"/"N/A" even
+	// though the run had a real source path and duration.
+	projectUUID, _ := resolveProjectUUID()
+	startedAt := time.Now()
+	if repo != nil {
+		agenticScanRow := &database.AgenticScan{
+			UUID:        queryAgenticScanUUID,
+			ProjectUUID: projectUUID,
+			Mode:        "query",
+			AgentName:   "olium",
+			Protocol:    "olium-engine",
+			TemplateID:  agentPromptTemplate,
+			TargetURL:   agentSourcePath, // no network target for query mode; source path is the closest analog
+			SourcePath:  agentSourcePath,
+			SourceType:  database.InferSourceType(agentSourcePath),
+			SessionDir:  sessionDir,
+			Status:      "running",
+			StartedAt:   startedAt,
+		}
+		if createErr := repo.CreateAgenticScan(context.Background(), agenticScanRow); createErr != nil {
+			zap.L().Debug("Failed to create AgenticScan row for agent query", zap.Error(createErr))
+		}
+	}
+
 	result, err := engine.Run(ctx, opts)
+	if repo != nil {
+		completedAt := time.Now()
+		status := "completed"
+		errMsg := ""
+		if err != nil {
+			status = "failed"
+			errMsg = err.Error()
+		}
+		update := &database.AgenticScan{
+			UUID:         queryAgenticScanUUID,
+			Status:       status,
+			CompletedAt:  completedAt,
+			DurationMs:   completedAt.Sub(startedAt).Milliseconds(),
+			ErrorMessage: errMsg,
+		}
+		if result != nil {
+			update.SavedCount = result.SavedCount
+			update.FindingCount = len(result.Findings)
+		}
+		if updateErr := repo.UpdateAgenticScan(context.Background(), update); updateErr != nil {
+			zap.L().Debug("Failed to update AgenticScan row for agent query", zap.Error(updateErr))
+		}
+	}
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return fmt.Errorf("agent timed out after %s (use --max-duration to adjust or set to 0 to disable)", agentMaxDuration)
@@ -309,6 +359,7 @@ func printAgentList(settings *config.Settings) error {
 		{"anthropic-api-key", "claude-opus-4-7", "$ANTHROPIC_API_KEY", "Anthropic Claude via API key"},
 		{"anthropic-oauth", "claude-opus-4-7", "$ANTHROPIC_API_KEY", "Anthropic Claude via OAuth bearer token (claude setup-token)"},
 		{"anthropic-cli", "claude-opus-4-7", "claude binary in PATH", "Anthropic Claude via local claude CLI"},
+		{"copilot-cli", "(copilot CLI default)", "copilot binary in PATH", "GitHub Copilot via local copilot CLI"},
 		{"anthropic-vertex", "claude-opus-4-6", "GCP service-account JSON", "Anthropic Claude on Google Vertex AI"},
 		{"google-vertex", "gemini-2.5-pro", "GCP service-account JSON", "Google Gemini on Vertex AI"},
 	}

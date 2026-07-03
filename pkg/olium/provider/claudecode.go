@@ -35,7 +35,7 @@ func NewClaudeCode(binary, model string) *ClaudeCode {
 func (*ClaudeCode) Name() string { return "claude-code" }
 
 func (c *ClaudeCode) Stream(ctx context.Context, req Request) (<-chan stream.Event, error) {
-	prompt := renderClaudeCodePrompt(req)
+	prompt := renderCLIPrompt(req)
 
 	// `claude -p` is non-interactive (stdout is a pipe, no TTY), so any
 	// tool that hits the default permission gate comes back as a
@@ -70,11 +70,12 @@ func (c *ClaudeCode) Stream(ctx context.Context, req Request) (<-chan stream.Eve
 	return out, nil
 }
 
-// renderClaudeCodePrompt flattens olium's structured history into a single
-// string that Claude Code can consume via its `-p` flag. Format is
-// deliberately plain so Claude Code's own tokenizer/context tooling treats
-// it as normal prose rather than a structured transcript.
-func renderClaudeCodePrompt(req Request) string {
+// renderCLIPrompt flattens olium's structured history into a single string
+// suitable for a `-p` flag. Shared by the CLI-shim providers (Claude Code,
+// Copilot) that hand the whole prompt to a subprocess and let it manage its
+// own tool loop internally. Format is deliberately plain prose rather than a
+// structured transcript, since neither CLI's tokenizer expects one.
+func renderCLIPrompt(req Request) string {
 	var b strings.Builder
 	if req.System != "" {
 		b.WriteString(req.System)

@@ -1177,6 +1177,7 @@ agent:
     #   anthropic-api-key  — Anthropic Messages API (uses llm_api_key or $ANTHROPIC_API_KEY)
     #   anthropic-oauth    — Anthropic OAuth bearer token from `claude setup-token` (uses oauth_token or $ANTHROPIC_API_KEY)
     #   anthropic-cli      — Shells out to the local `claude` CLI (uses Claude Max sub; no key here)
+    #   copilot-cli        — Shells out to the local `copilot` CLI (official GitHub Copilot CLI; uses whatever seat/plan it's already authenticated with; no key here)
     #   anthropic-vertex   — Claude on Google Vertex AI (uses oauth_cred_path + google_cloud_project/location)
     #   google-vertex      — Gemini on Google Vertex AI (same GCP creds as anthropic-vertex)
     #   openai-compatible  — Any OpenAI Chat Completions-compatible endpoint
@@ -1189,7 +1190,8 @@ agent:
     # Model identifier. Empty = provider default.
     # Provider defaults: openai-codex-oauth → "gpt-5.5"; openai-api-key → "gpt-5.5";
     # anthropic-api-key → "claude-opus-4-7"; anthropic-oauth → "claude-opus-4-7";
-    # anthropic-cli → "claude-opus-4-7"; anthropic-vertex → "claude-opus-4-6";
+    # anthropic-cli → "claude-opus-4-7"; copilot-cli → "" (the copilot CLI
+    # picks its own default model); anthropic-vertex → "claude-opus-4-6";
     # google-vertex → "gemini-2.5-pro"; openai-compatible → uses
     # `custom_provider.model_id` below.
     # Override per-run with --model.

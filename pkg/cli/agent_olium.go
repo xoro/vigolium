@@ -24,6 +24,7 @@ var (
 	oliumProvider      string
 	oliumLLMAPIKey     string
 	oliumClaudeBin     string
+	oliumCopilotBin    string
 	oliumGCPProject    string
 	oliumGCPLocation   string
 	oliumBaseURL       string
@@ -40,6 +41,7 @@ Providers (vendor-first; the prefix tells you which credentials to provide):
   anthropic-api-key  — uses --llm-api-key / agent.olium.llm_api_key (or $ANTHROPIC_API_KEY)
   anthropic-oauth    — uses --oauth-token / agent.olium.oauth_token (or $ANTHROPIC_API_KEY); for tokens minted by "claude setup-token"
   anthropic-cli      — shells out to the local "claude" binary (no key needed here)
+  copilot-cli        — shells out to the local "copilot" binary (official GitHub Copilot CLI; no key needed here, uses whatever seat/plan the CLI is already authenticated with)
   anthropic-vertex   — uses --oauth-cred (GCP service-account JSON, or $GOOGLE_APPLICATION_CREDENTIALS) + --gcp-project / --gcp-location;
                        routes claude-* model ids to publishers/anthropic on Vertex AI. Default model: claude-opus-4-6.
   google-vertex      — same GCP creds as anthropic-vertex; routes gemini-* model ids to publishers/google on Vertex AI.
@@ -86,6 +88,7 @@ func runAgentOlium(cmd *cobra.Command, args []string) error {
 		GoogleCloudProject:  firstNonEmptyString(oliumGCPProject, oliumCfg.GoogleCloudProject),
 		GoogleCloudLocation: firstNonEmptyString(oliumGCPLocation, oliumCfg.GoogleCloudLocation),
 		ClaudeBinary:        oliumClaudeBin,
+		CopilotBinary:       oliumCopilotBin,
 		Model:               firstNonEmptyString(oliumModel, oliumCfg.Model),
 		SystemPrompt:        firstNonEmptyString(oliumSystem, oliumCfg.SystemPrompt),
 		ReasoningEffort:     oliumCfg.ReasoningEffort,
@@ -162,12 +165,13 @@ func runAgentOlium(cmd *cobra.Command, args []string) error {
 // read from the same state regardless of which entry point is invoked.
 func registerOliumFlags(cmd *cobra.Command) {
 	f := cmd.Flags()
-	f.StringVar(&oliumProvider, "provider", "", "Provider: openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | anthropic-vertex | google-vertex | openai-compatible (falls back to agent.olium.provider; default openai-compatible)")
+	f.StringVar(&oliumProvider, "provider", "", "Provider: openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | copilot-cli | anthropic-vertex | google-vertex | openai-compatible (falls back to agent.olium.provider; default openai-compatible)")
 	f.StringVar(&oliumModel, "model", "", "Model id (provider-specific default if empty)")
 	f.StringVar(&oliumOAuthCredPath, "oauth-cred", "", "Path to OAuth/SA credential file (openai-codex-oauth: ~/.codex/auth.json; anthropic-vertex/google-vertex: SA JSON or $GOOGLE_APPLICATION_CREDENTIALS)")
 	f.StringVar(&oliumOAuthToken, "oauth-token", "", "Anthropic OAuth bearer token (anthropic-oauth; falls back to agent.olium.oauth_token or $ANTHROPIC_API_KEY)")
 	f.StringVar(&oliumLLMAPIKey, "llm-api-key", "", "API key for key-based providers (anthropic-api-key, openai-api-key); else uses ANTHROPIC_API_KEY / OPENAI_API_KEY env")
 	f.StringVar(&oliumClaudeBin, "claude-bin", "", "Path to the `claude` binary (anthropic-cli provider)")
+	f.StringVar(&oliumCopilotBin, "copilot-bin", "", "Path to the `copilot` binary (copilot-cli provider)")
 	f.StringVar(&oliumGCPProject, "gcp-project", "", "GCP project for Vertex providers (else $GOOGLE_CLOUD_PROJECT, then YAML, then SA file's project_id)")
 	f.StringVar(&oliumGCPLocation, "gcp-location", "", "GCP region for Vertex providers (else $GOOGLE_CLOUD_LOCATION, then YAML, then us-central1)")
 	f.StringVar(&oliumBaseURL, "base-url", "", "Endpoint URL for openai-compatible provider (e.g. http://localhost:11434/v1 for Ollama); falls back to agent.olium.custom_provider.base_url")

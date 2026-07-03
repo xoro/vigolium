@@ -62,6 +62,7 @@ Use them freely to explore code, run commands, and make changes. Be concise.`
 //   - Provider="anthropic-oauth"    → OAuthToken  (or $ANTHROPIC_API_KEY); produced by `claude setup-token`
 //   - Provider="openai-api-key"     → LLMAPIKey (or $OPENAI_API_KEY)
 //   - Provider="anthropic-cli"      → ClaudeBinary
+//   - Provider="copilot-cli"        → CopilotBinary (shells out to the official `copilot` CLI; uses whatever Copilot seat/model the CLI is already authenticated with)
 //   - Provider="anthropic-vertex"   → OAuthCredPath (SA JSON, or $GOOGLE_APPLICATION_CREDENTIALS),
 //     plus GoogleCloudProject and GoogleCloudLocation; routes claude-* models.
 //   - Provider="google-vertex"      → OAuthCredPath (SA JSON, or $GOOGLE_APPLICATION_CREDENTIALS),
@@ -81,6 +82,7 @@ type Options struct {
 	Model         string
 	SystemPrompt  string
 	ClaudeBinary  string // path to `claude` executable for anthropic-cli provider
+	CopilotBinary string // path to `copilot` executable for copilot-cli provider
 
 	// Vertex tuning (anthropic-vertex, google-vertex). ENV (GOOGLE_CLOUD_PROJECT
 	// / GOOGLE_CLOUD_LOCATION) takes precedence at provider-construction time;
@@ -272,6 +274,14 @@ func resolveProvider(opts Options) (provider.Provider, string, string, error) {
 			model = "claude-opus-4-7"
 		}
 		return newAnthropicCLIProvider(opts, model)
+	case "copilot-cli":
+		// No forced default model: leave empty so the copilot CLI picks its
+		// own configured default model rather than us guessing one that may
+		// not be enabled on the caller's Copilot plan.
+		if model == DefaultModel {
+			model = ""
+		}
+		return newCopilotCLIProvider(opts, model)
 	case "anthropic-vertex":
 		if model == "" || model == DefaultModel {
 			model = "claude-opus-4-6"
@@ -290,6 +300,6 @@ func resolveProvider(opts Options) (provider.Provider, string, string, error) {
 		}
 		return newOpenAICompatibleProvider(opts, model)
 	default:
-		return nil, "", "", fmt.Errorf("unknown provider %q (valid: openai-codex-oauth, openai-api-key, anthropic-api-key, anthropic-oauth, anthropic-cli, anthropic-vertex, google-vertex, openai-compatible)", name)
+		return nil, "", "", fmt.Errorf("unknown provider %q (valid: openai-codex-oauth, openai-api-key, anthropic-api-key, anthropic-oauth, anthropic-cli, copilot-cli, anthropic-vertex, google-vertex, openai-compatible)", name)
 	}
 }

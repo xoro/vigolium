@@ -123,6 +123,23 @@ func newAnthropicCLIProvider(opts Options, model string) (provider.Provider, str
 	return provider.NewClaudeCode(resolved, model), "anthropic-cli", model, nil
 }
 
+// newCopilotCLIProvider shells out to the official GitHub Copilot CLI
+// (`copilot -p --output-format json`), unlocking a Copilot Business / Pro /
+// Enterprise seat without a separate API key. Mirrors newAnthropicCLIProvider
+// exactly -- same non-interactive shell-out design, just a different binary
+// and wire format.
+func newCopilotCLIProvider(opts Options, model string) (provider.Provider, string, string, error) {
+	bin := opts.CopilotBinary
+	if bin == "" {
+		bin = "copilot"
+	}
+	resolved, err := exec.LookPath(bin)
+	if err != nil {
+		return nil, "", "", fmt.Errorf("copilot-cli: %q not found on PATH (install the GitHub Copilot CLI or pass --copilot-bin)", bin)
+	}
+	return provider.NewCopilot(resolved, model), "copilot-cli", model, nil
+}
+
 // newOpenAICompatibleProvider wires any backend that speaks the OpenAI Chat
 // Completions wire format — Ollama, OpenRouter, LM Studio, vLLM, Together,
 // Groq, LocalAI, custom proxies. base_url is required; api_key is optional

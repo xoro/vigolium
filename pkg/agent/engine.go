@@ -325,14 +325,16 @@ func (e *Engine) runOnSession(ctx context.Context, opts Options, sess AgentSessi
 // Preflight verifies the olium provider is resolvable AND that
 // credentials actually work by issuing a tiny ping prompt. Call this
 // before starting a multi-phase pipeline so credential / network problems
-// fail fast (within ~5 seconds) instead of after a minute of normalize +
+// fail fast (within a few seconds) instead of after a minute of normalize +
 // discovery work. agentName is retained for call-site compatibility; it
 // no longer affects dispatch.
 //
-// The ping is bounded by a hard 5s timeout; transient ping failures are
-// returned as errors so the caller can decide whether to bail or continue
-// (CLI usually bails, server endpoints typically continue and let the
-// real first-call failure surface in the run record).
+// The ping is bounded by preflightTimeout(cfg.Provider) -- 5s for direct
+// API/OAuth providers, longer for CLI-shim providers that spawn a full
+// external process per call. Transient ping failures are returned as
+// errors so the caller can decide whether to bail or continue (CLI
+// usually bails, server endpoints typically continue and let the real
+// first-call failure surface in the run record).
 func (e *Engine) Preflight(agentName string) error {
 	if e.settings == nil {
 		return fmt.Errorf("agent settings are nil")
@@ -343,10 +345,10 @@ func (e *Engine) Preflight(agentName string) error {
 	}
 
 	// Build a one-shot engine and issue a minimal ping. We use a fresh
-	// 5s context so a hung provider (TCP black hole) doesn't block the
-	// whole startup. Ping prompt asks for a single token to keep the
-	// cost effectively zero.
-	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// bounded context so a hung provider (TCP black hole, or a slow CLI
+	// subprocess) doesn't block the whole startup. Ping prompt asks for a
+	// single token to keep the cost effectively zero.
+	pingCtx, cancel := context.WithTimeout(context.Background(), preflightTimeout(cfg.Provider))
 	defer cancel()
 
 	sess, err := e.rt().NewSession(&cfg, "")
@@ -364,6 +366,22 @@ func (e *Engine) Preflight(agentName string) error {
 		return fmt.Errorf("preflight: provider %q returned no tokens for ping (likely silent auth failure)", cfg.Provider)
 	}
 	return nil
+}
+
+// preflightTimeout returns how long Preflight waits for the ping to
+// respond before giving up. CLI-shim providers (anthropic-cli,
+// copilot-cli) shell out to a full external CLI process on every call --
+// for copilot-cli that includes spinning up its builtin github-mcp-server
+// and loading skills fresh each time -- so they need materially more
+// headroom than a direct HTTPS API/OAuth call. Everything else keeps the
+// original tight fail-fast budget.
+func preflightTimeout(providerName string) time.Duration {
+	switch providerName {
+	case "anthropic-cli", "copilot-cli":
+		return 20 * time.Second
+	default:
+		return 5 * time.Second
+	}
 }
 
 // RunWithExtra executes an agent run with additional extra template data injected.
