@@ -30,6 +30,25 @@ func flexInt(v interface{}) int {
 	return 0
 }
 
+// flexFloat coerces a JSON value (float64, string, json.Number) to float64.
+// Returns 0 if the value cannot be converted. Mirrors flexInt's tolerance
+// for LLM output that stringifies numeric fields (e.g. "cvss": "7.5").
+func flexFloat(v interface{}) float64 {
+	switch val := v.(type) {
+	case float64:
+		return val
+	case json.Number:
+		if f, err := val.Float64(); err == nil {
+			return f
+		}
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
 // flexIntSlice coerces a JSON value to []int. Accepts:
 //   - []interface{} with int/float/string elements
 //   - a single int/float/string (wraps in slice)

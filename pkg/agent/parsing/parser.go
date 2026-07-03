@@ -755,7 +755,7 @@ func ToDBFinding(af agenttypes.AgentFinding, moduleID string, scanUUID string, p
 	return &database.Finding{
 		ModuleID:         moduleID,
 		ModuleName:       af.Title,
-		Description:      af.Description,
+		Description:      buildFindingDescription(af),
 		Severity:         severity,
 		Confidence:       confidence,
 		Tags:             tags,
@@ -769,7 +769,57 @@ func ToDBFinding(af agenttypes.AgentFinding, moduleID string, scanUUID string, p
 		ModuleShort:      af.Title,
 		Status:           database.StatusDraft,
 		FoundAt:          time.Now(),
+		CVSSScore:        af.CVSS,
 	}
+}
+
+// buildFindingDescription assembles the full narrative for a finding --
+// description, impact, proof-of-concept, before/after fix diff, and
+// remediation steps -- into ONE markdown blob for the Description field.
+//
+// Why everything lands in Description rather than the DB's separate
+// Remediation column: the static HTML report (public/static-reports/
+// template.html) renders `description` through a real markdown-to-HTML
+// renderer (the "Rendered/Raw" toggle), but renders `remediation` as a bare
+// `<p>{remediation}</p>` with no markdown processing at all -- newlines,
+// **bold**, and \`\`\`diff blocks all collapse into one unreadable run of
+// text. Until that renderer is fixed, Description is the only field that
+// actually displays multi-section markdown content readably.
+//
+// Section labels use **bold** rather than "## heading" markdown -- verified
+// the renderer converts **bold** correctly but leaves literal "##"
+// characters unrendered (ATX-style headings aren't supported here).
+func buildFindingDescription(af agenttypes.AgentFinding) string {
+	var parts []string
+	if af.Description != "" {
+		parts = append(parts, af.Description)
+	}
+	if af.Impact != "" {
+		parts = append(parts, fmt.Sprintf("**Impact**\n\n%s", af.Impact))
+	}
+	if af.PoC != "" {
+		parts = append(parts, fmt.Sprintf("**Proof of Concept**\n\n%s", af.PoC))
+	}
+	if af.FixBefore != "" || af.FixAfter != "" {
+		var diff strings.Builder
+		diff.WriteString("**Suggested Fix**\n\n```diff\n")
+		for _, line := range strings.Split(af.FixBefore, "\n") {
+			if line != "" {
+				diff.WriteString("- " + line + "\n")
+			}
+		}
+		for _, line := range strings.Split(af.FixAfter, "\n") {
+			if line != "" {
+				diff.WriteString("+ " + line + "\n")
+			}
+		}
+		diff.WriteString("```")
+		parts = append(parts, diff.String())
+	}
+	if af.Remediation != "" {
+		parts = append(parts, fmt.Sprintf("**Remediation**\n\n%s", af.Remediation))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // extractSnippets collects snippet data from an AgentFinding.

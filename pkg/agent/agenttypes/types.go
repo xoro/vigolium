@@ -122,6 +122,21 @@ type AgentFinding struct {
 	Snippet     string   `json:"snippet,omitempty"`
 	CWE         string   `json:"cwe,omitempty"`
 	Tags        []string `json:"tags,omitempty"`
+
+	// Deep-detail fields (optional -- populated when the prompt template's
+	// output_schema requests them, e.g. security-code-review-deep). Mirrors
+	// the depth of a strix-style vuln report: impact narrative, a concrete
+	// proof-of-concept, a before/after fix diff, remediation steps, and a
+	// CVSS base score. Mapped through to database.Finding.Remediation /
+	// .CVSSScore by ToDBFinding -- both fields already render in the HTML
+	// report template, so populating them here is the only change needed
+	// to surface this detail in generated reports.
+	Impact      string  `json:"impact,omitempty"`
+	PoC         string  `json:"poc,omitempty"`
+	FixBefore   string  `json:"fix_before,omitempty"`
+	FixAfter    string  `json:"fix_after,omitempty"`
+	Remediation string  `json:"remediation,omitempty"`
+	CVSS        float64 `json:"cvss,omitempty"`
 }
 
 // UnmarshalJSON implements lenient parsing for AgentFinding.
@@ -158,6 +173,24 @@ func (f *AgentFinding) UnmarshalJSON(data []byte) error {
 	}
 	if v, ok := raw["tags"]; ok {
 		f.Tags = flexStringSlice(v)
+	}
+	if v, ok := raw["impact"]; ok {
+		f.Impact = fmt.Sprint(v)
+	}
+	if v, ok := raw["poc"]; ok {
+		f.PoC = fmt.Sprint(v)
+	}
+	if v, ok := raw["fix_before"]; ok {
+		f.FixBefore = fmt.Sprint(v)
+	}
+	if v, ok := raw["fix_after"]; ok {
+		f.FixAfter = fmt.Sprint(v)
+	}
+	if v, ok := raw["remediation"]; ok {
+		f.Remediation = fmt.Sprint(v)
+	}
+	if v, ok := raw["cvss"]; ok {
+		f.CVSS = flexFloat(v)
 	}
 	return nil
 }
