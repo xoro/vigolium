@@ -263,9 +263,9 @@ func (h *Handlers) prepareCombinedAuditRun(plan combinedAuditPlan) (combinedAudi
 //
 // driver=both: both run unconditionally; one failing does NOT abort the
 // other. driver=auto: a preflight checks whether the coding-agent CLI
-// (claude or codex per resolved agent) is on PATH; if missing, audit
-// is skipped and piolium runs as a fallback. Otherwise audit runs and
-// any failure surfaces — piolium is NOT silently retried.
+// (claude, codex, or copilot per resolved agent) is on PATH; if missing,
+// audit is skipped and piolium runs as a fallback. Otherwise audit runs
+// and any failure surfaces — piolium is NOT silently retried.
 func (h *Handlers) runDriversSequentially(ctx context.Context, plan combinedAuditPlan, setup combinedAuditSetup, sseWriter *bufio.Writer) []driverResult {
 	results := make([]driverResult, 0, 2)
 

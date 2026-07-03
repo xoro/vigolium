@@ -49,10 +49,14 @@ func ValidateAuthOverride(o agenttypes.AuthOverride) error {
 		return fmt.Errorf("auth override: at most one of api-key / oauth-token / oauth-cred-file may be set")
 	}
 
+	agentID := normalizedAgent(o.Agent)
+	if agentID == string(agenttypes.AuditDriverAgentCopilot) {
+		return fmt.Errorf("auth override: api-key/oauth-token/oauth-cred-file are not supported for the copilot agent (no BYOK auth path; it always uses the `copilot` binary's own ambient `copilot login` auth)")
+	}
+
 	if o.OAuthToken != "" {
-		agent := normalizedAgent(o.Agent)
-		if agent != string(agenttypes.AuditDriverAgentClaude) {
-			return fmt.Errorf("auth override: --oauth-token is only valid for the claude agent (got %q); codex uses --oauth-cred-file", agent)
+		if agentID != string(agenttypes.AuditDriverAgentClaude) {
+			return fmt.Errorf("auth override: --oauth-token is only valid for the claude agent (got %q); codex uses --oauth-cred-file", agentID)
 		}
 	}
 

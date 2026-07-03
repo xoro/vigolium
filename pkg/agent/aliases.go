@@ -34,8 +34,9 @@ type (
 type AuthOverride = agenttypes.AuthOverride
 
 const (
-	AuditDriverAgentClaude = agenttypes.AuditDriverAgentClaude
-	AuditDriverAgentCodex  = agenttypes.AuditDriverAgentCodex
+	AuditDriverAgentClaude  = agenttypes.AuditDriverAgentClaude
+	AuditDriverAgentCodex   = agenttypes.AuditDriverAgentCodex
+	AuditDriverAgentCopilot = agenttypes.AuditDriverAgentCopilot
 )
 
 // Findings & HTTP records

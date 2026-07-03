@@ -89,7 +89,8 @@ the same source tree under a single AgenticScan, with post-pass findings
 deduplication.
 
 Driver selection (--driver):
-  auto       preflight the resolved coding-agent CLI (claude or codex) on
+  auto       preflight the resolved coding-agent CLI (claude, codex, or
+             copilot) on
              PATH; if present run audit, else fall back to piolium without
              ever launching the embedded binary (default). Mid-run audit
              failures surface — piolium is not silently retried.
@@ -173,7 +174,7 @@ func registerAuditFlags(cmd *cobra.Command) {
 	// accepted; ResolveAuditDriverInvocation maps the prefix to the right
 	// `--agent` value.
 	f.StringVar(&auditProvider, "provider", "", "[audit] Olium provider hint to drive audit's --agent: anthropic-* → claude, openai-* → codex (also forwards that provider's BYOK auth). Empty inherits agent.olium.provider. For a pure agent switch without changing auth, prefer --agent.")
-	f.StringVar(&auditAgent, "agent", "", "[audit] Coding agent for the audit leg: claude or codex. Overrides the agent implied by --provider while keeping its resolved auth. No effect on the piolium leg.")
+	f.StringVar(&auditAgent, "agent", "", "[audit] Coding agent for the audit leg: claude, codex, or copilot. Overrides the agent implied by --provider while keeping its resolved auth. copilot is headless-only (no --interactive support) and has no BYOK auth path. No effect on the piolium leg.")
 
 	// Piolium-only.
 	f.StringVar(&auditPiProvider, "pi-provider", "", "[piolium] Override pi's defaultProvider (e.g. vertex-anthropic, google-vertex)")
@@ -257,7 +258,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 	auditAgent = strings.TrimSpace(auditAgent)
 	if auditAgent != "" {
 		if !agent.IsValidAuditDriverAgent(auditAgent) {
-			return fmt.Errorf("invalid --agent %q (must be: claude or codex)", auditAgent)
+			return fmt.Errorf("invalid --agent %q (must be: claude, codex, or copilot)", auditAgent)
 		}
 		if auditDriver == agent.AuditDriverPiolium {
 			fmt.Fprintf(os.Stderr, "%s --agent is audit-only and has no effect with --driver=piolium\n",
@@ -358,7 +359,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 	// (ForceAuditDriverAgent treats anything other than claude/codex as a
 	// no-op, which would mask the typo).
 	if da := strings.TrimSpace(settings.Agent.Audit.DefaultAgent); da != "" && !agent.IsValidAuditDriverAgent(strings.ToLower(da)) {
-		return fmt.Errorf("invalid agent.audit.default_agent %q (must be: claude or codex)", da)
+		return fmt.Errorf("invalid agent.audit.default_agent %q (must be: claude, codex, or copilot)", da)
 	}
 
 	// BYOK auth override resolution. Indirection ($ENV / @path) is CLI-only

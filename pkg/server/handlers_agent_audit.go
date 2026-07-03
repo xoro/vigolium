@@ -147,7 +147,7 @@ func (h *Handlers) HandleAgentAudit(c fiber.Ctx) error {
 		platform := h.auditPlatformForReq(&req)
 		if !agent.IsValidAuditDriverPlatform(platform) {
 			return c.Status(fiber.StatusBadRequest).JSON(ErrorResponse{
-				Error: fmt.Sprintf("invalid audit platform %q: must be claude or codex", platform),
+				Error: fmt.Sprintf("invalid audit platform %q: must be claude, codex, or copilot", platform),
 			})
 		}
 	}
@@ -385,7 +385,7 @@ func (h *Handlers) auditPlatformForReq(req *AgentAuditRequest) string {
 func (h *Handlers) auditAvailable(req *AgentAuditRequest) (bool, string) {
 	platform := h.auditPlatformForReq(req)
 	if !agent.IsValidAuditDriverPlatform(platform) {
-		return false, fmt.Sprintf("invalid audit platform %q: must be claude or codex", platform)
+		return false, fmt.Sprintf("invalid audit platform %q: must be claude, codex, or copilot", platform)
 	}
 	if !bin.Available() {
 		return false, "vigolium-audit binary not embedded — rebuild vigolium with `make build-audit`"

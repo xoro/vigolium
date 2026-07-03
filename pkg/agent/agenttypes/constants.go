@@ -185,12 +185,17 @@ type AppIntent struct {
 
 // AuditDriverAgent identifies the underlying CLI/SDK adapter the embedded
 // vigolium-audit binary will drive on this run. Maps to vigolium-audit's `--agent`
-// (claude|codex). Empty falls back to claude (vigolium-audit default).
+// (claude|codex|copilot). Empty falls back to claude (vigolium-audit default).
 type AuditDriverAgent string
 
 const (
 	AuditDriverAgentClaude AuditDriverAgent = "claude"
 	AuditDriverAgentCodex  AuditDriverAgent = "codex"
+	// AuditDriverAgentCopilot drives vigolium-audit's `--agent copilot`
+	// (GitHub Copilot CLI). Headless-only -- no BYOK auth path (see
+	// ValidateAuditDriverInvocation / ValidateAuthOverride) and no
+	// --interactive support (vigolium-audit itself rejects -i for this agent).
+	AuditDriverAgentCopilot AuditDriverAgent = "copilot"
 )
 
 // AuditDriverAuthFlags are the one-shot auth overrides vigolium-audit accepts.

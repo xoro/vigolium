@@ -36,8 +36,9 @@ const cancelGracePeriod = 10 * time.Second
 const PlatformPi = "pi"
 
 // PlatformAuditBin identifies the embedded vigolium-audit binary as the
-// audit runner. vigolium-audit dispatches to claude or codex internally; the
-// per-run agent comes from AuditAgentConfig.AuditDriverInvocation.
+// audit runner. vigolium-audit dispatches to claude, codex, or copilot
+// internally; the per-run agent comes from
+// AuditAgentConfig.AuditDriverInvocation.
 const PlatformAuditBin = "audit"
 
 // DefaultAuditHarness returns the canonical audit harness spec used by
@@ -108,7 +109,7 @@ func auditProtocolForPlatform(platform string) string {
 var ownerRepoRE = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
 // AuditAgenticScanner manages an vigolium-audit running as a background agent process.
-// It launches the agent (Claude or Codex), periodically syncs audit-state.json
+// It launches the agent (Claude, Codex, or Copilot), periodically syncs audit-state.json
 // and findings to the vigolium session dir, and imports findings into the database when complete.
 type AuditAgenticScanner struct {
 	cfg          AuditAgentConfig

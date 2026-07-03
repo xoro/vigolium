@@ -35,6 +35,7 @@ type AgentConfig struct {
 //   - anthropic-api-key  — uses llm_api_key (or $ANTHROPIC_API_KEY)
 //   - anthropic-oauth    — uses oauth_token (or $ANTHROPIC_API_KEY); for tokens minted with `claude setup-token`
 //   - anthropic-cli      — shells out to the `claude` binary; no key needed here
+//   - copilot-cli        — shells out to the official `copilot` binary (GitHub Copilot CLI); no key needed here, uses whatever seat/plan the CLI is already authenticated with
 //   - anthropic-vertex   — uses oauth_cred_path (GCP service-account JSON, or $GOOGLE_APPLICATION_CREDENTIALS),
 //     plus google_cloud_project + google_cloud_location; routes claude-* models to publishers/anthropic.
 //   - google-vertex      — same GCP creds as anthropic-vertex, but routes gemini-* models to publishers/google.
@@ -46,7 +47,7 @@ type AgentConfig struct {
 // `vigolium config ls olium` (including empty strings rendered as "(empty)"),
 // making the available knobs discoverable.
 type OliumConfig struct {
-	Provider            string               `yaml:"provider"`              // openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | anthropic-vertex | google-vertex | openai-compatible
+	Provider            string               `yaml:"provider"`              // openai-codex-oauth | openai-api-key | anthropic-api-key | anthropic-oauth | anthropic-cli | copilot-cli | anthropic-vertex | google-vertex | openai-compatible
 	Model               string               `yaml:"model"`                 // empty (default) = provider default; for openai-compatible this falls back to custom_provider.model_id
 	OAuthCredPath       string               `yaml:"oauth_cred_path"`       // OAuth/SA file path (openai-codex-oauth, anthropic-vertex, google-vertex); default ~/.codex/auth.json. For Vertex providers, falls back to $GOOGLE_APPLICATION_CREDENTIALS.
 	OAuthToken          string               `yaml:"oauth_token"`           // OAuth bearer token (anthropic-oauth); produced by `claude setup-token`. Supports ${ENV_VAR} expansion, falls back to $ANTHROPIC_API_KEY when empty

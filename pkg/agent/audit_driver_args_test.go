@@ -106,6 +106,17 @@ func TestResolveAuditDriverInvocation_ProviderRouting(t *testing.T) {
 			override: "CODEX",
 			want:     AuditDriverInvocation{Agent: AuditDriverAgentCodex},
 		},
+		{
+			name:  "copilot-cli provider resolves to copilot with no auth (no BYOK path)",
+			olium: config.OliumConfig{Provider: "copilot-cli"},
+			want:  AuditDriverInvocation{Agent: AuditDriverAgentCopilot},
+		},
+		{
+			name:     "REST agent='copilot' override resolves to copilot",
+			olium:    config.OliumConfig{Provider: "anthropic-cli"},
+			override: "copilot",
+			want:     AuditDriverInvocation{Agent: AuditDriverAgentCopilot},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,6 +280,34 @@ func TestValidateAuditDriverInvocation(t *testing.T) {
 			name: "no auth is ok",
 			inv:  AuditDriverInvocation{Agent: AuditDriverAgentCodex},
 		},
+		{
+			name: "copilot + no auth is ok (ambient copilot login auth)",
+			inv:  AuditDriverInvocation{Agent: AuditDriverAgentCopilot},
+		},
+		{
+			name: "copilot + api key is rejected (no BYOK path)",
+			inv: AuditDriverInvocation{
+				Agent: AuditDriverAgentCopilot,
+				Auth:  AuditDriverAuthFlags{APIKey: "sk-x"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "copilot + oauth-token is rejected (no BYOK path)",
+			inv: AuditDriverInvocation{
+				Agent: AuditDriverAgentCopilot,
+				Auth:  AuditDriverAuthFlags{OAuthToken: "oat-x"},
+			},
+			wantErr: true,
+		},
+		{
+			name: "copilot + oauth-cred-file is rejected (no BYOK path)",
+			inv: AuditDriverInvocation{
+				Agent: AuditDriverAgentCopilot,
+				Auth:  AuditDriverAuthFlags{OAuthCredFile: "/x/auth.json"},
+			},
+			wantErr: true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -285,11 +324,12 @@ func TestValidateAuditDriverInvocation(t *testing.T) {
 
 func TestIsValidAuditDriverAgent(t *testing.T) {
 	cases := map[string]bool{
-		"claude": true,
-		"codex":  true,
-		"":       false,
-		"opus":   false,
-		"gpt":    false,
+		"claude":  true,
+		"codex":   true,
+		"copilot": true,
+		"":        false,
+		"opus":    false,
+		"gpt":     false,
 	}
 	for s, want := range cases {
 		if got := IsValidAuditDriverAgent(s); got != want {
@@ -319,6 +359,7 @@ func TestForceAuditDriverAgent(t *testing.T) {
 		{"flip to claude", "claude", AuditDriverAgentClaude},
 		{"keep codex", "codex", AuditDriverAgentCodex},
 		{"case-insensitive + spaces", "  Claude ", AuditDriverAgentClaude},
+		{"flip to copilot", "copilot", AuditDriverAgentCopilot},
 		{"empty is a no-op", "", AuditDriverAgentCodex},
 		{"invalid is a no-op", "opus", AuditDriverAgentCodex},
 	}

@@ -49,6 +49,16 @@ func TestValidateAuthOverride(t *testing.T) {
 			o:       agenttypes.AuthOverride{OAuthToken: "oat", Agent: string(agenttypes.AuditDriverAgentCodex)},
 			wantErr: "only valid for the claude agent",
 		},
+		{
+			name:    "api key on copilot is rejected (no BYOK path)",
+			o:       agenttypes.AuthOverride{APIKey: "x", Agent: string(agenttypes.AuditDriverAgentCopilot)},
+			wantErr: "not supported for the copilot agent",
+		},
+		{
+			name:    "cred file on copilot is rejected (no BYOK path)",
+			o:       agenttypes.AuthOverride{OAuthCredFile: "/tmp/x.json", Agent: string(agenttypes.AuditDriverAgentCopilot)},
+			wantErr: "not supported for the copilot agent",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -155,6 +165,8 @@ func TestResolveAuthAgent(t *testing.T) {
 		{"override wins", "openai-api-key", "anthropic-api-key", "codex"},
 		{"olium provider used when override empty", "", "openai-codex-oauth", "codex"},
 		{"unknown provider defaults to claude", "", "futurelab-x9", "claude"},
+		{"copilot-cli provider resolves to copilot", "", "copilot-cli", "copilot"},
+		{"direct 'copilot' override resolves to copilot", "copilot", "anthropic-api-key", "copilot"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

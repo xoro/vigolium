@@ -71,8 +71,8 @@ func ResolveAuditDriverInvocation(olium config.OliumConfig, providerOverride str
 //
 // Inputs come from two distinct call sites with different conventions:
 //   - CLI's --provider flag → provider names (anthropic-*, openai-*,
-//     google-*) which map by prefix to claude/codex.
-//   - REST's req.Agent field      → direct agent names ("claude" | "codex")
+//     google-*, copilot-cli) which map to claude/codex/copilot.
+//   - REST's req.Agent field      → direct agent names ("claude" | "codex" | "copilot")
 //     validated upstream by IsValidAuditDriverPlatform.
 //
 // Direct agent names short-circuit the prefix mapping so REST's
@@ -83,9 +83,12 @@ func ResolveAuditDriverInvocation(olium config.OliumConfig, providerOverride str
 // though the request asked for codex.
 //
 // anthropic-cli + anthropic-vertex still resolve to claude; openai-*
-// resolve to codex. Unknown inputs fall back to claude (audit's own
-// default) so a misspelled config doesn't error the launcher path —
-// audit's own probe will surface the real error.
+// resolve to codex; the exact provider name "copilot-cli" (olium's
+// Copilot provider identifier -- not a prefix family, since there is no
+// copilot-api-key/copilot-oauth variant) resolves to copilot. Unknown
+// inputs fall back to claude (audit's own default) so a misspelled
+// config doesn't error the launcher path -- audit's own probe will
+// surface the real error.
 func auditAgentSelFromProvider(provider string) AuditDriverAgent {
 	p := strings.ToLower(strings.TrimSpace(provider))
 	switch p {
@@ -93,8 +96,12 @@ func auditAgentSelFromProvider(provider string) AuditDriverAgent {
 		return AuditDriverAgentClaude
 	case string(AuditDriverAgentCodex):
 		return AuditDriverAgentCodex
+	case string(AuditDriverAgentCopilot):
+		return AuditDriverAgentCopilot
 	}
 	switch {
+	case p == "copilot-cli":
+		return AuditDriverAgentCopilot
 	case strings.HasPrefix(p, "openai-"):
 		return AuditDriverAgentCodex
 	case strings.HasPrefix(p, "anthropic-"), strings.HasPrefix(p, "google-"):
@@ -111,24 +118,34 @@ func auditAgentSelFromProvider(provider string) AuditDriverAgent {
 // OAuth token (claude-only), which vigolium-audit rejects mid-run. Catching
 // it here turns that into a clear pre-flight error.
 //
-// Only the OAuthToken→claude rule is enforced, mirroring
+// Only the OAuthToken→claude rule is enforced for claude/codex, mirroring
 // ValidateAuthOverride: API keys are agent-agnostic at this layer, and a
 // codex cred file paired with claude is left to vigolium-audit so the
 // documented "--agent keeps the resolved auth" contract is preserved.
+// copilot is stricter: it has no BYOK path at all (ambient `copilot login`
+// auth only), so ANY of api-key/oauth-token/oauth-cred-file being set is
+// rejected outright rather than silently ignored.
 // Returns nil when no auth is set or it is compatible.
 func ValidateAuditDriverInvocation(inv AuditDriverInvocation) error {
-	if inv.Auth.OAuthToken != "" && normalizedAgent(string(inv.Agent)) != string(AuditDriverAgentClaude) {
-		return fmt.Errorf("oauth-token is claude-only but the audit agent resolved to %q — select claude (--agent claude or an anthropic-* provider/agent.audit.default_agent), or use --oauth-cred-file / --api-key for codex", normalizedAgent(string(inv.Agent)))
+	agent := normalizedAgent(string(inv.Agent))
+	if agent == string(AuditDriverAgentCopilot) {
+		if inv.Auth.APIKey != "" || inv.Auth.OAuthToken != "" || inv.Auth.OAuthCredFile != "" {
+			return fmt.Errorf("api-key/oauth-token/oauth-cred-file are not supported for the copilot audit agent — it always uses the `copilot` binary's own ambient `copilot login` auth; drop these flags")
+		}
+		return nil
+	}
+	if inv.Auth.OAuthToken != "" && agent != string(AuditDriverAgentClaude) {
+		return fmt.Errorf("oauth-token is claude-only but the audit agent resolved to %q — select claude (--agent claude or an anthropic-* provider/agent.audit.default_agent), or use --oauth-cred-file / --api-key for codex", agent)
 	}
 	return nil
 }
 
 // IsValidAuditDriverAgent reports whether s is a recognized audit `--agent`
-// value (claude|codex). Used by CLI / REST validation of the
+// value (claude|codex|copilot). Used by CLI / REST validation of the
 // --provider override.
 func IsValidAuditDriverAgent(s string) bool {
 	switch AuditDriverAgent(s) {
-	case AuditDriverAgentClaude, AuditDriverAgentCodex:
+	case AuditDriverAgentClaude, AuditDriverAgentCodex, AuditDriverAgentCopilot:
 		return true
 	}
 	return false
@@ -136,7 +153,7 @@ func IsValidAuditDriverAgent(s string) bool {
 
 // ForceAuditDriverAgent layers the CLI --agent flag on top of an already
 // resolved invocation. It is a *pure agent selector*: when agentOverride
-// is a valid audit agent (claude|codex) it replaces inv.Agent only,
+// is a valid audit agent (claude|codex|copilot) it replaces inv.Agent only,
 // leaving the provider-derived auth on inv untouched. This is what makes
 // `--provider <p> --agent <a>` keep <p>'s BYOK auth while running
 // agent <a>. An empty or invalid override is a no-op, so the resolver's
@@ -148,16 +165,16 @@ func ForceAuditDriverAgent(inv *AuditDriverInvocation, agentOverride string) {
 	}
 	a := strings.ToLower(strings.TrimSpace(agentOverride))
 	switch AuditDriverAgent(a) {
-	case AuditDriverAgentClaude, AuditDriverAgentCodex:
+	case AuditDriverAgentClaude, AuditDriverAgentCodex, AuditDriverAgentCopilot:
 		inv.Agent = AuditDriverAgent(a)
 	}
 }
 
 // AuditDriverCLIAvailable reports whether the coding-agent CLI that
-// vigolium-audit will drive (claude or codex) is on PATH for the given
-// resolved agent. Empty defaults to claude (vigolium-audit's own default).
-// Used by --driver=auto to skip the audit leg without launching the
-// embedded binary when its required CLI is missing.
+// vigolium-audit will drive (claude, codex, or copilot) is on PATH for the
+// given resolved agent. Empty defaults to claude (vigolium-audit's own
+// default). Used by --driver=auto to skip the audit leg without launching
+// the embedded binary when its required CLI is missing.
 func AuditDriverCLIAvailable(a AuditDriverAgent) (string, bool) {
 	name := string(a)
 	if name == "" {

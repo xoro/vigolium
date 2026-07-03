@@ -39,6 +39,11 @@ bin
 !pkg/audit/bin/_bin/.gitignore
 .vscode
 
+# Bun build cache/lock artifacts left behind under platform/*/ by `bun run
+# build` (cross-compile targets). Multi-MiB each, never source, never meant
+# to be committed.
+*.bun-build
+
 # Go build artifacts
 *.test
 *.out
