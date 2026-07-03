@@ -5,11 +5,18 @@ export async function uninstallCommand(
   platform: string,
   opts: { json?: boolean } = {},
 ): Promise<void> {
-  if (platform !== "claude" && platform !== "codex") {
-    const msg = `platform must be "claude" or "codex"`;
+  if (platform !== "claude" && platform !== "codex" && platform !== "copilot") {
+    const msg = `platform must be "claude", "codex", or "copilot"`;
     if (opts.json) process.stdout.write(JSON.stringify({ ok: false, error: msg }) + "\n");
     else console.error(chalk.red(`error: ${msg}`));
     process.exit(2);
+  }
+  // No harness/plugin is ever installed for copilot (headless-only support;
+  // see run.ts's -i gate), so there's nothing for this command to remove.
+  if (platform === "copilot") {
+    if (opts.json) process.stdout.write(JSON.stringify({ ok: true, platform, removed: [] }) + "\n");
+    else console.log(`[vigolium-audit] nothing to remove for copilot (no harness is ever installed)`);
+    process.exit(0);
   }
   try {
     const { removed } = await uninstallHarness(platform);

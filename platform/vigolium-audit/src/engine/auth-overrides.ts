@@ -49,10 +49,19 @@ export function platformCredFilePath(platform: AgentPlatform): string {
   if (platform === "claude") {
     return join(homedir(), ".claude", ".credentials.json");
   }
-  return join(homedir(), ".codex", "auth.json");
+  if (platform === "codex") {
+    return join(homedir(), ".codex", "auth.json");
+  }
+  throw new Error("--oauth-cred-file is not supported for --agent copilot (no BYOK cred-file concept; use `copilot login`)");
 }
 
 export function applyAuthOverrides(opts: AuthOverrideOpts): AuthOverrideHandle {
+  if (opts.platform === "copilot" && (opts.oauthToken || opts.oauthCredFile || opts.apiKey)) {
+    throw new Error(
+      "--oauth-token/--oauth-cred-file/--api-key are not supported for --agent copilot — " +
+        "it always uses the `copilot` binary's own ambient `copilot login` auth. Drop these flags.",
+    );
+  }
   const savedEnv: SavedEnv[] = [];
   const savedFiles: SavedFile[] = [];
   const noteCodexNoop = opts.platform === "codex" && !!opts.oauthToken;
@@ -119,7 +128,12 @@ export function applyAuthOverrides(opts: AuthOverrideOpts): AuthOverrideHandle {
   };
 
   if (opts.oauthToken) setEnv("CLAUDE_CODE_OAUTH_TOKEN", opts.oauthToken);
-  if (opts.apiKey) setEnv(platformApiKeyEnv(opts.platform), opts.apiKey);
+  if (opts.apiKey) {
+    const keyEnv = platformApiKeyEnv(opts.platform);
+    // Guarded above for copilot (apiKey rejected before this point), so
+    // keyEnv is always non-null here for the two platforms that can reach it.
+    if (keyEnv) setEnv(keyEnv, opts.apiKey);
+  }
 
   if (opts.oauthCredFile) {
     const src = resolve(opts.oauthCredFile);

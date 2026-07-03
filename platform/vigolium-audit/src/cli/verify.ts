@@ -6,6 +6,7 @@ import { ClaudeCliAdapter } from "../adapters/claude-cli.js";
 import { ClaudeSdkAdapter } from "../adapters/claude-sdk.js";
 import { CodexCliAdapter } from "../adapters/codex-cli.js";
 import { CodexSdkAdapter } from "../adapters/codex-sdk.js";
+import { CopilotCliAdapter } from "../adapters/copilot-cli.js";
 import { chooseAdapter } from "../adapters/detect.js";
 import { getContentLoader } from "../content-loader.js";
 import type { AgentPlatform } from "../engine/types.js";
@@ -27,13 +28,13 @@ export async function verifyCommand(
   platform: string,
   opts: { json?: boolean } = {},
 ): Promise<void> {
-  if (platform !== "claude" && platform !== "codex") {
+  if (platform !== "claude" && platform !== "codex" && platform !== "copilot") {
     if (opts.json) {
       process.stdout.write(
-        JSON.stringify({ ok: false, error: `platform must be "claude" or "codex"`, platform }) + "\n",
+        JSON.stringify({ ok: false, error: `platform must be "claude", "codex", or "copilot"`, platform }) + "\n",
       );
     } else {
-      console.error(chalk.red(`error: platform must be "claude" or "codex"`));
+      console.error(chalk.red(`error: platform must be "claude", "codex", or "copilot"`));
     }
     process.exit(2);
   }
@@ -100,7 +101,9 @@ async function buildChecks(platform: AgentPlatform): Promise<Check[]> {
           const installHint =
             platform === "claude"
               ? "install via `npm i -g @anthropic-ai/claude-code`, or set VIGOLIUM_AUDIT_CLAUDE_PATH"
-              : "install via `npm i -g @openai/codex`, or set VIGOLIUM_AUDIT_CODEX_PATH";
+              : platform === "codex"
+                ? "install via `npm i -g @openai/codex`, or set VIGOLIUM_AUDIT_CODEX_PATH"
+                : "install via `npm i -g @github/copilot`, or set VIGOLIUM_AUDIT_COPILOT_PATH";
           return { ok: false, detail: `no \`${platform}\` binary on PATH`, hint: installHint };
         }
         if (!existsSync(choice.binaryPath)) {
@@ -136,11 +139,14 @@ async function buildChecks(platform: AgentPlatform): Promise<Check[]> {
       label: "auth source",
       run: () => {
         if (choice.authSource === "unknown") {
-          const envVar = platform === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+          const hint =
+            platform === "copilot"
+              ? `run \`copilot login\` to authenticate the CLI (no BYOK API key applies)`
+              : `set ${platform === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY"}=\u2026 or install the ${platform} CLI to use ambient subscription auth`;
           return {
             ok: false,
-            detail: "no API key and no installed binary detected",
-            hint: `set ${envVar}=… or install the ${platform} CLI to use ambient subscription auth`,
+            detail: platform === "copilot" ? "no copilot binary detected" : "no API key and no installed binary detected",
+            hint,
           };
         }
         return {
@@ -177,9 +183,11 @@ async function buildChecks(platform: AgentPlatform): Promise<Check[]> {
             ? choice.flavor === "cli"
               ? new ClaudeCliAdapter({ pathToClaudeCodeExecutable: choice.binaryPath })
               : new ClaudeSdkAdapter({ pathToClaudeCodeExecutable: choice.binaryPath })
-            : choice.flavor === "cli"
-              ? new CodexCliAdapter({ pathToCodexExecutable: choice.binaryPath })
-              : new CodexSdkAdapter({ codexPathOverride: choice.binaryPath });
+            : platform === "codex"
+              ? choice.flavor === "cli"
+                ? new CodexCliAdapter({ pathToCodexExecutable: choice.binaryPath })
+                : new CodexSdkAdapter({ codexPathOverride: choice.binaryPath })
+              : new CopilotCliAdapter({ pathToCopilotExecutable: choice.binaryPath });
         const startedAt = Date.now();
         try {
           await adapter.probe();
@@ -192,7 +200,9 @@ async function buildChecks(platform: AgentPlatform): Promise<Check[]> {
             hint =
               platform === "claude"
                 ? "check ANTHROPIC_API_KEY or run `claude login`"
-                : "check OPENAI_API_KEY or run `codex login`";
+                : platform === "codex"
+                  ? "check OPENAI_API_KEY or run `codex login`"
+                  : "run `copilot login`";
           } else if (/quota|billing|out_of_credits/i.test(msg)) {
             hint = "API quota / billing — check your provider dashboard";
           } else if (/rate[_ ]?limit/i.test(msg)) {

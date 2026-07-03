@@ -32,7 +32,7 @@ cli.option("--streaming", "Animate agent message text as a typewriter (default: 
 // confirm/resume forwarding.
 cli.option(
   "--agent <agent>",
-  "Agent platform (claude|codex). Defaults to claude where it applies; ignored by deterministic commands (strip/status/list/...) and by `merge --premerge-only`.",
+  "Agent platform (claude|codex|copilot). Defaults to claude where it applies; ignored by deterministic commands (strip/status/list/...) and by `merge --premerge-only`. --agent copilot is headless-only (no -i/--interactive support yet).",
 );
 
 // --- examples (shown under `vigolium-audit --help`) -----------------------------------

@@ -8,6 +8,7 @@ import { ClaudeCliAdapter } from "../adapters/claude-cli.js";
 import { ClaudeSdkAdapter } from "../adapters/claude-sdk.js";
 import { CodexCliAdapter } from "../adapters/codex-cli.js";
 import { CodexSdkAdapter } from "../adapters/codex-sdk.js";
+import { CopilotCliAdapter } from "../adapters/copilot-cli.js";
 import { chooseAdapter } from "../adapters/detect.js";
 import { getContentLoader } from "../content-loader.js";
 import { Orchestrator, type OrchestratorResult } from "../engine/orchestrator.js";
@@ -128,8 +129,19 @@ export async function runCommand(opts: RunOptions): Promise<void> {
   }
   const isChain = requestedModes.length > 1;
   const platform = (opts.agent ?? "claude") as AgentPlatform;
-  if (platform !== "claude" && platform !== "codex") {
-    fail(`--agent must be "claude" or "codex"`);
+  if (platform !== "claude" && platform !== "codex" && platform !== "copilot") {
+    fail(`--agent must be "claude", "codex", or "copilot"`);
+  }
+
+  // Interactive mode (-i) hands off to the underlying CLI's own
+  // slash-command/plugin system (see engine/harness.ts). Copilot's plugin
+  // format has no direct equivalent of Claude's custom slash commands (only
+  // agents/skills/hooks/MCP/LSP components), so mapping vigolium-audit's
+  // mode dispatch onto it hasn't been designed yet. Headless runs are
+  // unaffected -- the orchestrator drives copilot's adapter.run() directly
+  // per phase and never needs a harness at all.
+  if (opts.interactive && platform === "copilot") {
+    fail(`--agent copilot does not yet support -i/--interactive (no harness mapping designed for Copilot's plugin format). Run headless instead.`);
   }
 
   // Tell Claude Code it's running in a sandboxed context so it doesn't refuse
@@ -527,7 +539,9 @@ async function runHeadless(args: {
     const installHint =
       platform === "claude"
         ? "`npm i -g @anthropic-ai/claude-code`, or set VIGOLIUM_AUDIT_CLAUDE_PATH"
-        : "`npm i -g @openai/codex`, or set VIGOLIUM_AUDIT_CODEX_PATH";
+        : platform === "codex"
+          ? "`npm i -g @openai/codex`, or set VIGOLIUM_AUDIT_CODEX_PATH"
+          : "`npm i -g @github/copilot`, or set VIGOLIUM_AUDIT_COPILOT_PATH";
     const msg = `no \`${platform}\` binary found. Install via ${installHint}.`;
     if (json) emitJsonEvent({ kind: "fatal", error: msg });
     else console.error(chalk.red(`error: ${msg}`));
@@ -544,9 +558,11 @@ async function runHeadless(args: {
       ? choice.flavor === "cli"
         ? new ClaudeCliAdapter({ pathToClaudeCodeExecutable: choice.binaryPath, ...modelSpread })
         : new ClaudeSdkAdapter({ pathToClaudeCodeExecutable: choice.binaryPath, ...modelSpread })
-      : choice.flavor === "cli"
-        ? new CodexCliAdapter({ pathToCodexExecutable: choice.binaryPath, ...modelSpread })
-        : new CodexSdkAdapter({ codexPathOverride: choice.binaryPath, ...modelSpread });
+      : platform === "codex"
+        ? choice.flavor === "cli"
+          ? new CodexCliAdapter({ pathToCodexExecutable: choice.binaryPath, ...modelSpread })
+          : new CodexSdkAdapter({ codexPathOverride: choice.binaryPath, ...modelSpread })
+        : new CopilotCliAdapter({ pathToCopilotExecutable: choice.binaryPath, ...modelSpread });
 
   if (!json) {
     const modelLabel = effectiveModel

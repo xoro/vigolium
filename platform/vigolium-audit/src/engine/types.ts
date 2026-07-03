@@ -10,7 +10,7 @@ export type AuditMode =
   | "longshot"
   | "refresh";
 
-export type AgentPlatform = "claude" | "codex";
+export type AgentPlatform = "claude" | "codex" | "copilot";
 
 export interface RunOptions {
   mode?: AuditMode;

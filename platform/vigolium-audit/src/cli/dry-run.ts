@@ -28,12 +28,17 @@ export async function dryRunCommand(opts: RunOptions): Promise<void> {
     return fail(json, (err as Error).message);
   }
   const platform = (opts.agent ?? "claude") as AgentPlatform;
-  if (platform !== "claude" && platform !== "codex") {
-    return fail(json, `--agent must be "claude" or "codex"`);
+  if (platform !== "claude" && platform !== "codex" && platform !== "copilot") {
+    return fail(json, `--agent must be "claude", "codex", or "copilot"`);
   }
   const targetDir = resolve(opts.target ?? ".");
   const loader = getContentLoader();
   const roots = resolveRoots();
+  // Copilot's plugin/slash-command format is close enough to Claude's own
+  // (a real agents/skills/plugin.json system, see the "copilot" case) that
+  // it uses the default (Claude-shaped) content variant, same as Claude
+  // itself -- only Codex needs the transformed "sdk" variant, since it has
+  // no comparable plugin/slash-command system to strip references to.
   const variant: ContentVariant = platform === "codex" ? "sdk" : "default";
   const noGit = opts.git === false;
   const git = noGit

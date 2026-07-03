@@ -36,7 +36,7 @@ export const CODEX_AGENTS_END = "# END vigolium-audit";
  */
 
 export interface SetupResult {
-  platform: "claude" | "codex";
+  platform: "claude" | "codex" | "copilot";
   installPath: string;
   agentsInstalled: number;
   commandsInstalled: number;
@@ -90,10 +90,22 @@ const CodexHarnessSchema = z.object({
   exclude: z.array(z.string()).default([]),
 });
 
-export async function installHarness(platform: "claude" | "codex"): Promise<SetupResult> {
+export async function installHarness(platform: "claude" | "codex" | "copilot"): Promise<SetupResult> {
   const loader = getContentLoader();
   if (platform === "claude") return installClaudeHarness(loader);
-  return installCodexHarness(loader);
+  if (platform === "codex") return installCodexHarness(loader);
+  // Copilot never gets a harness: the orchestrator drives its adapter.run()
+  // directly per phase (composed system+user prompt, no plugin/slash-command
+  // dispatch), so there's nothing to install. See run.ts's -i gate and
+  // AGENTS.md doc comment on the AgentPlatform union for the full rationale.
+  return {
+    platform: "copilot",
+    installPath: "(none — copilot uses no harness)",
+    agentsInstalled: 0,
+    commandsInstalled: 0,
+    skillsInstalled: 0,
+    excluded: [],
+  };
 }
 
 async function installClaudeHarness(loader: ReturnType<typeof getContentLoader>): Promise<SetupResult> {
@@ -379,7 +391,8 @@ async function copyDir(src: string, dst: string): Promise<void> {
   }
 }
 
-export async function uninstallHarness(platform: "claude" | "codex"): Promise<{ removed: string[] }> {
+export async function uninstallHarness(platform: "claude" | "codex" | "copilot"): Promise<{ removed: string[] }> {
+  if (platform === "copilot") return { removed: [] };
   if (platform === "claude") {
     const dir = claudePluginDir();
     if (!existsSync(dir)) return { removed: [] };
@@ -419,7 +432,8 @@ export async function uninstallHarness(platform: "claude" | "codex"): Promise<{ 
   return { removed };
 }
 
-function uninstallHarnessSync(platform: "claude" | "codex"): void {
+function uninstallHarnessSync(platform: "claude" | "codex" | "copilot"): void {
+  if (platform === "copilot") return;
   if (platform === "claude") {
     const dir = claudePluginDir();
     if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
@@ -464,7 +478,7 @@ export interface EphemeralHarnessHandle {
  * accept it for now; document if it bites users.
  */
 export async function registerEphemeralHarness(
-  platform: "claude" | "codex",
+  platform: "claude" | "codex" | "copilot",
 ): Promise<EphemeralHarnessHandle> {
   const installResult = await installHarness(platform);
   let cleaned = false;

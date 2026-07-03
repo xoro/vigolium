@@ -41,6 +41,16 @@ export function probeCodexBinary(): BinaryProbe {
   ]);
 }
 
+/**
+ * Find the user's `copilot` binary (the official GitHub Copilot CLI). Unlike
+ * claude/codex, Copilot isn't vendored as an npm dependency of this project,
+ * so there's no bundled-dev fallback -- just env override, PATH, and the
+ * usual manual-install locations.
+ */
+export function probeCopilotBinary(): BinaryProbe {
+  return probeBinary("copilot", "VIGOLIUM_AUDIT_COPILOT_PATH", []);
+}
+
 function probeBinary(name: string, envOverride: string, bundledPackages: string[]): BinaryProbe {
   const fromEnv = process.env[envOverride];
   if (fromEnv && existsSync(fromEnv)) {
@@ -107,14 +117,32 @@ export interface ResolvedAdapterChoice {
  * Env var name that holds the platform's API key.
  *   claude → ANTHROPIC_API_KEY
  *   codex  → OPENAI_API_KEY
+ *   copilot → none (BYOK API keys aren't a Copilot CLI concept; it always
+ *             relies on the binary's own ambient `copilot login` auth)
  */
-export function platformApiKeyEnv(platform: AgentPlatform): string {
-  return platform === "claude" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+export function platformApiKeyEnv(platform: AgentPlatform): string | null {
+  if (platform === "claude") return "ANTHROPIC_API_KEY";
+  if (platform === "codex") return "OPENAI_API_KEY";
+  return null;
 }
 
 export function chooseAdapter(platform: AgentPlatform): ResolvedAdapterChoice {
+  if (platform === "copilot") {
+    // No SDK flavor exists for Copilot (no @github/copilot-sdk equivalent in
+    // use here) and no BYOK API-key path -- it's CLI-only, authenticated via
+    // whatever `copilot login` state the binary already has.
+    const probe = probeCopilotBinary();
+    return {
+      platform,
+      flavor: "cli",
+      binaryPath: probe.path,
+      binarySource: probe.source,
+      authSource: probe.path ? "subscription" : "unknown",
+    };
+  }
   const probe = platform === "claude" ? probeClaudeBinary() : probeCodexBinary();
-  const hasKey = !!process.env[platformApiKeyEnv(platform)];
+  const keyEnv = platformApiKeyEnv(platform);
+  const hasKey = !!(keyEnv && process.env[keyEnv]);
   const flavor: "sdk" | "cli" = hasKey ? "sdk" : "cli";
   const authSource: ResolvedAdapterChoice["authSource"] = hasKey
     ? "api-key"
