@@ -98,12 +98,14 @@ function formatDate(value?: string): string {
   if (!value) {
     return new Date().toLocaleDateString(undefined, {
       weekday: "long", year: "numeric", month: "long", day: "numeric",
+      hour: "2-digit", minute: "2-digit", timeZoneName: "short",
     });
   }
   const parsed = new Date(value);
   if (isNaN(parsed.getTime())) return value;
   return parsed.toLocaleDateString(undefined, {
     weekday: "long", year: "numeric", month: "long", day: "numeric",
+    hour: "2-digit", minute: "2-digit", timeZoneName: "short",
   });
 }
 

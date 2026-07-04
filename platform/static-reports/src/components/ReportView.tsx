@@ -525,6 +525,9 @@ export default function ReportView({ data, scanDuration, generatedAt, scanTarget
         year: "numeric",
         month: "long",
         day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        timeZoneName: "short",
       });
     }
     const d = new Date(generatedAt);
@@ -534,6 +537,9 @@ export default function ReportView({ data, scanDuration, generatedAt, scanTarget
       year: "numeric",
       month: "long",
       day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
     });
   }, [generatedAt]);
 

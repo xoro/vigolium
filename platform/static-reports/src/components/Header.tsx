@@ -27,6 +27,9 @@ function formatDate(value?: string): string {
       year: "numeric",
       month: "long",
       day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      timeZoneName: "short",
     });
   }
   const parsed = new Date(value);
@@ -36,6 +39,9 @@ function formatDate(value?: string): string {
     year: "numeric",
     month: "long",
     day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
   });
 }
 
