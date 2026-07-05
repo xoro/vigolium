@@ -18,6 +18,7 @@ interface Props {
   reportTitle?: string;
   scanTarget?: string;
   agentName?: string;
+  skills?: string;
   inputTokens?: number;
   outputTokens?: number;
   costUSD?: number;
@@ -184,7 +185,7 @@ function formatDate(value?: string): string {
   });
 }
 
-export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, inputTokens, outputTokens, costUSD, reportSharedURL }: Props) {
+export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, skills, inputTokens, outputTokens, costUSD, reportSharedURL }: Props) {
   const summary = useMemo(() => {
     const s = computeSummary(data);
     if (scanDuration) s.scanDuration = scanDuration;
@@ -228,6 +229,7 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           { label: "Total Findings", value: String(total) },
           { label: "Duration", value: summary.scanDuration === "N/A" ? <span style={{ color: "darkmagenta" }}>N/A</span> : <span style={{ color: "var(--v-info)" }}>{summary.scanDuration}</span> },
           ...(agentName ? [{ label: "Agent/LLM", value: <span style={{ color: "var(--v-accent)" }}>{agentName}</span> }] : []),
+          ...(agentName ? [{ label: "Skills", value: <span style={{ color: "var(--v-accent)" }}>{skills && skills.trim() ? skills : "n/a"}</span> }] : []),
           ...(agentName ? [{
             label: "Tokens",
             value: (() => {

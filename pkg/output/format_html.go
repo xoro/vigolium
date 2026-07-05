@@ -25,6 +25,7 @@ type HTMLReportMeta struct {
 	GeneratedAt     string
 	ReportSharedURL string
 	AgentName       string  // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
+	Skills          string  // comma-separated list of skills loaded for this run (empty = none)
 	InputTokens     int64   // total LLM input tokens consumed by the scan
 	OutputTokens    int64   // total LLM output tokens consumed by the scan
 	CostUSD         float64 // estimated cost in USD
@@ -39,6 +40,7 @@ type HTMLReportData struct {
 	VigoliumVersion string
 	ReportSharedURL string
 	AgentName       string
+	Skills          string
 	InputTokens     int64
 	OutputTokens    int64
 	CostUSD         float64
@@ -108,6 +110,7 @@ func GenerateHTMLReport(items []any, outputPath string, meta HTMLReportMeta) err
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
 	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
+	before = strings.Replace(before, "{{.Skills}}", meta.Skills, 1)
 	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
 	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
 	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
@@ -188,6 +191,7 @@ func GenerateHTMLReportStreaming(produce ReportItemProducer, outputPath string, 
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
 	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
+	before = strings.Replace(before, "{{.Skills}}", meta.Skills, 1)
 	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
 	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
 	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
@@ -258,6 +262,7 @@ func generateHTMLReportLegacy(items []any, outputPath string, meta HTMLReportMet
 		ScanTarget:      meta.ScanTarget,
 		VigoliumVersion: meta.Version,
 		AgentName:       meta.AgentName,
+		Skills:          meta.Skills,
 		InputTokens:     meta.InputTokens,
 		OutputTokens:    meta.OutputTokens,
 		CostUSD:         meta.CostUSD,
