@@ -79,6 +79,11 @@ var (
 	auditAPIKey        string
 	auditOAuthToken    string
 	auditOAuthCredFile string
+
+	// auditSkills lists skills to record in the HTML report meta (--stateless
+	// only). Audit uses the vigolium-audit binary, not the olium engine, so
+	// skills don't modify audit behavior — they are informational only.
+	auditSkills []string
 )
 
 var agentAuditCmd = &cobra.Command{
@@ -168,6 +173,7 @@ func registerAuditFlags(cmd *cobra.Command) {
 	f.BoolVar(&auditCleanRaw, "clean-raw", false, "[audit] Remove <source>/vigolium-results/ from the source tree after the run (the session copy is always kept). Inverts the default --keep-raw retention of the source-folder copy. No effect on the piolium leg.")
 	f.BoolVarP(&auditStateless, "stateless", "S", false, "Run the audit into a throwaway temporary database (the main DB is left untouched) and auto-write a self-contained HTML report. Mirrors 'vigolium scan -S'. Not valid with --interactive.")
 	f.StringVarP(&auditReportOutput, "output", "o", "", "HTML report path for --stateless runs (default vigolium-result/vigolium-audit-report.html; supports gs://<project>/<key> and {ts}). Only applies with -S/--stateless.")
+	f.StringSliceVar(&auditSkills, "skill", nil, "Skills to record in the HTML report for --stateless runs (repeatable or comma-separated, e.g. --skill caveman). Informational only: audit uses vigolium-audit, not the olium engine.")
 
 	// Audit-only. audit now drives both Claude Code and Codex
 	// internally, so anthropic-* and openai-* providers are both
@@ -580,7 +586,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		} else if db == nil {
 			fmt.Fprintf(os.Stderr, "%s --stateless: skipping HTML report — database unavailable\n",
 				terminal.WarningSymbol())
-		} else if err := emitAuditStatelessReport(context.Background(), db, projectUUID, auditReportOutput, absTarget, agentNameWithModel(auditAgent), startedAt); err != nil {
+		} else if err := emitAuditStatelessReport(context.Background(), db, projectUUID, auditReportOutput, absTarget, agentNameWithModel(auditAgent), strings.Join(auditSkills, ", "), startedAt); err != nil {
 			fmt.Fprintf(os.Stderr, "%s --stateless: HTML report generation failed: %v\n",
 				terminal.WarningSymbol(), err)
 		}

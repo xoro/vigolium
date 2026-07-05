@@ -85,7 +85,7 @@ const defaultAuditStatelessReport = "vigolium-result/vigolium-audit-report.html"
 // outputArg overrides the destination (-o/--output); empty falls back to
 // defaultAuditStatelessReport. The path supports gs:// upload and {ts}
 // placeholders via resolveExportOutput, mirroring `vigolium export`.
-func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID, outputArg, target, agentName string, startedAt time.Time) error {
+func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID, outputArg, target, agentName, skills string, startedAt time.Time) error {
 	outputArg = strings.TrimSpace(outputArg)
 	if outputArg == "" {
 		outputArg = defaultAuditStatelessReport
@@ -139,6 +139,7 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 	if agentName != "" {
 		meta.AgentName = agentName
 	}
+	meta.Skills = skills // may be empty; frontend renders "n/a" when empty
 	if d := time.Since(startedAt).Round(time.Second); d > 0 {
 		meta.ScanDuration = d.String()
 	}

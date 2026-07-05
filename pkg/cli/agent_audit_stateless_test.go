@@ -96,7 +96,7 @@ func TestEmitAuditStatelessReport_DefaultPath(t *testing.T) {
 	require.NoError(t, os.Chdir(tmp))
 	t.Cleanup(func() { _ = os.Chdir(cwd) })
 
-	err = emitAuditStatelessReport(context.Background(), db, "proj-audit", "", "/some/source", "", timeAnchor())
+	err = emitAuditStatelessReport(context.Background(), db, "proj-audit", "", "/some/source", "", "", timeAnchor())
 	require.NoError(t, err)
 
 	reportPath := filepath.Join(tmp, defaultAuditStatelessReport)
@@ -114,7 +114,7 @@ func TestEmitAuditStatelessReport_OutputOverride(t *testing.T) {
 	seedFindingAndRecord(t, db, "proj-other", "dropped")
 
 	out := filepath.Join(t.TempDir(), "nested", "report.html")
-	err := emitAuditStatelessReport(context.Background(), db, "proj-keep", out, "/src", "", timeAnchor())
+	err := emitAuditStatelessReport(context.Background(), db, "proj-keep", out, "/src", "", "", timeAnchor())
 	require.NoError(t, err)
 
 	data, readErr := os.ReadFile(out)
@@ -129,7 +129,7 @@ func TestEmitAuditStatelessReport_OutputOverride(t *testing.T) {
 func TestEmitAuditStatelessReport_EmptyDB(t *testing.T) {
 	db := newExportTestDB(t)
 	out := filepath.Join(t.TempDir(), "empty.html")
-	err := emitAuditStatelessReport(context.Background(), db, "proj-empty", out, "", "", timeAnchor())
+	err := emitAuditStatelessReport(context.Background(), db, "proj-empty", out, "", "", "", timeAnchor())
 	require.NoError(t, err)
 	_, statErr := os.Stat(out)
 	require.NoError(t, statErr)
