@@ -228,14 +228,30 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           { label: "Total Findings", value: String(total) },
           { label: "Duration", value: summary.scanDuration === "N/A" ? <span style={{ color: "darkmagenta" }}>N/A</span> : <span style={{ color: "var(--v-info)" }}>{summary.scanDuration}</span> },
           ...(agentName ? [{ label: "Agent/LLM", value: <span style={{ color: "var(--v-accent)" }}>{agentName}</span> }] : []),
-          ...(agentName ? [{ label: "Tokens", value: <span style={{ color: "var(--v-info)" }}>in: {agentName.startsWith("copilot") ? "n/a" : (inputTokens ?? 0).toLocaleString()} · out: {(outputTokens ?? 0).toLocaleString()}</span> }] : []),
+          ...(agentName ? [{
+            label: "Tokens",
+            value: (() => {
+              // copilot-cli: only output tokens are available today.
+              // cached and write will auto-populate when the data pipeline provides them
+              // (extend HTMLReportMeta + DB query with cachedInputTokens / cacheWriteTokens).
+              const isCopilot = agentName.startsWith("copilot");
+              const inTok  = isCopilot ? "n/a" : (inputTokens  ?? 0).toLocaleString();
+              const cacTok = "n/a"; // cached input tokens — not yet exposed by any agent
+              const wrTok  = "n/a"; // cache write tokens  — not yet exposed by any agent
+              const outTok = (outputTokens ?? 0).toLocaleString();
+              return <span style={{ color: "var(--v-info)" }}>in: {inTok} · cached: {cacTok} · write: {wrTok} · out: {outTok}</span>;
+            })()
+          }] : []),
           ...(agentName ? [{
             label: "Cost",
             value: (() => {
               const { inputCost, outputCost } = computeCosts(agentName, inputTokens, outputTokens);
-              const inLabel = agentName.startsWith("copilot") || inputCost === undefined ? "n/a" : `~$${inputCost.toFixed(4)}`;
+              const isCopilot = agentName.startsWith("copilot");
+              const inLabel  = isCopilot || inputCost  === undefined ? "n/a" : `~$${inputCost.toFixed(4)}`;
+              const cacLabel = "n/a"; // cached input cost — no cached token data yet
+              const wrLabel  = "n/a"; // cache write cost  — no cache write token data yet
               const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
-              return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · out: {outLabel}</span>;
+              return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · cached: {cacLabel} · write: {wrLabel} · out: {outLabel}</span>;
             })()
           }] : []),
           { label: "Status", value: <span style={{ color: "var(--v-success)" }}>● COMPLETED</span> },
