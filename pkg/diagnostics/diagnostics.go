@@ -532,6 +532,23 @@ func checkAgent(settings *config.Settings) *AgentCheck {
 		}
 		details = append(details, fmt.Sprintf("claude binary: %s", path))
 		binary = path
+	case "copilot-cli":
+		path, err := exec.LookPath("copilot")
+		if err != nil {
+			return &AgentCheck{
+				Status:   StatusError,
+				Name:     "olium",
+				Protocol: provider,
+				Message:  "`copilot` binary not found in PATH",
+				Details:  details,
+				// Unlike claude/agent-browser/pi, copilot has no entry in the
+				// fix registry (fixRegistry in fix.go), so there is no
+				// `--fix --only copilot` to point users at here.
+				Tip: "Install the GitHub Copilot CLI: `brew install --cask copilot-cli` (or see https://docs.github.com/en/copilot/concepts/agents/about-copilot-cli).",
+			}
+		}
+		details = append(details, fmt.Sprintf("copilot binary: %s", path))
+		binary = path
 	case "anthropic-vertex", "google-vertex":
 		// Vertex providers rely on GCP service-account credentials; we don't
 		// validate the SA file here today (the LoadVertex path does it lazily
@@ -577,7 +594,7 @@ func checkAgent(settings *config.Settings) *AgentCheck {
 			Protocol: provider,
 			Message:  fmt.Sprintf("unknown olium provider %q", provider),
 			Details:  details,
-			Tip:      "Set agent.olium.provider to one of: openai-codex-oauth, openai-api-key, anthropic-api-key, anthropic-oauth, anthropic-cli, anthropic-vertex, google-vertex, openai-compatible.",
+			Tip:      "Set agent.olium.provider to one of: openai-codex-oauth, openai-api-key, anthropic-api-key, anthropic-oauth, anthropic-cli, copilot-cli, anthropic-vertex, google-vertex, openai-compatible.",
 		}
 	}
 

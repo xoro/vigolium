@@ -1,8 +1,12 @@
 package diagnostics
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vigolium/vigolium/internal/config"
 )
 
 func TestResolveAlias(t *testing.T) {
@@ -177,4 +181,43 @@ func TestHasFixableIssues(t *testing.T) {
 	if !HasFixableIssues(r) {
 		t.Error("failing nuclei-templates should be fixable")
 	}
+}
+
+// TestCheckAgentCopilotCLI is a regression test for a bug where
+// agent.olium.provider: copilot-cli was accepted by the runtime
+// (pkg/olium/runner.go) but rejected by `vigolium doctor` as an "unknown
+// olium provider" because this switch had never been updated with a
+// matching case.
+func TestCheckAgentCopilotCLI(t *testing.T) {
+	settings := &config.Settings{Agent: *config.DefaultAgentConfig()}
+	settings.Agent.Olium.Provider = "copilot-cli"
+
+	t.Run("copilot binary not found", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+
+		got := checkAgent(settings)
+		if got.Status != StatusError {
+			t.Fatalf("expected StatusError, got %v (message=%q)", got.Status, got.Message)
+		}
+		if got.Protocol != "copilot-cli" {
+			t.Errorf("expected protocol %q, got %q", "copilot-cli", got.Protocol)
+		}
+	})
+
+	t.Run("copilot binary found", func(t *testing.T) {
+		dir := t.TempDir()
+		copilotPath := filepath.Join(dir, "copilot")
+		if err := os.WriteFile(copilotPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", dir)
+
+		got := checkAgent(settings)
+		if got.Status != StatusOK {
+			t.Fatalf("expected StatusOK, got %v (message=%q)", got.Status, got.Message)
+		}
+		if got.Binary != copilotPath {
+			t.Errorf("expected binary %q, got %q", copilotPath, got.Binary)
+		}
+	})
 }
