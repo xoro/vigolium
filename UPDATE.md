@@ -309,13 +309,9 @@ regresses.
 **Check for upstream changes:**
 
 ```sh
-# View the upstream SKILL.md
-curl --silent --show-error \
-  https://raw.githubusercontent.com/juliusbrussee/caveman/main/SKILL.md
-
-# Diff against the vendored copy
+# Diff against the vendored copy (skill lives under skills/caveman/ in upstream)
 diff internal/resources/olium/skills/caveman/SKILL.md \
-     <(curl --silent https://raw.githubusercontent.com/juliusbrussee/caveman/main/SKILL.md)
+     <(curl --silent https://raw.githubusercontent.com/juliusbrussee/caveman/main/skills/caveman/SKILL.md)
 ```
 
 **Update process** (if upstream changed):
