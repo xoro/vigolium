@@ -251,7 +251,12 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
               const cacLabel = "n/a"; // cached input cost — no cached token data yet
               const wrLabel  = "n/a"; // cache write cost  — no cache write token data yet
               const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
-              return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · cached: {cacLabel} · write: {wrLabel} · out: {outLabel}</span>;
+              // Sum all known cost components; grows automatically as more become available
+              const knownCosts = [inputCost, outputCost].filter((c): c is number => c !== undefined);
+              const totalLabel = knownCosts.length > 0
+                ? `~$${knownCosts.reduce((a, b) => a + b, 0).toFixed(4)}`
+                : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
+              return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · cached: {cacLabel} · write: {wrLabel} · out: {outLabel} · <strong>total: {totalLabel}</strong></span>;
             })()
           }] : []),
           { label: "Status", value: <span style={{ color: "var(--v-success)" }}>● COMPLETED</span> },
