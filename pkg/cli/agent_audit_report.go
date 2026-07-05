@@ -129,7 +129,12 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 		Version: getVersion(),
 	}
 	if target != "" {
-		meta.ScanTarget = terminal.ShortenHome(target)
+		label := terminal.ShortenHome(target)
+		// Append short git SHA when the source is inside a git repo.
+		if sha, err := gitShortSHA(target); err == nil && sha != "" {
+			label += " (" + sha + ")"
+		}
+		meta.ScanTarget = label
 	}
 	if agentName != "" {
 		meta.AgentName = agentName
@@ -186,4 +191,17 @@ func agentNameWithModel(agentName string) string {
 		return agentName
 	}
 	return agentName + "/" + model
+}
+
+// gitShortSHA returns the 7-character short commit SHA of the HEAD commit for
+// the git repository that contains dir. Returns ("", err) when dir is not
+// inside a git repo or git is unavailable — callers should treat this as an
+// optional enrichment and ignore the error.
+func gitShortSHA(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--short", "HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
