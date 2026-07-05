@@ -191,6 +191,14 @@ git commit --file /tmp/msg.txt && rm /tmp/msg.txt
 | `ValidateAuditDriverInvocation` / `ValidateAuthOverride` (Go) | Assumes copilot has **no** BYOK auth path | If upstream ever adds a copilot auth mechanism (API key, OAuth), these Go-side rejections become wrong and need loosening |
 | Copilot CLI's NDJSON event shape (`copilot-events.ts`) | Determined empirically against Copilot CLI v1.0.68 — no public wire-format spec | Re-verify `assistant.message_delta` / `assistant.reasoning_delta` / `tool.execution_start` / `tool.execution_complete` / `result` shapes haven't changed after a Copilot CLI upgrade; the standalone `bun run dev -- verify copilot` command is the fastest way to catch a broken adapter |
 | Refusal-detection heuristic (`REFUSAL_PATTERN` / `isLikelyRefusal`) | English-only, pattern-matches the opening of Copilot's known refusal phrasing | If Copilot CLI's refusal wording changes, false negatives (refusals reported as success) are the failure mode — watch for phases that report `done` with `$0.00 — 0/0 tok` in well under a minute and no tool calls |
+| Upstream `run.ts` options (`tmux`, `agentBinary`, `disallowedTools`) | Added upstream in 0.1.14; our fork's `run.ts` doesn't include them (only affects interactive mode — copilot is headless-only) | When syncing, decide per-option whether to integrate into fork's `run.ts`. Currently safe to omit; revisit if a future upstream uses them in code paths copilot also exercises |
+
+## Sync history
+
+| vigolium-audit | Synced | Notes |
+| -------------- | ------ | ----- |
+| 0.1.13-alpha   | initial vendoring | Baseline; copilot adapter added on top |
+| 0.1.14-alpha   | 2026-07-05 | Upstream adds: `version-check.ts` (SDK drift detection), `setup.ts` command, `tmux`/`agentBinary`/`disallowedTools` in `run.ts`. Test fix: `copilot-events.test.ts` aiCredits expectation updated to 0.03 (3 credits × $0.01). |
 
 ## Token availability gap — check on each update
 

@@ -78,7 +78,8 @@ describe("normalizeCopilotEvent (GitHub Copilot CLI NDJSON shape)", () => {
     expect(events.length).toBe(1);
     const ev = events[0]!;
     if (ev.kind !== "finish" || !ev.ok) throw new Error("expected finish ok=true");
-    expect(ev.usd).toBe(3);
+    // 3 aiCredits × $0.01/credit = $0.03 USD (GitHub billing: 1 AI credit = $0.01)
+    expect(ev.usd).toBe(0.03);
     expect(ev.tokens).toEqual({ input: 0, output: 0 });
   });
 
