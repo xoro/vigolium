@@ -191,3 +191,34 @@ git commit --file /tmp/msg.txt && rm /tmp/msg.txt
 | `ValidateAuditDriverInvocation` / `ValidateAuthOverride` (Go) | Assumes copilot has **no** BYOK auth path | If upstream ever adds a copilot auth mechanism (API key, OAuth), these Go-side rejections become wrong and need loosening |
 | Copilot CLI's NDJSON event shape (`copilot-events.ts`) | Determined empirically against Copilot CLI v1.0.68 — no public wire-format spec | Re-verify `assistant.message_delta` / `assistant.reasoning_delta` / `tool.execution_start` / `tool.execution_complete` / `result` shapes haven't changed after a Copilot CLI upgrade; the standalone `bun run dev -- verify copilot` command is the fastest way to catch a broken adapter |
 | Refusal-detection heuristic (`REFUSAL_PATTERN` / `isLikelyRefusal`) | English-only, pattern-matches the opening of Copilot's known refusal phrasing | If Copilot CLI's refusal wording changes, false negatives (refusals reported as success) are the failure mode — watch for phases that report `done` with `$0.00 — 0/0 tok` in well under a minute and no tool calls |
+
+## Token availability gap — check on each update
+
+The Copilot CLI's `--output-format json` stream exposes `outputTokens` per
+`assistant.message` event, but never `inputTokens`. The `result` event only
+contains `premiumRequests` (billing units), not raw token counts. vigolium
+therefore cannot report input tokens for `--agent copilot` runs; they are
+displayed as `in: n/a` in HTML reports.
+
+The vigolium-audit binary emits `tokens: { input: 0, output: 0 }` for copilot
+because it collects tokens from the `result` event, not from individual
+`assistant.message.outputTokens` fields. Both input and output are 0 in the
+audit stream for copilot today.
+
+**After every Copilot CLI upgrade, verify:**
+
+```sh
+# Run a minimal prompt and check all event fields in the JSON stream
+copilot --prompt "say hi" --output-format json --no-color --allow-all-tools \
+  2>/dev/null | grep -o '"input_tokens":[0-9]*\|"inputTokens":[0-9]*' | head -5
+```
+
+If the above starts returning non-zero values, the copilot CLI has added
+input token reporting to its JSON stream. At that point:
+
+1. Update `platform/vigolium-audit/src/adapters/copilot-events.ts` to read
+   `inputTokens` from `assistant.message` events and sum them per phase.
+2. In `platform/static-reports/src/components/StatisticsTab.tsx`, remove the
+   `agentName.startsWith("copilot")` guard that forces `in: n/a` and let the
+   real count render.
+3. Update this section to reflect the new state.
