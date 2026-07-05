@@ -110,6 +110,8 @@ claude --help   # triggers first-run auth if not already done
 ### 5. Clone and build
 
 ```sh
+mkdir ~/Development
+cd ~/Development
 git clone https://github.com/xoro/vigolium.git
 cd vigolium
 
@@ -134,19 +136,19 @@ make build
 
 ```sh
 # vigolium binary is installed to $GOPATH/bin by make build
-vigolium version
+bin/vigolium version
 
 # Confirm the embedded vigolium-audit harness was built
-vigolium agent audit --help
+bin/vigolium agent audit --help
 
 # Quick smoke test — lists available audit modes
-vigolium agent audit --list-modes
+bin/vigolium agent audit --list-modes
 
 # Confirm copilot auth is working end-to-end
-vigolium doctor
+bin/vigolium doctor
 
 # Execute a whitebox scan
-vigolium agent audit --source ~/Development/vulncheck/cwe/0022 --mode lite --stateless --output /tmp/report_cwe_0022.html --agent copilot --skill caveman
+bin/vigolium agent audit --source ~/Development/vulncheck/cwe/0022 --mode lite --stateless --output /tmp/report_cwe_0022.html --agent copilot --skill caveman
 
 # Show report
 open /tmp/report_cwe_0022.html
