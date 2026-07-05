@@ -16,7 +16,7 @@ This is the primary maintenance reference for this fork of vigolium. It covers:
 **TL;DR — paste this to install everything at once:**
 
 ```sh
-brew install go git oven-sh/bun/bun node ripgrep semgrep trufflehog gitleaks jq
+brew install go git oven-sh/bun/bun node ripgrep semgrep trufflesecurity/trufflehog/trufflehog gitleaks jq
 brew install --cask claude-code copilot-cli codeql
 ```
 
@@ -42,7 +42,7 @@ brew install ripgrep
 brew install semgrep
 
 # trufflehog — secrets scanner used in audit lite phase L2
-brew install trufflehog
+brew install trufflesecurity/trufflehog/trufflehog
 
 # gitleaks — second-choice secrets scanner, fallback to trufflehog
 brew install gitleaks
