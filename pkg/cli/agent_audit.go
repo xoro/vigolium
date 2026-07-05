@@ -11,11 +11,13 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/vigolium/vigolium/internal/config"
+	oliumresources "github.com/vigolium/vigolium/internal/resources/olium"
 	"github.com/vigolium/vigolium/pkg/agent"
 	"github.com/vigolium/vigolium/pkg/audit/bin"
 	"github.com/vigolium/vigolium/pkg/cli/internal/clicommon"
 	"github.com/vigolium/vigolium/pkg/database"
 	"github.com/vigolium/vigolium/pkg/notify/webhook"
+	"github.com/vigolium/vigolium/pkg/olium/skill"
 	"github.com/vigolium/vigolium/pkg/piolium"
 	"github.com/vigolium/vigolium/pkg/storage"
 	"github.com/vigolium/vigolium/pkg/terminal"
@@ -80,9 +82,11 @@ var (
 	auditOAuthToken    string
 	auditOAuthCredFile string
 
-	// auditSkills lists skills to record in the HTML report meta (--stateless
-	// only). Audit uses the vigolium-audit binary, not the olium engine, so
-	// skills don't modify audit behavior — they are informational only.
+	// auditSkills lists skills to activate for this audit run. When non-empty,
+	// their content is written to <source>/vigolium-results/audit-skills.md
+	// before vigolium-audit starts. vigolium-audit auto-detects the file and
+	// injects it as a "Skills in Effect" section of audit-context.md, which
+	// the agents read on their first turn.
 	auditSkills []string
 )
 
@@ -173,7 +177,7 @@ func registerAuditFlags(cmd *cobra.Command) {
 	f.BoolVar(&auditCleanRaw, "clean-raw", false, "[audit] Remove <source>/vigolium-results/ from the source tree after the run (the session copy is always kept). Inverts the default --keep-raw retention of the source-folder copy. No effect on the piolium leg.")
 	f.BoolVarP(&auditStateless, "stateless", "S", false, "Run the audit into a throwaway temporary database (the main DB is left untouched) and auto-write a self-contained HTML report. Mirrors 'vigolium scan -S'. Not valid with --interactive.")
 	f.StringVarP(&auditReportOutput, "output", "o", "", "HTML report path for --stateless runs (default vigolium-result/vigolium-audit-report.html; supports gs://<project>/<key> and {ts}). Only applies with -S/--stateless.")
-	f.StringSliceVar(&auditSkills, "skill", nil, "Skills to record in the HTML report for --stateless runs (repeatable or comma-separated, e.g. --skill caveman). Informational only: audit uses vigolium-audit, not the olium engine.")
+	f.StringSliceVar(&auditSkills, "skill", nil, "Skills to activate for the audit run (repeatable or comma-separated, e.g. --skill caveman). Skill content is written to vigolium-results/audit-skills.md before the audit starts and injected into the agent's audit-context.md.")
 
 	// Audit-only. audit now drives both Claude Code and Codex
 	// internally, so anthropic-* and openai-* providers are both
@@ -520,6 +524,21 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 	streamToConsole := !auditNoStream
 	printAuditDispatchBanner(auditDriver, agent.JoinModes(auditModeChain), absTarget, parentSessionDir,
 		auditAgentDispatchSummary(auditDriver, settings, authOverride), parentUUID)
+
+	// Write activated skills to vigolium-results/audit-skills.md before the
+	// audit binary starts. vigolium-audit detects this file and injects its
+	// content as a "Skills in Effect" section into audit-context.md, which
+	// every agent reads on its first turn. This is the mechanism by which
+	// --skill caveman (and any other embedded skill) actually affects the
+	// agent's behavior — not just the HTML report metadata.
+	if len(auditSkills) > 0 {
+		if err := writeAuditSkillsFile(absTarget, auditSkills); err != nil {
+			// Log the error but don't abort the audit — a missing skills file
+			// is non-fatal; the audit proceeds without the skill guidance.
+			zap.L().Warn("Failed to write audit-skills.md; audit will proceed without skill instructions",
+				zap.Error(err), zap.Strings("skills", auditSkills))
+		}
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1206,6 +1225,58 @@ func orchestrateAuditDrivers(ctx context.Context, driver, parentSessionDir, pare
 			warnPioliumUnavailable(err)
 		}
 		return plans
+	}
+	return nil
+}
+
+// writeAuditSkillsFile loads the named embedded skills and writes their
+// combined content to <sourcePath>/vigolium-results/audit-skills.md.
+// vigolium-audit auto-detects this file in resolveAuditContext and injects
+// it as a "Skills in Effect" section of audit-context.md, making the skill
+// instructions visible to the agent on its first turn.
+//
+// Unknown skill names are noted in the output but do not cause an error —
+// the file is written with whatever skills were found.
+func writeAuditSkillsFile(sourcePath string, skillNames []string) error {
+	reg, _, err := skill.LoadFromEmbed(oliumresources.SkillsFS, oliumresources.SkillsPrefix, false)
+	if err != nil {
+		return fmt.Errorf("load embedded skill registry: %w", err)
+	}
+
+	var sections []string
+	for _, name := range skillNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		s := reg.Get(name)
+		if s == nil {
+			zap.L().Warn("Unknown skill name; skipping", zap.String("skill", name))
+			continue
+		}
+		// Include the skill's description as a header so the agent knows
+		// which skill each block belongs to, then the full body.
+		sections = append(sections, fmt.Sprintf("### %s\n\n%s\n\n%s", s.Name, s.Description, s.Body))
+	}
+
+	if len(sections) == 0 {
+		// All names were unknown — nothing to write.
+		return nil
+	}
+
+	resultsDir := filepath.Join(sourcePath, "vigolium-results")
+	if err := os.MkdirAll(resultsDir, 0o755); err != nil {
+		return fmt.Errorf("create vigolium-results dir: %w", err)
+	}
+
+	content := "# Skills in Effect\n\n" +
+		"The following skill instructions were activated by the operator via --skill. " +
+		"Follow them throughout the audit.\n\n" +
+		strings.Join(sections, "\n---\n\n")
+
+	destPath := filepath.Join(resultsDir, "audit-skills.md")
+	if err := os.WriteFile(destPath, []byte(content), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", destPath, err)
 	}
 	return nil
 }

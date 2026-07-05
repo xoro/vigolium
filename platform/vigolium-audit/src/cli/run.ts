@@ -777,6 +777,7 @@ async function runHeadless(args: {
             debug: opts.debug || undefined,
             focus: auditContext.focus,
             expectedBehaviors: auditContext.expectedBehaviors,
+            skills: auditContext.skills,
             liveTarget: opts.liveTarget,
           });
           const driver: { on: typeof Orchestrator.prototype.on; run: () => Promise<OrchestratorResult> } =
@@ -926,6 +927,7 @@ async function runHeadless(args: {
         debug: opts.debug || undefined,
         focus: auditContext.focus,
         expectedBehaviors: auditContext.expectedBehaviors,
+        skills: auditContext.skills,
         liveTarget: opts.liveTarget,
         excludePhases: refreshRouting?.excludePhases,
         triggeredVia: refreshRouting?.triggeredVia,
@@ -1080,9 +1082,9 @@ export async function resolveAuditContext(args: {
   targetDir: string;
   opts: RunOptions;
   json: boolean;
-}): Promise<{ focus?: string; expectedBehaviors?: string }> {
+}): Promise<{ focus?: string; expectedBehaviors?: string; skills?: string }> {
   const { targetDir, opts, json } = args;
-  const out: { focus?: string; expectedBehaviors?: string } = {};
+  const out: { focus?: string; expectedBehaviors?: string; skills?: string } = {};
 
   let priorAudit: Awaited<ReturnType<StateStore["latestAudit"]>> | null = null;
   const needInheritance =
@@ -1116,6 +1118,20 @@ export async function resolveAuditContext(args: {
         `[vigolium-audit] inheriting --expected-behaviors-file from audit ${priorAudit.audit_id}`,
       );
     }
+  }
+
+  // Auto-detect vigolium-results/audit-skills.md written by vigolium (Go)
+  // before launching the audit. When present, inject its content as the
+  // "Skills in Effect" section of audit-context.md so the agent follows
+  // it from the very first turn.
+  try {
+    const skillsPath = join(targetDir, "vigolium-results", "audit-skills.md");
+    const skillsContent = await readFile(skillsPath, "utf8");
+    if (skillsContent.trim()) {
+      out.skills = skillsContent.trim();
+    }
+  } catch {
+    // File absent — no skills active; not an error.
   }
 
   return out;

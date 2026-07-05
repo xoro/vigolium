@@ -22,6 +22,8 @@ export interface BaseHandoffOptions {
   debug?: boolean;
   focus?: string;
   expectedBehaviors?: string;
+  /** Skill instructions forwarded to audit-context.md (see AuditContextPayload). */
+  skills?: string;
   liveTarget?: string;
   /** Continue latest non-complete audit for this mode instead of starting fresh. */
   resume?: boolean;
@@ -119,6 +121,7 @@ export abstract class BaseHandoff<O extends BaseHandoffOptions = BaseHandoffOpti
       ...(this.opts.excludePhases !== undefined ? { excludePhases: this.opts.excludePhases } : {}),
       ...(this.opts.focus !== undefined ? { focus: this.opts.focus } : {}),
       ...(this.opts.expectedBehaviors !== undefined ? { expectedBehaviors: this.opts.expectedBehaviors } : {}),
+      ...(this.opts.skills !== undefined ? { skills: this.opts.skills } : {}),
     });
 
     // Snapshot existing audit IDs so we can identify whichever record the

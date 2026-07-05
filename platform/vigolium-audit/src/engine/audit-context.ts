@@ -74,6 +74,12 @@ export interface AuditContextPayload {
   focus?: string;
   /** Free-form user-supplied prose flagging intentional behaviors. */
   expectedBehaviors?: string;
+  /**
+   * Skill instructions that should be followed during the audit
+   * (e.g. caveman compression mode). Written to audit-context.md so the
+   * agent reads them on its first turn without any extra tooling.
+   */
+  skills?: string;
 }
 
 /**
@@ -111,6 +117,14 @@ export async function writeAuditContext(
         `The behaviors below are intentional design decisions. Do not file findings ` +
         `for issues that match these descriptions; if a candidate finding overlaps, ` +
         `note the overlap and exclude it.\n\n${payload.expectedBehaviors.trim()}`,
+    );
+  }
+  if (payload.skills) {
+    sections.push(
+      `## Skills in Effect\n\n` +
+        `The operator activated the following skill instructions for this run. ` +
+        `Follow them throughout the audit without any deviation or opt-out:\n\n` +
+        `${payload.skills.trim()}`,
     );
   }
 

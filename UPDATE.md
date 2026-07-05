@@ -297,3 +297,39 @@ revert `"claude-sonnet-5"` to standard Sonnet rates ($3.00 / $15.00).
    cd ../.. && make install
    ```
 4. Add a row to the "Sync history" table below, noting the pricing change.
+
+## Embedded skills — check for upstream updates
+
+Vigolium ships embedded skills under `internal/resources/olium/skills/`. The
+caveman skill was sourced from the upstream project at
+**https://github.com/juliusbrussee/caveman** and vendored verbatim. Check for
+updates after each Copilot CLI upgrade or when token-reduction behavior
+regresses.
+
+**Check for upstream changes:**
+
+```sh
+# View the upstream SKILL.md
+curl --silent --show-error \
+  https://raw.githubusercontent.com/juliusbrussee/caveman/main/SKILL.md
+
+# Diff against the vendored copy
+diff internal/resources/olium/skills/caveman/SKILL.md \
+     <(curl --silent https://raw.githubusercontent.com/juliusbrussee/caveman/main/SKILL.md)
+```
+
+**Update process** (if upstream changed):
+
+1. Copy the new `SKILL.md` content into
+   `internal/resources/olium/skills/caveman/SKILL.md`.
+2. Rebuild and install:
+   ```sh
+   make install
+   ```
+   The skill is embedded at compile time via `//go:embed skills` in
+   `internal/resources/olium/embed.go` — no binary re-staging needed.
+3. Run a quick comparison audit to confirm token reduction still holds:
+   ```sh
+   vigolium agent audit --source <small-target> --mode lite \
+     --agent copilot --skill caveman --stateless -S
+   ```

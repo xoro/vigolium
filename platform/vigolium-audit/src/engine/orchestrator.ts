@@ -90,6 +90,12 @@ export interface OrchestratorOptions {
    */
   expectedBehaviors?: string;
   /**
+   * Skill instructions activated for this run (e.g. caveman compression mode).
+   * Appended to every phase's system prompt so the agent follows them throughout
+   * the audit without needing to read an external file.
+   */
+  skills?: string;
+  /**
    * Live HTTP(S) endpoint for `confirm` mode. Substituted for `$ARGUMENTS`
    * in the command body and surfaced as a `Live target:` header in every
    * phase's user prompt. CLI is responsible for validation (scheme +
@@ -589,6 +595,15 @@ export class Orchestrator {
       expectedBehaviors: this.opts.expectedBehaviors,
       liveTarget: this.opts.liveTarget,
     }));
+    // Inject active skills directly into the system prompt so copilot (and any
+    // orchestrator-driven agent) follows them on every phase turn without
+    // needing to read an external audit-context.md file.
+    if (this.opts.skills) {
+      systemPrompt =
+        systemPrompt +
+        `\n\n---\n\n## Skills in Effect\n\nThe operator activated the following skill instructions for this run. ` +
+        `Follow them throughout the audit without any deviation or opt-out:\n\n${this.opts.skills.trim()}`;
+    }
     return { systemPrompt, userPrompt, tools };
   }
 
