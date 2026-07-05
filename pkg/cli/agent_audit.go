@@ -580,7 +580,7 @@ func runAgentAudit(cmd *cobra.Command, args []string) error {
 		} else if db == nil {
 			fmt.Fprintf(os.Stderr, "%s --stateless: skipping HTML report — database unavailable\n",
 				terminal.WarningSymbol())
-		} else if err := emitAuditStatelessReport(context.Background(), db, projectUUID, auditReportOutput, absTarget, startedAt); err != nil {
+		} else if err := emitAuditStatelessReport(context.Background(), db, projectUUID, auditReportOutput, absTarget, auditAgent, startedAt); err != nil {
 			fmt.Fprintf(os.Stderr, "%s --stateless: HTML report generation failed: %v\n",
 				terminal.WarningSymbol(), err)
 		}

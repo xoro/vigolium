@@ -17,6 +17,7 @@ interface Props {
   generatedAt?: string;
   reportTitle?: string;
   scanTarget?: string;
+  agentName?: string;
   reportSharedURL?: string;
 }
 
@@ -109,7 +110,7 @@ function formatDate(value?: string): string {
   });
 }
 
-export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, reportSharedURL }: Props) {
+export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, reportSharedURL }: Props) {
   const summary = useMemo(() => {
     const s = computeSummary(data);
     if (scanDuration) s.scanDuration = scanDuration;
@@ -152,6 +153,7 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           { label: "Target", value: scanTarget || summary.target },
           { label: "Total Findings", value: String(total) },
           { label: "Duration", value: summary.scanDuration === "N/A" ? <span style={{ color: "darkmagenta" }}>N/A</span> : <span style={{ color: "var(--v-info)" }}>{summary.scanDuration}</span> },
+          ...(agentName ? [{ label: "Agent", value: <span style={{ color: "var(--v-accent)" }}>{agentName}</span> }] : []),
           { label: "Status", value: <span style={{ color: "var(--v-success)" }}>● COMPLETED</span> },
         ]}
       />

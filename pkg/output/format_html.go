@@ -23,6 +23,7 @@ type HTMLReportMeta struct {
 	ScanTarget      string
 	GeneratedAt     string
 	ReportSharedURL string
+	AgentName       string // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
 }
 
 // HTMLReportData is the template data passed to template.html.
@@ -33,6 +34,7 @@ type HTMLReportData struct {
 	ScanTarget      string
 	VigoliumVersion string
 	ReportSharedURL string
+	AgentName       string
 	DataExpected    string
 	ResultsJSON     template.JS
 }
@@ -98,6 +100,7 @@ func GenerateHTMLReport(items []any, outputPath string, meta HTMLReportMeta) err
 	before = strings.Replace(before, "{{.ScanDuration}}", meta.ScanDuration, 1)
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
+	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	// Signal to the viewer that real data WAS generated. If the data array below
 	// is too large for the browser to parse, that <script> throws and leaves
@@ -174,6 +177,7 @@ func GenerateHTMLReportStreaming(produce ReportItemProducer, outputPath string, 
 	before = strings.Replace(before, "{{.ScanDuration}}", meta.ScanDuration, 1)
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
+	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	before = strings.ReplaceAll(before, "{{.DataExpected}}", "true")
 
@@ -240,6 +244,7 @@ func generateHTMLReportLegacy(items []any, outputPath string, meta HTMLReportMet
 		ScanDuration:    meta.ScanDuration,
 		ScanTarget:      meta.ScanTarget,
 		VigoliumVersion: meta.Version,
+		AgentName:       meta.AgentName,
 		ReportSharedURL: resolveReportSharedURL(meta),
 		DataExpected:    "true",
 		ResultsJSON:     template.JS(rowsJSON),
