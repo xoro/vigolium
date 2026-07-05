@@ -26,43 +26,75 @@ interface Props {
 
 const DEFAULT_REPORT_SHARED_URL = "https://console.vigolium.com/shared/audit-reports/";
 
-// Per-token output pricing from GitHub Copilot's published pricing table
-// (docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing).
-// Prices are USD per 1M output tokens. Update after each pricing change.
-// Claude Sonnet 5 is at promotional pricing through 2026-08-31.
-const OUTPUT_PRICE_PER_MTOK: Record<string, number> = {
-  "claude-sonnet-5":       10.00,
-  "claude-sonnet-4.6":     15.00,
-  "claude-sonnet-4.5":     15.00,
-  "claude-sonnet-4":       15.00,
-  "claude-opus-4.5":       25.00,
-  "claude-opus-4.6":       25.00,
-  "claude-opus-4.7":       25.00,
-  "claude-opus-4.8":       25.00,
-  "claude-haiku-4.5":       5.00,
-  "claude-fable-5":        50.00,
-  "gpt-5-mini":             2.00,
-  "gpt-5.3-codex":         14.00,
-  "gpt-5.4":               15.00,
-  "gpt-5.4-mini":           4.50,
-  "gpt-5.4-nano":           1.25,
-  "gpt-5.5":               30.00,
-  "gemini-2.5-pro":        10.00,
-  "gemini-3-flash":         3.00,
-  "gemini-3.1-pro":        12.00,
-  "gemini-3.5-flash":       9.00,
-  "raptor-mini":            2.00,
-  "mai-code-1-flash":       4.50,
-  "kimi-k2.7-code":         4.00,
+// Per-token pricing from GitHub Copilot's published pricing table.
+// Source: docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
+// All prices are USD per 1M tokens.
+//
+// HOW TO UPDATE:
+//   1. Visit the source URL above and compare against this table.
+//   2. Update the affected model entry (or add a new one).
+//   3. Run `bun run build` in platform/static-reports/ and copy
+//      dist/template.html to public/static-reports/template.html.
+//   4. Rebuild vigolium with `make install`.
+//   5. Note the change in UPDATE.md's "Sync history" table.
+//
+// NOTE: Claude Sonnet 5 promotional pricing ($2 in / $10 out) ends 2026-08-31;
+// revert to standard Sonnet rates ($3 in / $15 out) after that date.
+type ModelPricing = {
+  input: number;       // standard input tokens
+  cachedInput: number; // cache-read input tokens (prompt cache hit)
+  cacheWrite: number;  // cache-write tokens (first write to prompt cache)
+  output: number;      // output / completion tokens
 };
 
-/** Derive real output cost from output tokens + model price table.
- *  Returns undefined when the model is not in the table or tokens are missing. */
-function outputCostUSD(agentName: string | undefined, outputTokens: number | undefined): number | undefined {
-  if (!outputTokens || !agentName) return undefined;
+const MODEL_PRICING: Record<string, ModelPricing> = {
+  // Anthropic — via GitHub Copilot
+  "claude-sonnet-5":    { input:  2.00, cachedInput: 0.20, cacheWrite:  2.50, output: 10.00 }, // promo ≤2026-08-31
+  "claude-sonnet-4.6":  { input:  3.00, cachedInput: 0.30, cacheWrite:  3.75, output: 15.00 },
+  "claude-sonnet-4.5":  { input:  3.00, cachedInput: 0.30, cacheWrite:  3.75, output: 15.00 },
+  "claude-sonnet-4":    { input:  3.00, cachedInput: 0.30, cacheWrite:  3.75, output: 15.00 },
+  "claude-opus-4.5":    { input:  5.00, cachedInput: 0.50, cacheWrite:  6.25, output: 25.00 },
+  "claude-opus-4.6":    { input:  5.00, cachedInput: 0.50, cacheWrite:  6.25, output: 25.00 },
+  "claude-opus-4.7":    { input:  5.00, cachedInput: 0.50, cacheWrite:  6.25, output: 25.00 },
+  "claude-opus-4.8":    { input:  5.00, cachedInput: 0.50, cacheWrite:  6.25, output: 25.00 },
+  "claude-haiku-4.5":   { input:  1.00, cachedInput: 0.10, cacheWrite:  1.25, output:  5.00 },
+  "claude-fable-5":     { input: 10.00, cachedInput: 1.00, cacheWrite: 12.50, output: 50.00 },
+  // OpenAI — via GitHub Copilot
+  "gpt-5-mini":         { input:  0.25, cachedInput: 0.025, cacheWrite: 0, output:  2.00 },
+  "gpt-5.3-codex":      { input:  1.75, cachedInput: 0.175, cacheWrite: 0, output: 14.00 },
+  "gpt-5.4":            { input:  2.50, cachedInput: 0.25,  cacheWrite: 0, output: 15.00 },
+  "gpt-5.4-mini":       { input:  0.75, cachedInput: 0.075, cacheWrite: 0, output:  4.50 },
+  "gpt-5.4-nano":       { input:  0.20, cachedInput: 0.02,  cacheWrite: 0, output:  1.25 },
+  "gpt-5.5":            { input:  5.00, cachedInput: 0.50,  cacheWrite: 0, output: 30.00 },
+  // Google — via GitHub Copilot
+  "gemini-2.5-pro":     { input:  1.25, cachedInput: 0.125, cacheWrite: 0, output: 10.00 },
+  "gemini-3-flash":     { input:  0.50, cachedInput: 0.05,  cacheWrite: 0, output:  3.00 },
+  "gemini-3.1-pro":     { input:  2.00, cachedInput: 0.20,  cacheWrite: 0, output: 12.00 },
+  "gemini-3.5-flash":   { input:  1.50, cachedInput: 0.15,  cacheWrite: 0, output:  9.00 },
+  // GitHub fine-tuned
+  "raptor-mini":        { input:  0.25, cachedInput: 0.025, cacheWrite: 0, output:  2.00 },
+  // Microsoft — via GitHub Copilot
+  "mai-code-1-flash":   { input:  0.75, cachedInput: 0.075, cacheWrite: 0, output:  4.50 },
+  // Moonshot AI
+  "kimi-k2.7-code":     { input:  0.95, cachedInput: 0.19,  cacheWrite: 0, output:  4.00 },
+};
+
+/** Derive per-token costs from model pricing table.
+ *  Extracts model name from agentName (e.g. "copilot/claude-sonnet-5" → "claude-sonnet-5").
+ *  Returns undefined when the model is not in the table or token counts are missing. */
+function computeCosts(
+  agentName: string | undefined,
+  inputTokens: number | undefined,
+  outputTokens: number | undefined,
+): { inputCost: number | undefined; outputCost: number | undefined } {
+  if (!agentName) return { inputCost: undefined, outputCost: undefined };
   const model = agentName.includes("/") ? agentName.split("/").pop()! : agentName;
-  const price = OUTPUT_PRICE_PER_MTOK[model.toLowerCase()];
-  return price !== undefined ? (outputTokens * price) / 1_000_000 : undefined;
+  const pricing = MODEL_PRICING[model.toLowerCase()];
+  if (!pricing) return { inputCost: undefined, outputCost: undefined };
+  return {
+    inputCost:  inputTokens  ? (inputTokens  * pricing.input)  / 1_000_000 : undefined,
+    outputCost: outputTokens ? (outputTokens * pricing.output) / 1_000_000 : undefined,
+  };
 }
 
 const SEV_ORDER = ["critical", "high", "medium", "low", "suspect", "info", "n/a"] as const;
@@ -200,9 +232,9 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           ...(agentName ? [{
             label: "Cost",
             value: (() => {
-              const calcOut = outputCostUSD(agentName, outputTokens);
-              const inLabel = agentName.startsWith("copilot") ? "n/a" : (costUSD !== undefined && calcOut !== undefined ? `~$${(costUSD - calcOut).toFixed(4)}` : "n/a");
-              const outLabel = calcOut !== undefined ? `~$${calcOut.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
+              const { inputCost, outputCost } = computeCosts(agentName, inputTokens, outputTokens);
+              const inLabel = agentName.startsWith("copilot") || inputCost === undefined ? "n/a" : `~$${inputCost.toFixed(4)}`;
+              const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
               return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · out: {outLabel}</span>;
             })()
           }] : []),

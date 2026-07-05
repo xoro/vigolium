@@ -271,3 +271,29 @@ needed — the `aiCredits * 0.01` path in `copilot-events.ts` already handles
 it. Run the command above after a Copilot CLI upgrade to detect the migration:
 if you see `aiCredits` instead of `premiumRequests`, GHE has moved to
 token-based billing and the cost display will automatically become accurate.
+
+## Model pricing table — update when prices change
+
+The HTML report computes per-token costs using `MODEL_PRICING` in
+`platform/static-reports/src/components/StatisticsTab.tsx`. Each entry covers
+all four token types (input, cached input, cache write, output), all in
+USD per 1M tokens.
+
+**Source**: https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing
+
+**⚠️ Time-sensitive**: Claude Sonnet 5 is at **promotional pricing** ($2.00
+input / $10.00 output per 1M tokens) **through 2026-08-31**. After that date
+revert `"claude-sonnet-5"` to standard Sonnet rates ($3.00 / $15.00).
+
+**Update process** (run after any GitHub Copilot pricing page change):
+
+1. Open `platform/static-reports/src/components/StatisticsTab.tsx`.
+2. Update the affected model entry in `MODEL_PRICING`, or add a new entry
+   for newly listed models. All prices are USD per 1M tokens.
+3. Build and deploy:
+   ```sh
+   cd platform/static-reports && bun run build
+   cp dist/template.html ../../public/static-reports/template.html
+   cd ../.. && make install
+   ```
+4. Add a row to the "Sync history" table below, noting the pricing change.
