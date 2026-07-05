@@ -13,6 +13,15 @@ This is the primary maintenance reference for this fork of vigolium. It covers:
 
 ### 1. Homebrew packages
 
+**TL;DR — paste this to install everything at once:**
+
+```sh
+brew install go git oven-sh/bun/bun node ripgrep semgrep trufflehog gitleaks jq
+brew install --cask claude-code copilot-cli codeql
+```
+
+**With annotations:**
+
 ```sh
 # Go toolchain (go.mod requires 1.26+)
 brew install go
