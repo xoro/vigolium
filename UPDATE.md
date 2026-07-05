@@ -222,3 +222,44 @@ input token reporting to its JSON stream. At that point:
    `agentName.startsWith("copilot")` guard that forces `in: n/a` and let the
    real count render.
 3. Update this section to reflect the new state.
+
+## aiCredits billing — check on each update
+
+GitHub switched from request-based to token-based billing (AI credits) on
+2026-06-01. **1 AI credit = $0.01 USD** (fixed rate). The copilot CLI now
+emits `aiCredits` in the `result` event for github.com accounts (legacy
+`premiumRequests` remains for GHE / annual plans).
+
+vigolium-audit converts `aiCredits * 0.01` → USD. After each Copilot CLI
+upgrade, verify the `result` event still has `aiCredits` (not a renamed field)
+and that the exchange rate hasn't changed:
+
+```sh
+copilot --prompt "say hi" --output-format json --no-color --allow-all-tools \
+  2>/dev/null | python3 -c "
+import sys, json
+for line in sys.stdin:
+    o = json.loads(line)
+    if o.get('type') == 'result':
+        print(json.dumps(o.get('usage', {}), indent=2))
+"
+```
+
+Expected output for github.com accounts (new billing):
+```json
+{ "aiCredits": 7.89, "totalApiDurationMs": ..., "sessionDurationMs": ... }
+```
+Expected output for GHE / legacy accounts:
+```json
+{ "premiumRequests": 1, "totalApiDurationMs": ..., "sessionDurationMs": ... }
+```
+
+If `aiCredits` is renamed or the rate changes from $0.01, update
+`copilot-events.ts` accordingly.
+
+**When shs.ghe.com migrates from legacy to token-based billing**, the `result`
+event will switch from `premiumRequests` to `aiCredits`. No code change is
+needed — the `aiCredits * 0.01` path in `copilot-events.ts` already handles
+it. Run the command above after a Copilot CLI upgrade to detect the migration:
+if you see `aiCredits` instead of `premiumRequests`, GHE has moved to
+token-based billing and the cost display will automatically become accurate.

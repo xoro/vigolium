@@ -59,12 +59,13 @@ function isLikelyRefusal(state: CopilotNormalizeState): string | null {
  *   tool.execution_complete      -- a tool call finished        -> "toolResult"
  *   result                       -- terminal event, one per run -> "finish"
  *
- * Copilot never reports raw input/output token counts or a USD cost in this
- * JSON stream -- only `premiumRequests` (legacy request-based billing) or
- * `aiCredits` (current token-based billing, effective 2026-06-01), depending
- * on the account's billing platform. Neither maps to `tokens`/`usd` cleanly,
- * so both stay 0 on the `finish` event; this mirrors Codex's "usd not
- * reported" comment in codex-events.ts.
+ * Copilot does not expose raw input/output token counts in this JSON stream
+ * (only outputTokens per assistant.message, which we now collect — see the
+ * assistant.message case below). Cost is reported as:
+ *   aiCredits     — token-based billing (github.com, effective 2026-06-01);
+ *                   1 AI credit = $0.01 USD.
+ *   premiumRequests — legacy request-based billing (GHE / annual plans);
+ *                   GitHub reference rate = $1/request.
  */
 export function* normalizeCopilotEvent(
   event: unknown,
@@ -118,14 +119,16 @@ export function* normalizeCopilotEvent(
     case "result": {
       const exitCode = typeof e.exitCode === "number" ? e.exitCode : 0;
       const usage = (e.usage && typeof e.usage === "object" ? e.usage : {}) as Record<string, unknown>;
-      // Neither field is a real token count -- see the doc comment above.
-      // We surface whichever the account's billing platform reports as the
-      // `usd` field so it's at least visible somewhere, clearly not USD.
+      // aiCredits: token-based billing (github.com since 2026-06-01).
+      //   1 AI credit = $0.01 USD — multiply to get real USD.
+      // premiumRequests: legacy request-based billing (GHE and annual plans).
+      //   GitHub's reference rate is $1/request; enterprise plans typically
+      //   include these in the subscription so marginal cost may be $0.
       const credits =
         typeof usage.aiCredits === "number"
-          ? usage.aiCredits
+          ? usage.aiCredits * 0.01 // convert AI credits → USD
           : typeof usage.premiumRequests === "number"
-            ? usage.premiumRequests
+            ? usage.premiumRequests // $1/request reference rate for legacy billing
             : 0;
       // Copilot exits 0 even when it flatly refuses the request in plain
       // text (no tool calls, just an apology) -- exit code alone can't tell
