@@ -1,3 +1,162 @@
+# Vigolium — Setup and Update Reference
+
+This is the primary maintenance reference for this fork of vigolium. It covers:
+
+- [Fresh install on a new macOS machine](#fresh-install-on-macos)
+- [Updating the vendored vigolium-audit binary](#updating-vigolium-audit-vendored-copy)
+- [Keeping embedded skills up to date](#embedded-skills--check-for-upstream-updates)
+- [Ongoing checks after each Copilot CLI upgrade](#token-availability-gap--check-on-each-update)
+
+---
+
+## Fresh Install on macOS
+
+### 1. Homebrew packages
+
+```sh
+# Go toolchain (go.mod requires 1.26+)
+brew install go
+
+# Version control and build tools
+brew install git
+
+# Bun — JS package manager for jsscan + audit binary builds + bun globals
+brew install oven-sh/bun/bun
+
+# Node — provides npm; fallback for bun global installs
+brew install node
+
+# ripgrep — fast search backend for olium's search tool (Go-walker fallback if absent)
+brew install ripgrep
+
+# semgrep — SAST engine; mandatory in balanced/deep audit modes
+brew install semgrep
+
+# trufflehog — secrets scanner used in audit lite phase L2
+brew install trufflehog
+
+# gitleaks — second-choice secrets scanner, fallback to trufflehog
+brew install gitleaks
+
+# jq — parses CodeQL SARIF output in the codeql skill workflows
+brew install jq
+
+# claude — anthropic-cli provider + audit Path A (--agent claude)
+brew install --cask claude-code
+
+# copilot — Copilot CLI provider + audit Path B (--agent copilot)
+brew install --cask copilot-cli
+
+# codeql — SAST data-flow engine; full skill tree under skills/codeql/
+brew install --cask codeql
+```
+
+### 2. Add Go's bin directory to PATH
+
+`make build` installs the `vigolium` binary to `$GOPATH/bin`. On a vanilla
+macOS this directory is not on PATH by default — add it once:
+
+```sh
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.zprofile
+source ~/.zprofile
+```
+
+Verify: `go env GOPATH` should print a path, and after a build,
+`which vigolium` should resolve.
+
+### 3. Global JS/agent runtimes
+
+```sh
+# agent-browser — olium browser-auth tool
+bun install --global agent-browser
+
+# @openai/codex — codex provider + audit codex platform (--agent codex)
+bun add --global @openai/codex
+
+# pi coding agent — runtime for the piolium audit driver
+bun install --global @earendil-works/pi-coding-agent
+
+# piolium — vigolium's Pi extension (requires pi and a GitHub SSH key)
+pi install git:git@github.com:vigolium/piolium.git
+```
+
+> **Note — piolium SSH key:** `pi install` uses SSH to clone from GitHub.
+> Make sure `ssh -T git@github.com` succeeds before running this step.
+> If you don't have SSH keys set up for GitHub, generate and add them first:
+> `ssh-keygen -t ed25519 -C "your@email.com"` then add the public key to
+> GitHub Settings → SSH keys.
+
+### 4. Authenticate agents
+
+Each agent needs authentication before it can run audits:
+
+```sh
+# Copilot — authenticate against shs.ghe.com (our GHE instance)
+copilot login --host https://shs.ghe.com
+
+# Claude — authentication is handled interactively by claude-code on first use
+claude --help   # triggers first-run auth if not already done
+```
+
+### 5. Clone and build
+
+```sh
+git clone https://github.com/xoro/vigolium.git
+cd vigolium
+
+# Download Go modules + build jsscan binaries (JS analysis engine)
+make deps
+
+# Optional: embed pinned Chromium archives for the SPA spider.
+# Skip this step if you don't need the spider or are happy with the
+# auto-download that happens at runtime.
+make deps-chrome
+
+# Build vigolium binary and the embedded vigolium-audit harness.
+# ensure-audit runs automatically and builds vigolium-audit if absent.
+make build
+```
+
+> **Note — bun required for `make build`:** `make build` depends on
+> `ensure-audit`, which compiles the vigolium-audit TypeScript binary using
+> bun. If bun is not installed, the build fails at this step.
+
+### 6. Verify
+
+```sh
+# vigolium binary is installed to $GOPATH/bin by make build
+vigolium version
+
+# Confirm the embedded vigolium-audit harness was built
+vigolium agent audit --help
+
+# Quick smoke test — lists available audit modes
+vigolium agent audit --list-modes
+
+# Confirm copilot auth is working end-to-end
+vigolium doctor
+
+# Execute a whitebox scan
+vigolium agent audit --source ~/Development/vulncheck/cwe/0022 --mode lite --stateless --output /tmp/report_cwe_0022.html --agent copilot --skill caveman
+
+# Show report
+open /tmp/report_cwe_0022.html
+```
+
+### What is optional vs required
+
+| Item | Required for | Optional when |
+| ---- | ------------ | ------------- |
+| `semgrep` | `balanced` and `deep` audit modes | Only running `lite` mode |
+| `trufflehog` / `gitleaks` | Audit L2 Secrets Scan (lite+) | Skipped gracefully if absent |
+| `codeql` | CodeQL skill workflows | Not using CodeQL skills |
+| `make deps-chrome` | Embedded Chromium in binary | Spider auto-downloads at runtime |
+| `claude-code` | `--agent claude` audit path | Only using copilot/codex |
+| `@openai/codex` | `--agent codex` audit path | Only using claude/copilot |
+| `pi` + `piolium` | `--driver piolium` audit leg | Not using piolium |
+
+---
+
 # Updating vigolium-audit (Vendored Copy)
 
 This document describes how to pull new changes from the upstream
