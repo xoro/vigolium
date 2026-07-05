@@ -22,6 +22,9 @@ declare global {
       scanTarget?: string;
       vigoliumVersion?: string;
       agentName?: string;
+      inputTokens?: number;
+      outputTokens?: number;
+      costUSD?: number;
       reportSharedURL?: string;
       results?: unknown[];
     };
@@ -60,6 +63,9 @@ function loadInitialData(): {
       scanTarget: injected.scanTarget,
       vigoliumVersion: injected.vigoliumVersion,
       agentName: injected.agentName,
+      inputTokens: injected.inputTokens,
+      outputTokens: injected.outputTokens,
+      costUSD: injected.costUSD,
       reportSharedURL: injected.reportSharedURL,
     };
   }
@@ -179,7 +185,7 @@ export default function App() {
       <main className={`wrap${activeTab === "findings" || activeTab === "traffic" ? " wrap--full" : ""}`}>
         <div key={activeTab} className="tab-content">
           {activeTab === "statistics" && (
-            <StatisticsTab data={data} scanDuration={initial.scanDuration} generatedAt={initial.generatedAt} reportTitle={initial.title} scanTarget={initial.scanTarget} agentName={initial.agentName} reportSharedURL={initial.reportSharedURL} />
+            <StatisticsTab data={data} scanDuration={initial.scanDuration} generatedAt={initial.generatedAt} reportTitle={initial.title} scanTarget={initial.scanTarget} agentName={initial.agentName} inputTokens={initial.inputTokens} outputTokens={initial.outputTokens} costUSD={initial.costUSD} reportSharedURL={initial.reportSharedURL} />
           )}
 
           {activeTab === "traffic" && (

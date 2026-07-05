@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,7 +24,10 @@ type HTMLReportMeta struct {
 	ScanTarget      string
 	GeneratedAt     string
 	ReportSharedURL string
-	AgentName       string // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
+	AgentName       string  // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
+	InputTokens     int64   // total LLM input tokens consumed by the scan
+	OutputTokens    int64   // total LLM output tokens consumed by the scan
+	CostUSD         float64 // estimated cost in USD
 }
 
 // HTMLReportData is the template data passed to template.html.
@@ -35,6 +39,9 @@ type HTMLReportData struct {
 	VigoliumVersion string
 	ReportSharedURL string
 	AgentName       string
+	InputTokens     int64
+	OutputTokens    int64
+	CostUSD         float64
 	DataExpected    string
 	ResultsJSON     template.JS
 }
@@ -101,6 +108,9 @@ func GenerateHTMLReport(items []any, outputPath string, meta HTMLReportMeta) err
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
 	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
+	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
+	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
+	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	// Signal to the viewer that real data WAS generated. If the data array below
 	// is too large for the browser to parse, that <script> throws and leaves
@@ -178,6 +188,9 @@ func GenerateHTMLReportStreaming(produce ReportItemProducer, outputPath string, 
 	before = strings.Replace(before, "{{.ScanTarget}}", meta.ScanTarget, 1)
 	before = strings.Replace(before, "{{.VigoliumVersion}}", meta.Version, 1)
 	before = strings.Replace(before, "{{.AgentName}}", meta.AgentName, 1)
+	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
+	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
+	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	before = strings.ReplaceAll(before, "{{.DataExpected}}", "true")
 
@@ -245,6 +258,9 @@ func generateHTMLReportLegacy(items []any, outputPath string, meta HTMLReportMet
 		ScanTarget:      meta.ScanTarget,
 		VigoliumVersion: meta.Version,
 		AgentName:       meta.AgentName,
+		InputTokens:     meta.InputTokens,
+		OutputTokens:    meta.OutputTokens,
+		CostUSD:         meta.CostUSD,
 		ReportSharedURL: resolveReportSharedURL(meta),
 		DataExpected:    "true",
 		ResultsJSON:     template.JS(rowsJSON),

@@ -18,6 +18,9 @@ interface Props {
   reportTitle?: string;
   scanTarget?: string;
   agentName?: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  costUSD?: number;
   reportSharedURL?: string;
 }
 
@@ -110,7 +113,7 @@ function formatDate(value?: string): string {
   });
 }
 
-export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, reportSharedURL }: Props) {
+export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, inputTokens, outputTokens, costUSD, reportSharedURL }: Props) {
   const summary = useMemo(() => {
     const s = computeSummary(data);
     if (scanDuration) s.scanDuration = scanDuration;
@@ -154,6 +157,8 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           { label: "Total Findings", value: String(total) },
           { label: "Duration", value: summary.scanDuration === "N/A" ? <span style={{ color: "darkmagenta" }}>N/A</span> : <span style={{ color: "var(--v-info)" }}>{summary.scanDuration}</span> },
           ...(agentName ? [{ label: "Agent/LLM", value: <span style={{ color: "var(--v-accent)" }}>{agentName}</span> }] : []),
+          ...(agentName ? [{ label: "Tokens", value: <span style={{ color: "var(--v-info)" }}>in: {(inputTokens ?? 0).toLocaleString()} · out: {(outputTokens ?? 0).toLocaleString()}</span> }] : []),
+          ...(agentName ? [{ label: "Cost", value: <span style={{ color: "var(--v-info)" }}>~${(costUSD ?? 0).toFixed(4)}</span> }] : []),
           { label: "Status", value: <span style={{ color: "var(--v-success)" }}>● COMPLETED</span> },
         ]}
       />

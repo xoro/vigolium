@@ -138,6 +138,26 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 		meta.ScanDuration = d.String()
 	}
 
+	// Query total token usage from all AgenticScan rows for this run.
+	// The throwaway temp DB holds only this run's data, so summing by
+	// project_uuid gives the scan-wide total. Errors are silently ignored;
+	// the report is still generated without token data.
+	type tokenSums struct {
+		TotalInput  int64   `bun:"total_input"`
+		TotalOutput int64   `bun:"total_output"`
+		TotalCost   float64 `bun:"total_cost"`
+	}
+	var sums tokenSums
+	if scanErr := db.NewSelect().
+		TableExpr("agentic_scans").
+		ColumnExpr("COALESCE(SUM(total_input_tokens), 0) AS total_input, COALESCE(SUM(total_output_tokens), 0) AS total_output, COALESCE(SUM(estimated_cost_usd), 0) AS total_cost").
+		Where("project_uuid = ?", projectUUID).
+		Scan(ctx, &sums); scanErr == nil {
+		meta.InputTokens = sums.TotalInput
+		meta.OutputTokens = sums.TotalOutput
+		meta.CostUSD = sums.TotalCost
+	}
+
 	if !globalJSON {
 		fmt.Fprintf(os.Stderr, "%s %s\n", terminal.InfoSymbol(),
 			terminal.BoldCyan(fmt.Sprintf("Generating HTML report — %d findings ...", len(findings))))
