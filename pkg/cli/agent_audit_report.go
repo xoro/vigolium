@@ -1,9 +1,12 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -13,6 +16,59 @@ import (
 	"github.com/vigolium/vigolium/pkg/storage"
 	"github.com/vigolium/vigolium/pkg/terminal"
 )
+
+// probeAgentModel runs a no-op prompt against the copilot CLI to determine
+// the LLM model name from the session.tools_updated JSON event stream.
+// The probe kills the subprocess immediately after the event fires — before
+// any LLM round-trip occurs — so the probe typically completes in ~400ms.
+// Returns "" when the model cannot be determined or the agent is not copilot.
+func probeAgentModel(agentName string) string {
+	if agentName != "copilot" {
+		// Only copilot exposes a model via session.tools_updated today.
+		// claude/codex can be added here when their JSON event schemas are known.
+		return ""
+	}
+	bin, err := exec.LookPath("copilot")
+	if err != nil {
+		return ""
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, "--prompt", ".", "--output-format", "json", "--no-color", "--allow-all-tools")
+	stdout, err := cmd.StdoutPipe() //nolint:gosec // bin is resolved by LookPath
+	if err != nil {
+		return ""
+	}
+	if err := cmd.Start(); err != nil {
+		return ""
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+
+	type toolsUpdatedEvent struct {
+		Type string `json:"type"`
+		Data struct {
+			Model string `json:"model"`
+		} `json:"data"`
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.Contains(line, "session.tools_updated") {
+			continue
+		}
+		var event toolsUpdatedEvent
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			continue
+		}
+		if event.Type == "session.tools_updated" && event.Data.Model != "" {
+			return event.Data.Model
+		}
+	}
+	return ""
+}
 
 // defaultAuditStatelessReport is the report destination used by `vigolium
 // (agent) audit -S` when no -o/--output override is given. Relative to the
@@ -96,4 +152,18 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 	fmt.Printf("%s Report written: %s (%d findings)\n",
 		terminal.SuccessSymbol(), terminal.Cyan(outputArg), len(findings))
 	return nil
+}
+
+// agentNameWithModel returns the agent name combined with the probed LLM model
+// name (e.g. "copilot/claude-sonnet-5"). Falls back to agentName alone when the
+// model probe fails or the agent is not supported.
+func agentNameWithModel(agentName string) string {
+	if agentName == "" {
+		return ""
+	}
+	model := probeAgentModel(agentName)
+	if model == "" {
+		return agentName
+	}
+	return agentName + "/" + model
 }
