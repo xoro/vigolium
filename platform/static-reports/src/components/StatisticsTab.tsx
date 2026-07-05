@@ -26,6 +26,45 @@ interface Props {
 
 const DEFAULT_REPORT_SHARED_URL = "https://console.vigolium.com/shared/audit-reports/";
 
+// Per-token output pricing from GitHub Copilot's published pricing table
+// (docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing).
+// Prices are USD per 1M output tokens. Update after each pricing change.
+// Claude Sonnet 5 is at promotional pricing through 2026-08-31.
+const OUTPUT_PRICE_PER_MTOK: Record<string, number> = {
+  "claude-sonnet-5":       10.00,
+  "claude-sonnet-4.6":     15.00,
+  "claude-sonnet-4.5":     15.00,
+  "claude-sonnet-4":       15.00,
+  "claude-opus-4.5":       25.00,
+  "claude-opus-4.6":       25.00,
+  "claude-opus-4.7":       25.00,
+  "claude-opus-4.8":       25.00,
+  "claude-haiku-4.5":       5.00,
+  "claude-fable-5":        50.00,
+  "gpt-5-mini":             2.00,
+  "gpt-5.3-codex":         14.00,
+  "gpt-5.4":               15.00,
+  "gpt-5.4-mini":           4.50,
+  "gpt-5.4-nano":           1.25,
+  "gpt-5.5":               30.00,
+  "gemini-2.5-pro":        10.00,
+  "gemini-3-flash":         3.00,
+  "gemini-3.1-pro":        12.00,
+  "gemini-3.5-flash":       9.00,
+  "raptor-mini":            2.00,
+  "mai-code-1-flash":       4.50,
+  "kimi-k2.7-code":         4.00,
+};
+
+/** Derive real output cost from output tokens + model price table.
+ *  Returns undefined when the model is not in the table or tokens are missing. */
+function outputCostUSD(agentName: string | undefined, outputTokens: number | undefined): number | undefined {
+  if (!outputTokens || !agentName) return undefined;
+  const model = agentName.includes("/") ? agentName.split("/").pop()! : agentName;
+  const price = OUTPUT_PRICE_PER_MTOK[model.toLowerCase()];
+  return price !== undefined ? (outputTokens * price) / 1_000_000 : undefined;
+}
+
 const SEV_ORDER = ["critical", "high", "medium", "low", "suspect", "info", "n/a"] as const;
 
 function sevCssVar(k: string): string {
@@ -158,7 +197,15 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           { label: "Duration", value: summary.scanDuration === "N/A" ? <span style={{ color: "darkmagenta" }}>N/A</span> : <span style={{ color: "var(--v-info)" }}>{summary.scanDuration}</span> },
           ...(agentName ? [{ label: "Agent/LLM", value: <span style={{ color: "var(--v-accent)" }}>{agentName}</span> }] : []),
           ...(agentName ? [{ label: "Tokens", value: <span style={{ color: "var(--v-info)" }}>in: {agentName.startsWith("copilot") ? "n/a" : (inputTokens ?? 0).toLocaleString()} · out: {(outputTokens ?? 0).toLocaleString()}</span> }] : []),
-          ...(agentName ? [{ label: "Cost", value: <span style={{ color: "var(--v-info)" }}>~${(costUSD ?? 0).toFixed(4)}</span> }] : []),
+          ...(agentName ? [{
+            label: "Cost",
+            value: (() => {
+              const calcOut = outputCostUSD(agentName, outputTokens);
+              const inLabel = agentName.startsWith("copilot") ? "n/a" : (costUSD !== undefined && calcOut !== undefined ? `~$${(costUSD - calcOut).toFixed(4)}` : "n/a");
+              const outLabel = calcOut !== undefined ? `~$${calcOut.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
+              return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · out: {outLabel}</span>;
+            })()
+          }] : []),
           { label: "Status", value: <span style={{ color: "var(--v-success)" }}>● COMPLETED</span> },
         ]}
       />
