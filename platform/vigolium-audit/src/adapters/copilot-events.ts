@@ -8,10 +8,11 @@ import type { AdapterEvent } from "./adapter.js";
 export interface CopilotNormalizeState {
   assistantText: string;
   toolCallCount: number;
+  outputTokens: number; // summed from assistant.message.outputTokens
 }
 
 export function createCopilotNormalizeState(): CopilotNormalizeState {
-  return { assistantText: "", toolCallCount: 0 };
+  return { assistantText: "", toolCallCount: 0, outputTokens: 0 };
 }
 
 /**
@@ -48,8 +49,9 @@ function isLikelyRefusal(state: CopilotNormalizeState): string | null {
  *                                   deltas above; ignored to avoid duplicates)
  *   assistant.message_start      -- message begins (ignored)
  *   assistant.message_delta      -- incremental reply text     -> "textDelta"
- *   assistant.message            -- full final message (redundant with the
- *                                   deltas above; ignored to avoid duplicates)
+ *   assistant.message            -- full final message: text is redundant with
+ *                                   the deltas above and is skipped, but
+ *                                   outputTokens is accumulated into state
  *   tool.execution_start         -- a tool call begins          -> "toolCall"
  *   tool.execution_partial_result -- streaming partial tool output (ignored;
  *                                   vigolium-audit's orchestrator only needs
@@ -75,6 +77,13 @@ export function* normalizeCopilotEvent(
   const data = (e.data && typeof e.data === "object" ? e.data : {}) as Record<string, unknown>;
 
   switch (type) {
+    case "assistant.message": {
+      // Text content is already captured via message_delta; only collect
+      // outputTokens which is not present on the delta events.
+      const n = typeof data.outputTokens === "number" ? data.outputTokens : 0;
+      if (n > 0) state.outputTokens += n;
+      return;
+    }
     case "assistant.message_delta": {
       const text = typeof data.deltaContent === "string" ? data.deltaContent : "";
       if (text) {
@@ -130,7 +139,7 @@ export function* normalizeCopilotEvent(
           ok: true,
           result: "",
           usd: credits,
-          tokens: { input: 0, output: 0 },
+          tokens: { input: 0, output: state.outputTokens },
           durationMs: Date.now() - startedAt,
         };
       } else {
@@ -143,7 +152,7 @@ export function* normalizeCopilotEvent(
           ok: false,
           reason,
           usd: credits,
-          tokens: { input: 0, output: 0 },
+          tokens: { input: 0, output: state.outputTokens },
           durationMs: Date.now() - startedAt,
         };
       }
