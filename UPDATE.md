@@ -171,6 +171,12 @@ open /tmp/report_cwe_0022.html
 
 ## Install on FreeBSD
 
+> **Status — work in progress.** The vigolium Go binary and DAST scanner run
+> natively on FreeBSD today. The GitHub Copilot CLI has no FreeBSD support as
+> of 2026-07-06 (tracked in [github/copilot-cli#3710](https://github.com/github/copilot-cli/issues/3710)).
+> Until GitHub ships a FreeBSD binary, agent modes that require an LLM are
+> limited to claude (`claude-code` in pkg) and codex (`npm install -g @openai/codex`).
+
 FreeBSD supports the vigolium Go binary natively. The `agent audit`
 whitebox mode is **not supported** — bun has no FreeBSD target, so
 the embedded vigolium-audit harness and jsscan binaries cannot be built.
@@ -188,9 +194,12 @@ pkg install python3 py312-pip
 pip3.12 install semgrep
 ```
 
-> **Note — github-copilot-cli:** The FreeBSD pkg build is missing the required
-> native Node.js addon `runtime` and will fail with
-> `"Native addon "runtime" not found for freebsd-x64"`. Do not install it.
+> **Note — github-copilot-cli:** The copilot CLI has no FreeBSD support.
+> The pkg build ships a Linux binary (`Exec format error`) and the npm
+> package (`npm install -g @github/copilot`) is a meta-package with no
+> FreeBSD platform binary. Tracked upstream at
+> [github/copilot-cli#3710](https://github.com/github/copilot-cli/issues/3710).
+> Do not install either version until GitHub adds FreeBSD support.
 
 > **Note — CodeQL:** No FreeBSD binary. Skip it; the CodeQL
 > skill workflows will simply not find the binary and skip gracefully.
