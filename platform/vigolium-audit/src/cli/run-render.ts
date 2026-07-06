@@ -60,6 +60,8 @@ export function emitChainSummary(args: {
   const allComplete = ranCount === modes.length && stepResults.every((s) => s.result.status === "complete");
   const aggIn = stepResults.reduce((s, r) => s + r.result.totalTokens.input, 0);
   const aggOut = stepResults.reduce((s, r) => s + r.result.totalTokens.output, 0);
+  const aggCacheRead  = stepResults.reduce((s, r) => s + (r.result.totalTokens.cacheRead  ?? 0), 0);
+  const aggCacheWrite = stepResults.reduce((s, r) => s + (r.result.totalTokens.cacheWrite ?? 0), 0);
   const aggFindings = stepResults.reduce((s, r) => s + r.result.findings.total, 0);
   if (json) {
     emitJsonEvent({
@@ -69,7 +71,12 @@ export function emitChainSummary(args: {
       stoppedReason,
       allComplete,
       totalUsd: round2(aggUsd),
-      totalTokens: { input: aggIn, output: aggOut },
+      totalTokens: {
+        input: aggIn,
+        output: aggOut,
+        ...(aggCacheRead  > 0 ? { cacheRead:  aggCacheRead  } : {}),
+        ...(aggCacheWrite > 0 ? { cacheWrite: aggCacheWrite } : {}),
+      },
       totalFindings: aggFindings,
       ...(maxCost !== undefined ? { maxCost } : {}),
       steps: stepResults.map((s) => ({

@@ -835,6 +835,8 @@ func (db *DB) CreateSchema(ctx context.Context) error {
 	db.addColumnIfNotExists(ctx, "agentic_scans", "model", "TEXT")
 	db.addColumnIfNotExists(ctx, "agentic_scans", "total_input_tokens", "INTEGER NOT NULL DEFAULT 0")
 	db.addColumnIfNotExists(ctx, "agentic_scans", "total_output_tokens", "INTEGER NOT NULL DEFAULT 0")
+	db.addColumnIfNotExists(ctx, "agentic_scans", "total_cache_read_tokens", "INTEGER NOT NULL DEFAULT 0")
+	db.addColumnIfNotExists(ctx, "agentic_scans", "total_cache_write_tokens", "INTEGER NOT NULL DEFAULT 0")
 	db.addColumnIfNotExists(ctx, "agentic_scans", "estimated_cost_usd", "REAL NOT NULL DEFAULT 0")
 
 	db.addColumnIfNotExists(ctx, "scans", "storage_url", "TEXT")

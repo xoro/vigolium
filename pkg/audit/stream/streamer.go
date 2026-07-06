@@ -40,11 +40,15 @@ type Options struct {
 	RawLog io.Writer
 }
 
-// Tokens mirrors the {input, output} pair audit emits in `result` and
-// `phaseEnd` events.
+// Tokens mirrors the token counts audit emits in `result` and `phaseEnd`
+// events. CacheRead and CacheWrite are optional and populated only by
+// adapters that expose prompt-cache breakdowns (e.g. copilot via
+// events.jsonl, claude-code via usage fields).
 type Tokens struct {
-	Input  int64 `json:"input"`
-	Output int64 `json:"output"`
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cacheRead,omitempty"`
+	CacheWrite int64 `json:"cacheWrite,omitempty"`
 }
 
 // Findings mirrors the {total, bySeverity} aggregate audit emits in
@@ -93,6 +97,8 @@ func (r Result) accumulate(next Result) Result {
 	merged.TotalUSD = r.TotalUSD + next.TotalUSD
 	merged.TotalTokens.Input = r.TotalTokens.Input + next.TotalTokens.Input
 	merged.TotalTokens.Output = r.TotalTokens.Output + next.TotalTokens.Output
+	merged.TotalTokens.CacheRead = r.TotalTokens.CacheRead + next.TotalTokens.CacheRead
+	merged.TotalTokens.CacheWrite = r.TotalTokens.CacheWrite + next.TotalTokens.CacheWrite
 	merged.Findings = next.Findings
 	if r.Findings.Total > merged.Findings.Total {
 		merged.Findings = r.Findings

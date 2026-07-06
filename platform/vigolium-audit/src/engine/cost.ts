@@ -18,6 +18,8 @@ export class CostManager {
   private _usd = 0;
   private _in = 0;
   private _out = 0;
+  private _cacheRead = 0;
+  private _cacheWrite = 0;
   private warnedAtUsd = 0;
   private readonly abort = new AbortController();
   private static readonly THRESHOLDS = [0.5, 0.75, 0.9, 1.0];
@@ -30,8 +32,13 @@ export class CostManager {
   get usd(): number {
     return this._usd;
   }
-  get tokens(): { input: number; output: number } {
-    return { input: this._in, output: this._out };
+  get tokens(): { input: number; output: number; cacheRead?: number; cacheWrite?: number } {
+    return {
+      input: this._in,
+      output: this._out,
+      ...(this._cacheRead  > 0 ? { cacheRead:  this._cacheRead  } : {}),
+      ...(this._cacheWrite > 0 ? { cacheWrite: this._cacheWrite } : {}),
+    };
   }
   /** Abort signal that fires when the cap is reached. Idempotent. */
   get signal(): AbortSignal {
@@ -47,14 +54,16 @@ export class CostManager {
    * attempt's checkpoint into the total during resume prep, which must not
    * re-emit warnings or trip the cap (it reflects spend already reported).
    */
-  addSilently(usd: number, tokens: { input: number; output: number }): void {
+  addSilently(usd: number, tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number }): void {
     this._usd += usd;
     this._in += tokens.input;
     this._out += tokens.output;
+    if (tokens.cacheRead  !== undefined) this._cacheRead  += tokens.cacheRead;
+    if (tokens.cacheWrite !== undefined) this._cacheWrite += tokens.cacheWrite;
   }
 
   /** Add a completed phase's cost/tokens, then evaluate warnings + the cap. */
-  record(auditId: string, usd: number, tokens: { input: number; output: number }): void {
+  record(auditId: string, usd: number, tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number }): void {
     this.addSilently(usd, tokens);
     if (this.maxCost === undefined) return;
     const cap = this.maxCost;

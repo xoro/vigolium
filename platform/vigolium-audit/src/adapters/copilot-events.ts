@@ -1,3 +1,5 @@
+import { readFile } from "fs/promises";
+import { join } from "path";
 import type { AdapterEvent } from "./adapter.js";
 
 /**
@@ -9,10 +11,19 @@ export interface CopilotNormalizeState {
   assistantText: string;
   toolCallCount: number;
   outputTokens: number; // summed from assistant.message.outputTokens
+  /** sessionId from the result event — used to read events.jsonl after process exit. */
+  sessionId: string | null;
+  /** Pending finish payload built in the result event; emitted by buildCopilotFinish(). */
+  pendingFinish: {
+    ok: boolean;
+    credits: number;
+    reason?: string;
+    startedAt: number;
+  } | null;
 }
 
 export function createCopilotNormalizeState(): CopilotNormalizeState {
-  return { assistantText: "", toolCallCount: 0, outputTokens: 0 };
+  return { assistantText: "", toolCallCount: 0, outputTokens: 0, sessionId: null, pendingFinish: null };
 }
 
 /**
@@ -130,6 +141,10 @@ export function* normalizeCopilotEvent(
           : typeof usage.premiumRequests === "number"
             ? usage.premiumRequests // $1/request reference rate for legacy billing
             : 0;
+      // Capture the session ID so buildCopilotFinish() can read events.jsonl
+      // after the process exits to get the full token breakdown.
+      const sid = typeof e.sessionId === "string" ? e.sessionId : null;
+      state.sessionId = sid;
       // Copilot exits 0 even when it flatly refuses the request in plain
       // text (no tool calls, just an apology) -- exit code alone can't tell
       // "refused" apart from "actually finished". Downgrade that case to a
@@ -137,31 +152,115 @@ export function* normalizeCopilotEvent(
       // completed phase.
       const refusalText = exitCode === 0 ? isLikelyRefusal(state) : null;
       if (exitCode === 0 && refusalText === null) {
-        yield {
-          kind: "finish",
-          ok: true,
-          result: "",
-          usd: credits,
-          tokens: { input: 0, output: state.outputTokens },
-          durationMs: Date.now() - startedAt,
-        };
+        state.pendingFinish = { ok: true, credits, startedAt };
       } else {
         const reason =
           refusalText !== null
             ? `Copilot refused the request: "${refusalText.slice(0, 200)}"`
             : `copilot CLI exited ${exitCode}`;
-        yield {
-          kind: "finish",
-          ok: false,
-          reason,
-          usd: credits,
-          tokens: { input: 0, output: state.outputTokens },
-          durationMs: Date.now() - startedAt,
-        };
+        state.pendingFinish = { ok: false, credits, reason, startedAt };
       }
+      // Do NOT yield finish here — buildCopilotFinish() will emit it after
+      // reading events.jsonl for the full token breakdown.
       return;
     }
     default:
       return;
+  }
+}
+
+/**
+ * Build and return the finish AdapterEvent after the copilot process has
+ * exited. Reads `~/.copilot/session-state/<sessionId>/events.jsonl` to
+ * extract the full token breakdown (input, cacheRead, cacheWrite, output)
+ * from the `session.shutdown` event written during normal copilot shutdown.
+ *
+ * Falls back to state.outputTokens (already accumulated from
+ * assistant.message events) if events.jsonl is absent or unparseable.
+ */
+export async function buildCopilotFinish(
+  state: CopilotNormalizeState,
+): Promise<AdapterEvent | null> {
+  if (!state.pendingFinish) return null;
+  const { ok, credits, reason, startedAt } = state.pendingFinish;
+
+  // Attempt to read the full token breakdown from events.jsonl.
+  let inputTokens = 0;
+  let cacheReadTokens: number | undefined;
+  let cacheWriteTokens: number | undefined;
+  let outputTokens = state.outputTokens; // fallback: already accumulated
+
+  if (state.sessionId) {
+    try {
+      const copilotHome = process.env.COPILOT_HOME
+        ?? join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".copilot");
+      const eventsPath = join(copilotHome, "session-state", state.sessionId, "events.jsonl");
+      const raw = await readFile(eventsPath, "utf8");
+      for (const line of raw.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const ev = JSON.parse(trimmed) as Record<string, unknown>;
+          if (ev.type !== "session.shutdown") continue;
+          const d = (ev.data && typeof ev.data === "object" ? ev.data : {}) as Record<string, unknown>;
+          // Prefer per-model metrics when available; fall back to tokenDetails.
+          const mm = d.modelMetrics as Record<string, unknown> | undefined;
+          if (mm) {
+            // Sum across all models (usually just one per run).
+            for (const model of Object.values(mm)) {
+              const mu = (model as Record<string, unknown>).usage as Record<string, unknown> | undefined;
+              if (!mu) continue;
+              inputTokens      += (typeof mu.inputTokens      === "number" ? mu.inputTokens      : 0)
+                                - (typeof mu.cacheReadTokens  === "number" ? mu.cacheReadTokens  : 0)
+                                - (typeof mu.cacheWriteTokens === "number" ? mu.cacheWriteTokens : 0);
+              cacheReadTokens   = (cacheReadTokens  ?? 0) + (typeof mu.cacheReadTokens  === "number" ? mu.cacheReadTokens  : 0);
+              cacheWriteTokens  = (cacheWriteTokens ?? 0) + (typeof mu.cacheWriteTokens === "number" ? mu.cacheWriteTokens : 0);
+              outputTokens      = (typeof mu.outputTokens     === "number" ? mu.outputTokens     : outputTokens);
+            }
+          } else {
+            // tokenDetails fallback
+            const td = d.tokenDetails as Record<string, Record<string, unknown>> | undefined;
+            if (td) {
+              inputTokens      = (td.input?.tokenCount      as number | undefined) ?? 0;
+              cacheReadTokens  = (td.cache_read?.tokenCount  as number | undefined) ?? 0;
+              cacheWriteTokens = (td.cache_write?.tokenCount as number | undefined) ?? 0;
+              outputTokens     = (td.output?.tokenCount      as number | undefined) ?? outputTokens;
+            }
+          }
+          break; // found the shutdown event
+        } catch {
+          // malformed line — skip
+        }
+      }
+    } catch {
+      // events.jsonl absent or unreadable — use accumulated output tokens
+    }
+  }
+
+  const tokens = {
+    input: inputTokens,
+    output: outputTokens,
+    ...(cacheReadTokens  !== undefined ? { cacheRead:  cacheReadTokens  } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWrite: cacheWriteTokens } : {}),
+  };
+
+  if (ok) {
+    return {
+      kind: "finish",
+      ok: true,
+      result: "",
+      usd: credits,
+      tokens,
+      durationMs: Date.now() - startedAt,
+    };
+  } else {
+    return {
+      kind: "finish",
+      ok: false,
+      reason: reason ?? "copilot run failed",
+      usd: credits,
+      tokens,
+      durationMs: Date.now() - startedAt,
+    };
   }
 }

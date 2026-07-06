@@ -143,7 +143,7 @@ export interface OrchestratorResult {
   auditId: string;
   status: AuditRecord["status"];
   totalUsd: number;
-  totalTokens: { input: number; output: number };
+  totalTokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
   findings: { total: number; bySeverity: Record<string, number> };
   failedPhases: string[];
   skippedPhases: string[];

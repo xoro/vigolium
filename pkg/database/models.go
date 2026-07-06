@@ -418,6 +418,8 @@ type AgenticScan struct {
 	TokenUsage            map[string]interface{} `bun:"token_usage,type:jsonb,nullzero" json:"token_usage,omitempty"` // input/output token counts per phase
 	TotalInputTokens      int64                  `bun:"total_input_tokens,default:0" json:"total_input_tokens"`
 	TotalOutputTokens     int64                  `bun:"total_output_tokens,default:0" json:"total_output_tokens"`
+	TotalCacheReadTokens  int64                  `bun:"total_cache_read_tokens,default:0" json:"total_cache_read_tokens"`
+	TotalCacheWriteTokens int64                  `bun:"total_cache_write_tokens,default:0" json:"total_cache_write_tokens"`
 	EstimatedCostUSD      float64                `bun:"estimated_cost_usd,default:0" json:"estimated_cost_usd"`
 	RetryCount            int                    `bun:"retry_count,default:0" json:"retry_count"`
 	ParentAgenticScanUUID string                 `bun:"parent_run_uuid,nullzero" json:"parent_agentic_scan_uuid,omitempty"` // for swarm sub-runs

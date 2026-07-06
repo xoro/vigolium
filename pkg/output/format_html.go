@@ -18,34 +18,38 @@ import (
 
 // HTMLReportMeta carries metadata for the HTML report generation.
 type HTMLReportMeta struct {
-	Title           string
-	Version         string
-	ScanDuration    string
-	ScanTarget      string
-	GeneratedAt     string
-	ReportSharedURL string
-	AgentName       string  // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
-	Skills          string  // comma-separated list of skills loaded for this run (empty = none)
-	InputTokens     int64   // total LLM input tokens consumed by the scan
-	OutputTokens    int64   // total LLM output tokens consumed by the scan
-	CostUSD         float64 // estimated cost in USD
+	Title            string
+	Version          string
+	ScanDuration     string
+	ScanTarget       string
+	GeneratedAt      string
+	ReportSharedURL  string
+	AgentName        string  // LLM/agent used for the scan (e.g. "copilot", "claude", "codex")
+	Skills           string  // comma-separated list of skills loaded for this run (empty = none)
+	InputTokens      int64   // total LLM input tokens consumed by the scan
+	OutputTokens     int64   // total LLM output tokens consumed by the scan
+	CacheReadTokens  int64   // prompt-cache read tokens (0 = not available)
+	CacheWriteTokens int64   // prompt-cache write tokens (0 = not available)
+	CostUSD          float64 // estimated cost in USD
 }
 
 // HTMLReportData is the template data passed to template.html.
 type HTMLReportData struct {
-	Title           string
-	GeneratedAt     string
-	ScanDuration    string
-	ScanTarget      string
-	VigoliumVersion string
-	ReportSharedURL string
-	AgentName       string
-	Skills          string
-	InputTokens     int64
-	OutputTokens    int64
-	CostUSD         float64
-	DataExpected    string
-	ResultsJSON     template.JS
+	Title            string
+	GeneratedAt      string
+	ScanDuration     string
+	ScanTarget       string
+	VigoliumVersion  string
+	ReportSharedURL  string
+	AgentName        string
+	Skills           string
+	InputTokens      int64
+	OutputTokens     int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUSD          float64
+	DataExpected     string
+	ResultsJSON      template.JS
 }
 
 // resolveReportSharedURL returns meta.ReportSharedURL when set, falling back to
@@ -113,6 +117,8 @@ func GenerateHTMLReport(items []any, outputPath string, meta HTMLReportMeta) err
 	before = strings.Replace(before, "{{.Skills}}", meta.Skills, 1)
 	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
 	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
+	before = strings.Replace(before, "{{.CacheReadTokens}}", strconv.FormatInt(meta.CacheReadTokens, 10), 1)
+	before = strings.Replace(before, "{{.CacheWriteTokens}}", strconv.FormatInt(meta.CacheWriteTokens, 10), 1)
 	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	// Signal to the viewer that real data WAS generated. If the data array below
@@ -194,6 +200,8 @@ func GenerateHTMLReportStreaming(produce ReportItemProducer, outputPath string, 
 	before = strings.Replace(before, "{{.Skills}}", meta.Skills, 1)
 	before = strings.Replace(before, "{{.InputTokens}}", strconv.FormatInt(meta.InputTokens, 10), 1)
 	before = strings.Replace(before, "{{.OutputTokens}}", strconv.FormatInt(meta.OutputTokens, 10), 1)
+	before = strings.Replace(before, "{{.CacheReadTokens}}", strconv.FormatInt(meta.CacheReadTokens, 10), 1)
+	before = strings.Replace(before, "{{.CacheWriteTokens}}", strconv.FormatInt(meta.CacheWriteTokens, 10), 1)
 	before = strings.Replace(before, "{{.CostUSD}}", strconv.FormatFloat(meta.CostUSD, 'f', 4, 64), 1)
 	before = strings.Replace(before, "{{.ReportSharedURL}}", resolveReportSharedURL(meta), 1)
 	before = strings.ReplaceAll(before, "{{.DataExpected}}", "true")
@@ -256,19 +264,21 @@ func generateHTMLReportLegacy(items []any, outputPath string, meta HTMLReportMet
 	}
 
 	if err := tmpl.Execute(f, HTMLReportData{
-		Title:           title,
-		GeneratedAt:     generatedAt,
-		ScanDuration:    meta.ScanDuration,
-		ScanTarget:      meta.ScanTarget,
-		VigoliumVersion: meta.Version,
-		AgentName:       meta.AgentName,
-		Skills:          meta.Skills,
-		InputTokens:     meta.InputTokens,
-		OutputTokens:    meta.OutputTokens,
-		CostUSD:         meta.CostUSD,
-		ReportSharedURL: resolveReportSharedURL(meta),
-		DataExpected:    "true",
-		ResultsJSON:     template.JS(rowsJSON),
+		Title:            title,
+		GeneratedAt:      generatedAt,
+		ScanDuration:     meta.ScanDuration,
+		ScanTarget:       meta.ScanTarget,
+		VigoliumVersion:  meta.Version,
+		AgentName:        meta.AgentName,
+		Skills:           meta.Skills,
+		InputTokens:      meta.InputTokens,
+		OutputTokens:     meta.OutputTokens,
+		CacheReadTokens:  meta.CacheReadTokens,
+		CacheWriteTokens: meta.CacheWriteTokens,
+		CostUSD:          meta.CostUSD,
+		ReportSharedURL:  resolveReportSharedURL(meta),
+		DataExpected:     "true",
+		ResultsJSON:      template.JS(rowsJSON),
 	}); err != nil {
 		return err
 	}

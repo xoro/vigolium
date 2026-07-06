@@ -1,6 +1,6 @@
 import type { Adapter, AdapterEvent, AdapterRunInput } from "./adapter.js";
 import { isTransientError } from "./claude-events.js";
-import { createCopilotNormalizeState, normalizeCopilotEvent } from "./copilot-events.js";
+import { createCopilotNormalizeState, normalizeCopilotEvent, buildCopilotFinish } from "./copilot-events.js";
 import { spawnAndStream } from "./cli-process.js";
 
 export interface CopilotCliAdapterOptions {
@@ -106,5 +106,10 @@ export class CopilotCliAdapter implements Adapter {
         }
       }
     }
+    // Emit the finish event after the process exits so buildCopilotFinish()
+    // can read ~/.copilot/session-state/<sessionId>/events.jsonl for the
+    // full token breakdown (input, cacheRead, cacheWrite, output).
+    const finish = await buildCopilotFinish(state);
+    if (finish) yield finish;
   }
 }

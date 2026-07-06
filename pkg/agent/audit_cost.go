@@ -21,13 +21,15 @@ import (
 // each harness can render its own details without the CLI having to
 // branch on harness type.
 type ScanCost struct {
-	Backend      string                 // "audit" | "pi"
-	Model        string                 // model id reported by the harness
-	InputTokens  int64                  // total input tokens across the run
-	OutputTokens int64                  // total output tokens across the run
-	CostUSD      float64                // priced total in USD
-	Note         string                 // CLI-facing one-line annotation
-	Blob         map[string]interface{} // payload for the TokenUsage JSONB column
+	Backend          string                 // "audit" | "pi"
+	Model            string                 // model id reported by the harness
+	InputTokens      int64                  // total input tokens across the run
+	OutputTokens     int64                  // total output tokens across the run
+	CacheReadTokens  int64                  // prompt-cache read tokens (optional)
+	CacheWriteTokens int64                  // prompt-cache write tokens (optional)
+	CostUSD          float64                // priced total in USD
+	Note             string                 // CLI-facing one-line annotation
+	Blob             map[string]interface{} // payload for the TokenUsage JSONB column
 }
 
 // IsZero reports whether no usage was recorded. Applied by the CLI and
@@ -76,13 +78,15 @@ func scanCostFromAudit(res stream.Result, agent agenttypes.AuditDriverAgent) Sca
 	}
 	model := "audit-" + string(agent)
 	return ScanCost{
-		Backend:      "audit",
-		Model:        model,
-		InputTokens:  res.TotalTokens.Input,
-		OutputTokens: res.TotalTokens.Output,
-		CostUSD:      res.TotalUSD,
-		Note:         fmt.Sprintf("(agent %s, status %s)", agent, res.Status),
-		Blob:         toJSONMap(res),
+		Backend:          "audit",
+		Model:            model,
+		InputTokens:      res.TotalTokens.Input,
+		OutputTokens:     res.TotalTokens.Output,
+		CacheReadTokens:  res.TotalTokens.CacheRead,
+		CacheWriteTokens: res.TotalTokens.CacheWrite,
+		CostUSD:          res.TotalUSD,
+		Note:             fmt.Sprintf("(agent %s, status %s)", agent, res.Status),
+		Blob:             toJSONMap(res),
 	}
 }
 
@@ -122,6 +126,8 @@ func applyScanCost(run *database.AgenticScan, c ScanCost) {
 	}
 	run.TotalInputTokens = c.InputTokens
 	run.TotalOutputTokens = c.OutputTokens
+	run.TotalCacheReadTokens = c.CacheReadTokens
+	run.TotalCacheWriteTokens = c.CacheWriteTokens
 	run.EstimatedCostUSD = c.CostUSD
 	if c.Blob != nil {
 		run.TokenUsage = c.Blob

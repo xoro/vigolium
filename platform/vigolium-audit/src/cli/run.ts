@@ -572,7 +572,7 @@ async function runHeadless(args: {
     console.log(`${statusArrow("Model")} Model:     ${modelLabel}`);
   }
 
-  let auditContext: { focus?: string; expectedBehaviors?: string };
+  let auditContext: { focus?: string; expectedBehaviors?: string; skills?: string };
   try {
     auditContext = await resolveAuditContext({ targetDir, opts, json });
   } catch (err) {

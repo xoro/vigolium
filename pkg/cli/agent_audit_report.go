@@ -149,18 +149,22 @@ func emitAuditStatelessReport(ctx context.Context, db *database.DB, projectUUID,
 	// project_uuid gives the scan-wide total. Errors are silently ignored;
 	// the report is still generated without token data.
 	type tokenSums struct {
-		TotalInput  int64   `bun:"total_input"`
-		TotalOutput int64   `bun:"total_output"`
-		TotalCost   float64 `bun:"total_cost"`
+		TotalInput      int64   `bun:"total_input"`
+		TotalOutput     int64   `bun:"total_output"`
+		TotalCacheRead  int64   `bun:"total_cache_read"`
+		TotalCacheWrite int64   `bun:"total_cache_write"`
+		TotalCost       float64 `bun:"total_cost"`
 	}
 	var sums tokenSums
 	if scanErr := db.NewSelect().
 		TableExpr("agentic_scans").
-		ColumnExpr("COALESCE(SUM(total_input_tokens), 0) AS total_input, COALESCE(SUM(total_output_tokens), 0) AS total_output, COALESCE(SUM(estimated_cost_usd), 0) AS total_cost").
+		ColumnExpr("COALESCE(SUM(total_input_tokens), 0) AS total_input, COALESCE(SUM(total_output_tokens), 0) AS total_output, COALESCE(SUM(total_cache_read_tokens), 0) AS total_cache_read, COALESCE(SUM(total_cache_write_tokens), 0) AS total_cache_write, COALESCE(SUM(estimated_cost_usd), 0) AS total_cost").
 		Where("project_uuid = ?", projectUUID).
 		Scan(ctx, &sums); scanErr == nil {
 		meta.InputTokens = sums.TotalInput
 		meta.OutputTokens = sums.TotalOutput
+		meta.CacheReadTokens = sums.TotalCacheRead
+		meta.CacheWriteTokens = sums.TotalCacheWrite
 		meta.CostUSD = sums.TotalCost
 	}
 

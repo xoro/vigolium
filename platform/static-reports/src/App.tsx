@@ -25,6 +25,8 @@ declare global {
       skills?: string;
       inputTokens?: number;
       outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
       costUSD?: number;
       reportSharedURL?: string;
       results?: unknown[];
@@ -67,6 +69,8 @@ function loadInitialData(): {
       skills: injected.skills,
       inputTokens: injected.inputTokens,
       outputTokens: injected.outputTokens,
+      cacheReadTokens: injected.cacheReadTokens,
+      cacheWriteTokens: injected.cacheWriteTokens,
       costUSD: injected.costUSD,
       reportSharedURL: injected.reportSharedURL,
     };
@@ -187,7 +191,7 @@ export default function App() {
       <main className={`wrap${activeTab === "findings" || activeTab === "traffic" ? " wrap--full" : ""}`}>
         <div key={activeTab} className="tab-content">
           {activeTab === "statistics" && (
-            <StatisticsTab data={data} scanDuration={initial.scanDuration} generatedAt={initial.generatedAt} reportTitle={initial.title} scanTarget={initial.scanTarget} agentName={initial.agentName} skills={initial.skills} inputTokens={initial.inputTokens} outputTokens={initial.outputTokens} costUSD={initial.costUSD} reportSharedURL={initial.reportSharedURL} />
+            <StatisticsTab data={data} scanDuration={initial.scanDuration} generatedAt={initial.generatedAt} reportTitle={initial.title} scanTarget={initial.scanTarget} agentName={initial.agentName} skills={initial.skills} inputTokens={initial.inputTokens} outputTokens={initial.outputTokens} cacheReadTokens={initial.cacheReadTokens} cacheWriteTokens={initial.cacheWriteTokens} costUSD={initial.costUSD} reportSharedURL={initial.reportSharedURL} />
           )}
 
           {activeTab === "traffic" && (

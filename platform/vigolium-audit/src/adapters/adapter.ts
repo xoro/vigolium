@@ -31,7 +31,7 @@ export type AdapterEvent =
       ok: true;
       result: string;
       usd: number;
-      tokens: { input: number; output: number };
+      tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
       durationMs: number;
     }
   | {
@@ -39,7 +39,7 @@ export type AdapterEvent =
       ok: false;
       reason: string;
       usd: number;
-      tokens: { input: number; output: number };
+      tokens: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
       durationMs: number;
     }
   | { kind: "error"; cause: Error; transient?: boolean }

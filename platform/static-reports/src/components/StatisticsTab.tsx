@@ -21,6 +21,8 @@ interface Props {
   skills?: string;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   costUSD?: number;
   reportSharedURL?: string;
 }
@@ -87,13 +89,17 @@ function computeCosts(
   agentName: string | undefined,
   inputTokens: number | undefined,
   outputTokens: number | undefined,
+  tokenType: "input" | "cachedInput" | "cacheWrite" = "input",
 ): { inputCost: number | undefined; outputCost: number | undefined } {
   if (!agentName) return { inputCost: undefined, outputCost: undefined };
   const model = agentName.includes("/") ? agentName.split("/").pop()! : agentName;
   const pricing = MODEL_PRICING[model.toLowerCase()];
   if (!pricing) return { inputCost: undefined, outputCost: undefined };
+  const rate = tokenType === "cachedInput" ? pricing.cachedInput
+             : tokenType === "cacheWrite"  ? pricing.cacheWrite
+             : pricing.input;
   return {
-    inputCost:  inputTokens  ? (inputTokens  * pricing.input)  / 1_000_000 : undefined,
+    inputCost:  inputTokens  ? (inputTokens  * rate)          / 1_000_000 : undefined,
     outputCost: outputTokens ? (outputTokens * pricing.output) / 1_000_000 : undefined,
   };
 }
@@ -185,7 +191,7 @@ function formatDate(value?: string): string {
   });
 }
 
-export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, skills, inputTokens, outputTokens, costUSD, reportSharedURL }: Props) {
+export default function StatisticsTab({ data, scanDuration, generatedAt, reportTitle, scanTarget, agentName, skills, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, costUSD, reportSharedURL }: Props) {
   const summary = useMemo(() => {
     const s = computeSummary(data);
     if (scanDuration) s.scanDuration = scanDuration;
@@ -233,13 +239,13 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
           ...(agentName ? [{
             label: "Tokens",
             value: (() => {
-              // copilot-cli: only output tokens are available today.
-              // cached and write will auto-populate when the data pipeline provides them
-              // (extend HTMLReportMeta + DB query with cachedInputTokens / cacheWriteTokens).
+              // All four token columns are now wired for all agents.
+              // cacheReadTokens / cacheWriteTokens are 0 when not available
+              // (agents that don't expose cache breakdown), shown as "n/a".
               const isCopilot = agentName.startsWith("copilot");
-              const inTok  = isCopilot ? "n/a" : (inputTokens  ?? 0).toLocaleString();
-              const cacTok = "n/a"; // cached input tokens — not yet exposed by any agent
-              const wrTok  = "n/a"; // cache write tokens  — not yet exposed by any agent
+              const inTok  = isCopilot && !inputTokens ? "n/a" : (inputTokens  ?? 0).toLocaleString();
+              const cacTok = cacheReadTokens  ? cacheReadTokens.toLocaleString()  : "n/a";
+              const wrTok  = cacheWriteTokens ? cacheWriteTokens.toLocaleString() : "n/a";
               const outTok = (outputTokens ?? 0).toLocaleString();
               return <span style={{ color: "var(--v-info)" }}>in: {inTok} · cached: {cacTok} · write: {wrTok} · out: {outTok}</span>;
             })()
@@ -248,16 +254,25 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
             label: "Cost",
             value: (() => {
               const { inputCost, outputCost } = computeCosts(agentName, inputTokens, outputTokens);
+              const { inputCost: cachedCost }  = computeCosts(agentName, cacheReadTokens,  undefined, "cachedInput");
+              const { inputCost: writeCost }   = computeCosts(agentName, cacheWriteTokens, undefined, "cacheWrite");
               const isCopilot = agentName.startsWith("copilot");
-              const inLabel  = isCopilot || inputCost  === undefined ? "n/a" : `~$${inputCost.toFixed(4)}`;
-              const cacLabel = "n/a"; // cached input cost — no cached token data yet
-              const wrLabel  = "n/a"; // cache write cost  — no cache write token data yet
-              const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
-              // Sum all known cost components; grows automatically as more become available
-              const knownCosts = [inputCost, outputCost].filter((c): c is number => c !== undefined);
-              const totalLabel = knownCosts.length > 0
-                ? `~$${knownCosts.reduce((a, b) => a + b, 0).toFixed(4)}`
-                : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
+              const inLabel  = (isCopilot && !inputTokens) || inputCost  === undefined ? "n/a" : `~$${inputCost.toFixed(4)}`;
+              const cacLabel = cachedCost !== undefined ? `~$${cachedCost.toFixed(4)}` : "n/a";
+              const wrLabel  = writeCost  !== undefined ? `~$${writeCost.toFixed(4)}`  : "n/a";
+              const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : "n/a";
+              // Total: prefer the actual billed amount from the run (costUSD) over the
+              // token-based computed sum. For premiumRequests billing (GHE/legacy) costUSD
+              // reflects real charges; token-based sum is informational only. For
+              // aiCredits billing (github.com) costUSD is already accurate per-token.
+              const computedTotal = [inputCost, cachedCost, writeCost, outputCost]
+                .filter((c): c is number => c !== undefined)
+                .reduce((a, b) => a + b, 0);
+              const totalLabel = costUSD !== undefined
+                ? `~$${costUSD.toFixed(4)}`
+                : computedTotal > 0
+                  ? `~$${computedTotal.toFixed(4)}`
+                  : "n/a";
               return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · cached: {cacLabel} · write: {wrLabel} · out: {outLabel} · <strong>total: {totalLabel}</strong></span>;
             })()
           }] : []),
