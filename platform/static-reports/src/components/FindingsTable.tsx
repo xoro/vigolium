@@ -312,7 +312,7 @@ function FindingDetail({ finding }: { finding: Finding }) {
   const confidenceColors = getConfidenceColors(theme);
   const sevColor = severityColors[finding.severity] || "#888";
   const confColor = confidenceColors[finding.confidence] || "#888";
-  const [descTab, setDescTab] = useState<"rendered" | "raw">("raw");
+  const [descTab, setDescTab] = useState<"rendered" | "raw">("rendered");
 
   const foundDate = (() => {
     try {
