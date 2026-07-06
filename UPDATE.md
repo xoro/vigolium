@@ -2,14 +2,15 @@
 
 This is the primary maintenance reference for this fork of vigolium. It covers:
 
-- [Fresh install on a new macOS machine](#fresh-install-on-macos)
+- [Install on macOS](#install-on-macos)
+- [Install on FreeBSD](#install-on-freebsd)
 - [Updating the vendored vigolium-audit binary](#updating-vigolium-audit-vendored-copy)
 - [Keeping embedded skills up to date](#embedded-skills--check-for-upstream-updates)
 - [Ongoing checks after each Copilot CLI upgrade](#token-availability-gap--check-on-each-update)
 
 ---
 
-## Fresh Install on macOS
+## Install on macOS
 
 ### 1. Homebrew packages
 
@@ -168,6 +169,101 @@ open /tmp/report_cwe_0022.html
 
 ---
 
+## Install on FreeBSD
+
+FreeBSD supports the vigolium Go binary natively. The `agent audit`
+whitebox mode is **not supported** — bun has no FreeBSD target, so
+the embedded vigolium-audit harness and jsscan binaries cannot be built.
+Everything else (DAST scan, `agent autopilot`, `agent swarm`, `olium`,
+`server`, `ingest`) works fine.
+
+### 1. System packages
+
+```sh
+# As root or with doas/sudo
+pkg install go git ripgrep trufflehog gitleaks jq node npm github-copilot-cli claude-code
+
+# semgrep — not in pkg tree, install via pip
+pkg install python3 py312-pip
+pip install semgrep
+```
+
+> **Note — CodeQL:** No FreeBSD binary. Skip it; the CodeQL
+> skill workflows will simply not find the binary and skip gracefully.
+
+### 2. Add Go's bin directory to PATH
+
+```sh
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.profile
+. ~/.profile
+```
+
+### 3. Clone and build (jsscan_stub)
+
+bun is not available on FreeBSD, so the standard `make build` (which
+compiles jsscan and vigolium-audit via bun) cannot run natively. Build
+with the `jsscan_stub` tag, which swaps the embedded jsscan binary for
+an empty stub. The JS analysis engine is unused for DAST scanning and
+agent modes; only the whitebox audit path needs it.
+
+```sh
+mkdir ~/Development
+cd ~/Development
+git clone https://github.com/xoro/vigolium.git
+cd vigolium
+
+# Download Go modules (skip make deps — that requires bun for jsscan)
+go mod download
+
+# Build with jsscan stub (no bun required)
+CGO_ENABLED=0 go build -tags jsscan_stub \
+  -ldflags "-s -w" \
+  -o bin/vigolium ./cmd/vigolium
+
+# Install to GOPATH/bin
+cp bin/vigolium "$(go env GOPATH)/bin/vigolium"
+```
+
+### 4. Global npm packages
+
+```sh
+# @openai/codex — codex provider + audit codex platform (--agent codex)
+npm install --global @openai/codex
+```
+
+### 5. Authenticate agents
+
+```sh
+# Copilot — authenticate against shs.ghe.com (our GHE instance)
+copilot login --host https://shs.ghe.com
+
+# Claude — authentication is handled interactively by claude on first use
+claude --help   # triggers first-run auth if not already done
+```
+
+### 6. Verify
+
+```sh
+vigolium version
+vigolium doctor
+```
+
+### Feature matrix on FreeBSD
+
+| Feature | Status |
+| ------- | ------ |
+| `vigolium scan` (DAST) | OK — requires semgrep/trufflehog/gitleaks for full coverage |
+| `vigolium server` | OK |
+| `vigolium agent autopilot/swarm` (olium) | OK — requires copilot/claude/codex CLI on PATH |
+| `--agent copilot` (audit + olium) | OK — `github-copilot-cli` in pkg |
+| `--agent claude` (audit + olium) | OK — `claude-code` in pkg |
+| `--agent codex` (audit + olium) | OK — `npm install -g @openai/codex` |
+| `vigolium agent audit` (whitebox) | Not supported — bun unavailable |
+| Spider / Chromium | Not supported — no Chrome in deps-chrome for FreeBSD |
+| jsscan JS analysis | Stubbed out — no effect on DAST or agent modes |
+
+---
+
 # Updating vigolium-audit (Vendored Copy)
 
 This document describes how to pull new changes from the upstream
@@ -217,7 +313,7 @@ A sibling checkout of upstream `vigolium-audit`, matching the
 `AUDIT_UPSTREAM` default (`../vigolium-audit` relative to this repo):
 
 ```sh
-cd /Users/palltimo/Development
+cd "${HOME}"/Development
 git clone git@github.com:vigolium/vigolium-audit.git
 # or your own fork, e.g. git@github.com:xoro/vigolium-audit.git
 cd vigolium-audit && git checkout main && git pull
@@ -320,11 +416,11 @@ should need no change for the same reason as `dry-run.ts` above.
 ### 5. Rebuild
 
 ```sh
-cd /Users/palltimo/Development/vigolium/platform/vigolium-audit
+cd "${HOME}"/Development/vigolium/platform/vigolium-audit
 bun install
 bun run typecheck
 bun test
-cd /Users/palltimo/Development/vigolium
+cd "${HOME}"/Development/vigolium
 make update-audit   # rebuilds + re-stages the embedded binary
 make build
 ```
