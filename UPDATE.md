@@ -181,12 +181,16 @@ Everything else (DAST scan, `agent autopilot`, `agent swarm`, `olium`,
 
 ```sh
 # As root or with doas/sudo
-pkg install go git ripgrep trufflehog gitleaks jq node npm github-copilot-cli claude-code
+pkg install go git ripgrep trufflehog gitleaks jq node npm claude-code
 
 # semgrep — not in pkg tree, install via pip
 pkg install python3 py312-pip
-pip install semgrep
+pip3.12 install semgrep
 ```
+
+> **Note — github-copilot-cli:** The FreeBSD pkg build is missing the required
+> native Node.js addon `runtime` and will fail with
+> `"Native addon "runtime" not found for freebsd-x64"`. Do not install it.
 
 > **Note — CodeQL:** No FreeBSD binary. Skip it; the CodeQL
 > skill workflows will simply not find the binary and skip gracefully.
@@ -194,8 +198,8 @@ pip install semgrep
 ### 2. Add Go's bin directory to PATH
 
 ```sh
-echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> ~/.profile
-. ~/.profile
+echo 'export PATH="$PATH:$(go env GOPATH)/bin"' >> "${HOME}"/.profile
+. "${HOME}"/.profile
 ```
 
 ### 3. Clone and build (jsscan_stub)
@@ -207,8 +211,8 @@ an empty stub. The JS analysis engine is unused for DAST scanning and
 agent modes; only the whitebox audit path needs it.
 
 ```sh
-mkdir ~/Development
-cd ~/Development
+mkdir "${HOME}"/Development
+cd "${HOME}"/Development
 git clone https://github.com/xoro/vigolium.git
 cd vigolium
 
@@ -234,12 +238,13 @@ npm install --global @openai/codex
 ### 5. Authenticate agents
 
 ```sh
-# Copilot — authenticate against shs.ghe.com (our GHE instance)
-copilot login --host https://shs.ghe.com
-
 # Claude — authentication is handled interactively by claude on first use
 claude --help   # triggers first-run auth if not already done
 ```
+
+> **Note — Copilot:** The FreeBSD pkg build of `github-copilot-cli` fails at
+> runtime with `Native addon "runtime" not found for freebsd-x64`. Copilot CLI
+> is not functional on FreeBSD. Use claude or codex instead.
 
 ### 6. Verify
 
@@ -254,9 +259,9 @@ vigolium doctor
 | ------- | ------ |
 | `vigolium scan` (DAST) | OK — requires semgrep/trufflehog/gitleaks for full coverage |
 | `vigolium server` | OK |
-| `vigolium agent autopilot/swarm` (olium) | OK — requires copilot/claude/codex CLI on PATH |
-| `--agent copilot` (audit + olium) | OK — `github-copilot-cli` in pkg |
-| `--agent claude` (audit + olium) | OK — `claude-code` in pkg |
+| `vigolium agent autopilot/swarm` (olium) | OK — requires claude/codex CLI on PATH |
+| `--agent copilot` (audit + olium) | Not supported — native addon missing in FreeBSD pkg build |
+| `--agent claude` (audit + olium) | OK — `claude-code` in pkg (verify with `claude --help`) |
 | `--agent codex` (audit + olium) | OK — `npm install -g @openai/codex` |
 | `vigolium agent audit` (whitebox) | Not supported — bun unavailable |
 | Spider / Chromium | Not supported — no Chrome in deps-chrome for FreeBSD |
