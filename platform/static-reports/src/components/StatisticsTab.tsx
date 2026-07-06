@@ -261,18 +261,14 @@ export default function StatisticsTab({ data, scanDuration, generatedAt, reportT
               const cacLabel = cachedCost !== undefined ? `~$${cachedCost.toFixed(4)}` : "n/a";
               const wrLabel  = writeCost  !== undefined ? `~$${writeCost.toFixed(4)}`  : "n/a";
               const outLabel = outputCost !== undefined ? `~$${outputCost.toFixed(4)}` : "n/a";
-              // Total: prefer the actual billed amount from the run (costUSD) over the
-              // token-based computed sum. For premiumRequests billing (GHE/legacy) costUSD
-              // reflects real charges; token-based sum is informational only. For
-              // aiCredits billing (github.com) costUSD is already accurate per-token.
+              // Total is the sum of all known per-column costs. Falls back to
+              // costUSD only when no token-based pricing is available at all.
               const computedTotal = [inputCost, cachedCost, writeCost, outputCost]
                 .filter((c): c is number => c !== undefined)
                 .reduce((a, b) => a + b, 0);
-              const totalLabel = costUSD !== undefined
-                ? `~$${costUSD.toFixed(4)}`
-                : computedTotal > 0
-                  ? `~$${computedTotal.toFixed(4)}`
-                  : "n/a";
+              const totalLabel = computedTotal > 0
+                ? `~$${computedTotal.toFixed(4)}`
+                : (costUSD !== undefined ? `~$${costUSD.toFixed(4)}` : "n/a");
               return <span style={{ color: "var(--v-info)" }}>in: {inLabel} · cached: {cacLabel} · write: {wrLabel} · out: {outLabel} · <strong>total: {totalLabel}</strong></span>;
             })()
           }] : []),
